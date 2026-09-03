@@ -1,0 +1,34 @@
+# my_rustlings 模型配置（作业要求 R3）
+#
+# 使用方法：把本文件复制为 config.toml 后修改。config.toml 含 API Key，
+# 已被 .gitignore 排除，请勿提交。
+#
+# 两种替代方式：
+#   1. .env 文件（项目根目录）：RUSTLINGS_API_KEY / RUSTLINGS_ENDPOINT /
+#      RUSTLINGS_MODEL —— 环境变量优先级高于本文件；
+#   2. 运行程序后在主菜单按 [c] 进入配置页交互修改（写回 config.toml）。
+
+# OpenAI 兼容 endpoint（以 /v1 结尾；本地模型示例：http://localhost:11434/v1）
+endpoint = "https://api.openai.com/v1"
+
+# API Key（留空则尝试读环境变量 RUSTLINGS_API_KEY）
+api_key = ""
+
+# 模型名
+model = "gpt-4o-mini"
+
+# 上下文长度（tokens；预留字段，后续版本用于上下文管理）
+context_len = 128000
+
+# 思考模式（预留字段，各厂商参数不同，后续版本接入）
+think_mode = false
+
+# 价格：每 1M token 的美元单价（R6 费用换算用）
+[prices]
+input = 0.15
+output = 0.60
+
+# 累计花费预算（USD）：达到后自动拦截后续模型调用（R6）。
+# 删除 [budget] 整段 = 不设预算。
+[budget]
+usd = 5.0

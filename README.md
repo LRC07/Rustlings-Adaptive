@@ -17,8 +17,8 @@ Agent 解释并锚定知识点（细分概念图谱 + rustc 错误码双轨）�
 | 里程碑 | 内容 | 对应硬要求 | 状态 |
 |---|---|---|---|
 | M0 | CLI 骨架 + 8 道种子练习 + IDE 子 crate + rustc --test 跑练习 | — | ✅ 完成 |
-| M1 | 模块拆分 + LLM 接入 + 模型配置 + token 计费 | R1/R3/R6 | ⬜ **下一个** |
-| M2 | 验证器：rustc --json 解析 + 三重校验 + 约束静态检查 | R1 | ⬜ |
+| M1 | 模块拆分 + LLM 接入 + 模型配置 + token 计费 | R1/R3/R6 | ✅ 完成 |
+| M2 | 验证器：rustc --json 解析 + 三重校验 + 约束静态检查 | R1 | ⬜ **下一个** |
 | M3 | 模板库（TOML）+ 概念图谱（concepts.toml）+ 填槽生成 | — | ⬜ |
 | M4 | 对话 REPL + Agent 工具环 + 进度/打断 + 会话历史 | R2/R4/R5 | ⬜ 9.6 展示基线 |
 | M5 | 解答评审门 + 交互式复盘（解释/更优解挑战/对比表/再练决策） | — | ⬜ |
@@ -29,25 +29,75 @@ Agent 解释并锚定知识点（细分概念图谱 + rustc 错误码双轨）�
 关键时间节点：**9.6 公开展示**（设计文档摘要 + 项目链接，需基本功能）、
 9.8 前试用 3 位同学作品、**9.10 课堂展示**（5 分钟演示 + 提问）。
 
-## 构建与运行
+## 编译
+
+要求：Rust 1.85+（edition 2024），本机装有 `rustc`（练习用它编译运行）。
 
 ```bash
-cargo run          # 在项目根目录运行；需要本机装有 rustc（edition 2024）
+cargo build          # 或 cargo build --release
 ```
 
-- 菜单命令：数字选题 / `n` 下一题 / `v` 全部验证 / `h` 帮助 / `q` 退出
+## 配置（R3/R6）
+
+模型调用需要一个 OpenAI 兼容的 endpoint 与 API Key（支持 OpenAI、DeepSeek、
+本地 Ollama / vLLM 等任意兼容服务）。三种配置方式，任选其一：
+
+1. **配置文件（推荐）**：`cp config.example.toml config.toml`，然后编辑
+   `endpoint` / `api_key` / `model`，按需修改价格表 `[prices]` 与预算 `[budget]`；
+2. **环境变量**：在项目根目录建 `.env`，写 `RUSTLINGS_API_KEY=sk-...`
+   （也可用 `RUSTLINGS_ENDPOINT` / `RUSTLINGS_MODEL` 覆盖对应项，
+   优先级高于 config.toml）；
+3. **程序内配置页**：运行后按 `c`，交互修改 endpoint / model / api_key /
+   预算，修改会写回 config.toml。
+
+> 注意：`config.toml` 与 `.env` 含 API Key，已被 `.gitignore` 排除，请勿提交。
+> 预算（R6）：累计花费达到 `[budget].usd` 后，后续模型调用会被自动拦截。
+
+## 运行
+
+```bash
+cargo run            # 必须在项目根目录运行
+```
+
+主菜单：
+
+```
+  <数字> 选题   n 下一题   v 全部验证   a 问模型   u 用量   c 配置   h 帮助   q 退出
+```
+
 - 做题流内：`r` 重跑 / `e` 用 `$EDITOR` 打开（默认 vi）/ `n` 下一题 / `b` 返回
-- 练习在 `exercises/` 下，改完保存后回 CLI 重跑即可
+- `a` 问模型：一问一答（输入问题回车发送），回复后打印本条与累计的
+  token 用量和花费；累计花费达到预算会被拦截
+- `u` 用量：本次会话与历史累计的调用次数 / token / 花费 / 预算余量
+  （明细持久化在 `~/.rustlings_adaptive/usage.json`）
+
+## 演示用例
+
+1. **模型问答与计费（R1/R3/R6）**：`cargo run` → 配置好 key 后按 `a` →
+   输入"用一句话解释什么是所有权"→ 看到回复 + "本条: 输入 N tok /
+   输出 M tok / 花费 $x ｜ 累计 $y"；
+2. **预算中断（R6）**：把 config.toml 的 `[budget].usd` 改成一个比累计
+   花费小的数（或 `c` 配置页改）→ 再按 `a` → 提示"调用被拦截"；
+3. **配置切换（R3）**：按 `c` → 选 `2` 换一个 model（如换成
+   `deepseek-chat`）→ 再按 `a`，新模型立即生效；
+4. **做题流（M0）**：输入 `2` → 按 `e` 编辑练习补全 TODO → `r` 重跑 →
+   全部测试通过后自动标记完成；`n` 跳下一题，`v` 全部验证。
 
 ## 目录结构
 
 ```
-agent/          作业要求与背景（requirements.md 是硬要求 R1-R6 的出处）
-docs/           设计文档（v3 为当前基线，v1/v2 为历史）；选题各版本
-exercises/      练习仓 + IDE-only 子 crate（rust-analyzer 分析用，cargo 不编译）
-src/main.rs     CLI（M1 将拆分为 cli/、exercise/ 等模块）
-templates/      （M3）手写题目模板，TOML 格式
-taxonomy/       （M3）概念图谱 concepts.toml
+agent/                 作业要求与背景（requirements.md 是硬要求 R1-R6 的出处）
+docs/                  设计文档（v3 为当前基线，v1/v2 为历史）；选题各版本
+exercises/             练习仓 + IDE-only 子 crate（rust-analyzer 分析用，cargo 不编译）
+src/main.rs            薄入口
+src/cli/               交互 CLI：菜单、做题流、问模型/用量/配置页
+src/exercise/          练习发现、标题解析、rustc --test 运行器
+src/config/            模型配置加载（config.toml + .env 覆盖，R3）
+src/llm/               OpenAI 兼容 chat 客户端 + usage 解析（R1）
+src/usage/             token/费用统计、预算拦截、JSON 持久化（R6）
+config.example.toml    配置样例（复制为 config.toml 使用；后者已 gitignore）
+templates/             （M3）手写题目模板，TOML 格式
+taxonomy/              （M3）概念图谱 concepts.toml
 ```
 
 `exercises/lib.rs` 用 `#[cfg(rust_analyzer)]` 接线所有练习：rust-analyzer
@@ -56,7 +106,7 @@ taxonomy/       （M3）概念图谱 concepts.toml
 
 ## 换一个 session 继续开发
 
-1. **读本文件的状态表**，确定下一个里程碑（当前：M1）。
+1. **读本文件的状态表**，确定下一个里程碑（当前：M2）。
 2. 读 `docs/设计文档_v3.md`，尤其 §8 的对应里程碑（目标/产出/验收/
    提示要点）与 §8.2 交接纪律。
 3. 硬要求对照：`agent/requirements.md` §三（R1–R6）。
@@ -74,8 +124,3 @@ taxonomy/       （M3）概念图谱 concepts.toml
 | `docs/选题发布版_v2.md` | 已发布到网络学堂的选题帖内容 |
 | `agent/requirements.md` | 作业硬要求（R1–R6）、提交物、评分标准、时间节点 |
 | `agent/quick-start.md` | 课程给的作业流程方法论 |
-
-## 配置（M1 落地后补全）
-
-模型配置将支持 `.env` / `config.toml`：endpoint、api_key、model、
-context_len、think_mode、价格表、token 预算（R3/R6）。

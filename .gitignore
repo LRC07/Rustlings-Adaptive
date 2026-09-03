@@ -1,2 +1,5 @@
 /target
 /exercises/.progress
+# Local-only files that hold the user's API key (R3)
+/config.toml
+/.env

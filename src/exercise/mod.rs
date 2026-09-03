@@ -103,7 +103,7 @@ pub fn compile_and_run(ex: &Exercise) -> bool {
     let depinfo = format!("{tmp}.d");
     let _ = fs::remove_file(&depinfo);
 
-    println!("  Compiling {} ...", ex.path.file_name().unwrap().to_string_lossy());
+    println!("  正在编译 {} ...", ex.path.file_name().unwrap().to_string_lossy());
     let compile = Command::new("rustc")
         .arg("--edition")
         .arg("2024")
@@ -117,7 +117,7 @@ pub fn compile_and_run(ex: &Exercise) -> bool {
 
     match compile {
         Err(e) => {
-            eprintln!("  failed to invoke rustc: {e}");
+            eprintln!("  调用 rustc 失败: {e}");
             return false;
         }
         Ok(out) if !out.status.success() => {
@@ -125,7 +125,7 @@ pub fn compile_and_run(ex: &Exercise) -> bool {
             // Trim the noisy "error: aborting due to ..." tail slightly.
             print_stderr(&stderr);
             println!();
-            println!("  Compilation failed. Fix the errors above and try again.");
+            println!("  编译失败。请修正上方错误后重试。");
             return false;
         }
         Ok(_) => {}
@@ -136,7 +136,7 @@ pub fn compile_and_run(ex: &Exercise) -> bool {
     let _ = fs::remove_file(&depinfo);
     match run {
         Err(e) => {
-            eprintln!("  failed to run test binary: {e}");
+            eprintln!("  运行测试二进制失败: {e}");
             false
         }
         Ok(out) => {
@@ -149,10 +149,10 @@ pub fn compile_and_run(ex: &Exercise) -> bool {
                 eprint!("{stderr}");
             }
             if out.status.success() {
-                println!("  All tests passed.");
+                println!("  全部测试通过。");
                 true
             } else {
-                println!("  Tests failed (exit {:?}).", out.status.code());
+                println!("  测试未通过（退出码 {:?}）。", out.status.code());
                 false
             }
         }
@@ -170,7 +170,7 @@ pub fn open_editor(path: &Path) {
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
     match Command::new(&editor).arg(path).status() {
         Ok(s) if s.success() => {}
-        Ok(s) => println!("  editor exited with {:?}", s.code()),
-        Err(e) => println!("  could not launch '{editor}': {e}"),
+        Ok(s) => println!("  编辑器以 {:?} 退出", s.code()),
+        Err(e) => println!("  无法启动编辑器 '{editor}': {e}"),
     }
 }
