@@ -44,3 +44,11 @@ mod traits3;
 #[cfg(rust_analyzer)]
 #[path = "traits/traits4.rs"]
 mod traits4;
+
+// Generated exercises are wired from `lib_generated.rs` (gitignored —
+// maintained by the generator at runtime, user-local only). Before the
+// first `g` generation this file does not exist yet, which shows up as
+// a cosmetic "unresolved module" hint in rust-analyzer only.
+#[cfg(rust_analyzer)]
+#[path = "lib_generated.rs"]
+mod lib_generated;

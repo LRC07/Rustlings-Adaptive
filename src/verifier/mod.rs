@@ -44,12 +44,14 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
+    #[allow(dead_code)] // part of the signal API used from M4/M5
     pub fn is_error(&self) -> bool {
         self.level == "error"
     }
 }
 
 /// Collect error codes from a diagnostic list, e.g. ["E0308", "E0382"].
+#[allow(dead_code)] // part of the signal API used from M4/M5
 pub fn error_codes(diags: &[Diagnostic]) -> Vec<String> {
     let mut codes: Vec<String> = diags.iter().filter_map(|d| d.code.clone()).collect();
     codes.sort();

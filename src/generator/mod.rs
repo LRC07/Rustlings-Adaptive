@@ -3,7 +3,8 @@
 //! slots (LLM when available, deterministic rotation otherwise), and
 //! gates every candidate through the triple verification plus the
 //! template's own constraints before writing it into `exercises/
-//! generated/` and wiring it into the IDE-only `lib.rs`.
+//! generated/` and wiring it into the IDE-only, gitignored
+//! `exercises/lib_generated.rs`.
 //!
 //! The LLM is optional: with `llm: None` generation is fully offline
 //! (defaults + candidate rotation), which keeps tests cheap and the
@@ -32,7 +33,9 @@ pub struct Paths {
     pub templates_dir: PathBuf,
     pub taxonomy_file: PathBuf,
     pub exercises_dir: PathBuf,
-    pub lib_rs: PathBuf,
+    /// IDE-only wiring file for generated exercises
+    /// (`exercises/lib_generated.rs`, gitignored, user-local).
+    pub wiring_rs: PathBuf,
 }
 
 impl Paths {
@@ -41,13 +44,13 @@ impl Paths {
             templates_dir: root.join("templates"),
             taxonomy_file: root.join("taxonomy").join("concepts.toml"),
             exercises_dir: root.join("exercises"),
-            lib_rs: root.join("exercises").join("lib.rs"),
+            wiring_rs: root.join("exercises").join("lib_generated.rs"),
         }
     }
 }
 
 /// What the user asked for.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Topic {
     /// Concept id (or unique name/suffix) from the taxonomy.
     Concept(String),
@@ -413,7 +416,7 @@ fn extract_json(text: &str) -> Option<&str> {
 }
 
 // ---------------------------------------------------------------------------
-// Output: exercise file + lib.rs wiring
+// Output: exercise file + generated-exercises wiring
 // ---------------------------------------------------------------------------
 
 fn sanitize_module_name(id: &str) -> String {
@@ -459,28 +462,38 @@ fn write_exercise(
         rendered.tests.trim()
     );
     fs::write(&path, content).with_context(|| format!("写入 {} 失败", path.display()))?;
-    wire_lib_rs(&paths.lib_rs, &name, OUT_CATEGORY)
-        .with_context(|| format!("接线 {} 失败", paths.lib_rs.display()))?;
+    wire_lib_rs(&paths.wiring_rs, &name, OUT_CATEGORY)
+        .with_context(|| format!("接线 {} 失败", paths.wiring_rs.display()))?;
     Ok(name)
 }
 
-/// Append an IDE-only module entry for `module` to the exercises
-/// `lib.rs` (idempotent). rust-analyzer then analyzes the generated
-/// exercise; cargo never compiles it (cfg-gated).
-pub fn wire_lib_rs(lib_rs: &Path, module: &str, category: &str) -> Result<()> {
-    let content = fs::read_to_string(lib_rs).unwrap_or_default();
+/// Header written when the wiring file does not exist yet.
+const WIRING_HEADER: &str = "\
+//! Auto-generated exercise wiring — maintained by the generator (M3).
+//! Gitignored: references user-local generated exercises only.
+";
+
+/// Append an IDE-only module entry for `module` to the generated
+/// exercises wiring file (idempotent). rust-analyzer then analyzes the
+/// generated exercise; cargo never compiles it (cfg-gated).
+pub fn wire_lib_rs(wiring_rs: &Path, module: &str, category: &str) -> Result<()> {
+    let mut content = fs::read_to_string(wiring_rs).unwrap_or_default();
+    if content.is_empty() {
+        content.push_str(WIRING_HEADER);
+        content.push('\n');
+    }
     let marker = format!("mod {module};");
     if content.lines().any(|l| l.trim() == marker) {
         return Ok(());
     }
-    let mut new = content;
-    if !new.is_empty() && !new.ends_with('\n') {
-        new.push('\n');
+    if !content.ends_with('\n') {
+        content.push('\n');
     }
-    new.push_str(&format!(
+    content.push_str(&format!(
         "\n#[cfg(rust_analyzer)]\n#[path = \"{category}/{module}.rs\"]\nmod {module};\n"
     ));
-    fs::write(lib_rs, new).with_context(|| format!("写入 {} 失败", lib_rs.display()))
+    fs::write(wiring_rs, content)
+        .with_context(|| format!("写入 {} 失败", wiring_rs.display()))
 }
 
 fn failure_reason(report: &verifier::VerifyReport) -> String {
@@ -541,7 +554,7 @@ body = '''
 // 提示 1：完成后两个测试都应通过。
 // 提示 2：本题也用于生成器的离线冒烟测试。
 // 说明 1：无槽位，默认值即可通过三重校验。
-// 说明 2：练习文件会写入 generated 分类并接线 lib.rs。
+// 说明 2：练习文件会写入 generated 分类并自动接线。
 fn add(a: i32, b: i32) -> i32 {
     todo!()
 }
@@ -624,12 +637,15 @@ fn add(a: i32, b: i32) -> i32 {
         assert!(src.contains("#[cfg(test)]"));
         assert!(src.contains("I AM NOT DONE"));
 
-        // Wired into lib.rs for rust-analyzer.
-        let lib = fs::read_to_string(&paths.lib_rs).unwrap();
+        // Wired into the gitignored wiring file for rust-analyzer; the
+        // header comment is created on first generation.
+        let lib = fs::read_to_string(&paths.wiring_rs).unwrap();
+        assert!(lib.contains("Auto-generated exercise wiring"));
         assert!(lib.contains("#[path = \"generated/mini_add.rs\"]"));
         assert!(lib.contains("mod mini_add;"));
-        // The pre-existing module is untouched.
-        assert!(lib.contains("mod seed;"));
+        // The versioned lib.rs is never touched by the generator.
+        let versioned = fs::read_to_string(fx.root.join("exercises/lib.rs")).unwrap();
+        assert!(!versioned.contains("mini_add"));
     }
 
     #[test]
@@ -640,7 +656,7 @@ fn add(a: i32, b: i32) -> i32 {
         let out2 = generate(&Topic::ErrorCode("E0308".into()), &paths, None).unwrap();
         assert_eq!(out1.name, "mini_add");
         assert_eq!(out2.name, "mini_add_2");
-        let lib = fs::read_to_string(&paths.lib_rs).unwrap();
+        let lib = fs::read_to_string(&paths.wiring_rs).unwrap();
         assert!(lib.contains("mod mini_add;"));
         assert!(lib.contains("mod mini_add_2;"));
     }
@@ -727,10 +743,10 @@ fn add(a: i32, b: i32) -> i32 {
     fn wire_lib_rs_is_idempotent() {
         let fx = Fixture::new();
         let paths = fx.paths();
-        wire_lib_rs(&paths.lib_rs, "thing", OUT_CATEGORY).unwrap();
-        let once = fs::read_to_string(&paths.lib_rs).unwrap();
-        wire_lib_rs(&paths.lib_rs, "thing", OUT_CATEGORY).unwrap();
-        let twice = fs::read_to_string(&paths.lib_rs).unwrap();
+        wire_lib_rs(&paths.wiring_rs, "thing", OUT_CATEGORY).unwrap();
+        let once = fs::read_to_string(&paths.wiring_rs).unwrap();
+        wire_lib_rs(&paths.wiring_rs, "thing", OUT_CATEGORY).unwrap();
+        let twice = fs::read_to_string(&paths.wiring_rs).unwrap();
         assert_eq!(once, twice);
         assert_eq!(once.matches("mod thing;").count(), 1);
     }

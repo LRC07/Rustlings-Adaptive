@@ -11,7 +11,6 @@ mod llm;
 mod taxonomy;
 mod template;
 mod usage;
-#[allow(dead_code)]
 mod verifier;
 
 fn main() {

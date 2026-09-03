@@ -85,6 +85,10 @@ pub struct ModelConfig {
     pub prices: Prices,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<Budget>,
+    /// Editor override (design §4.1 chain: $EDITOR → $VISUAL → this →
+    /// `code --wait` → vi). Set from the `[c]` config page or by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor: Option<String>,
     #[serde(skip, default)]
     pub key_source: KeySource,
 }
@@ -99,6 +103,7 @@ impl Default for ModelConfig {
             think_mode: false,
             prices: Prices::default(),
             budget: None,
+            editor: None,
             key_source: KeySource::None,
         }
     }
@@ -183,6 +188,7 @@ api_key = "ollama"
 model = "qwen2.5:7b"
 context_len = 32000
 think_mode = false
+editor = "code --wait"
 
 [prices]
 input = 0.0
@@ -197,6 +203,7 @@ usd = 2.5
         assert_eq!(cfg.context_len, 32000);
         assert_eq!(cfg.budget_usd(), Some(2.5));
         assert_eq!(cfg.prices.input, 0.0);
+        assert_eq!(cfg.editor.as_deref(), Some("code --wait"));
     }
 
     #[test]
@@ -206,6 +213,7 @@ usd = 2.5
         assert_eq!(cfg.endpoint, default_endpoint());
         assert_eq!(cfg.context_len, default_context_len());
         assert_eq!(cfg.budget_usd(), None);
+        assert_eq!(cfg.editor, None);
         assert_eq!(cfg.prices.input, default_input_price());
     }
 

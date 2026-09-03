@@ -123,7 +123,7 @@ pub fn compile_and_run(ex: &Exercise) -> bool {
         Ok(out) if !out.status.success() => {
             let stderr = String::from_utf8_lossy(&out.stderr);
             // Trim the noisy "error: aborting due to ..." tail slightly.
-            print_stderr(&stderr);
+            print_indented(&stderr);
             println!();
             println!("  编译失败。请修正上方错误后重试。");
             return false;
@@ -143,10 +143,10 @@ pub fn compile_and_run(ex: &Exercise) -> bool {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let stderr = String::from_utf8_lossy(&out.stderr);
             if !stdout.is_empty() {
-                print!("{stdout}");
+                print_indented(&stdout);
             }
             if !stderr.is_empty() {
-                eprint!("{stderr}");
+                print_indented(&stderr);
             }
             if out.status.success() {
                 println!("  全部测试通过。");
@@ -159,18 +159,109 @@ pub fn compile_and_run(ex: &Exercise) -> bool {
     }
 }
 
-fn print_stderr(s: &str) {
-    // Indent rustc's stderr so it lines up under the menu prompt.
+fn print_indented(s: &str) {
+    // Indent compiler/test output so it lines up under the menu prompt.
     for line in s.lines() {
         println!("  {line}");
     }
 }
 
-pub fn open_editor(path: &Path) {
-    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
-    match Command::new(&editor).arg(path).status() {
+/// Resolve the editor command (design §4.1 chain):
+/// `$EDITOR` → `$VISUAL` → config `editor` → `code --wait` (if VS Code
+/// is on PATH; `--wait` blocks until the editor tab closes) → `vi`.
+/// Splitting is plain whitespace (no quoting support — documented).
+pub fn editor_command(config_editor: Option<&str>) -> Vec<String> {
+    for key in ["EDITOR", "VISUAL"] {
+        if let Ok(v) = std::env::var(key) {
+            let parts = shell_words(&v);
+            if !parts.is_empty() {
+                return parts;
+            }
+        }
+    }
+    if let Some(e) = config_editor.map(str::trim).filter(|s| !s.is_empty()) {
+        let parts = shell_words(e);
+        if !parts.is_empty() {
+            return parts;
+        }
+    }
+    if command_on_path("code") {
+        return vec!["code".to_string(), "--wait".to_string()];
+    }
+    vec!["vi".to_string()]
+}
+
+fn shell_words(s: &str) -> Vec<String> {
+    s.split_whitespace().map(str::to_string).collect()
+}
+
+fn command_on_path(cmd: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(cmd).is_file()))
+        .unwrap_or(false)
+}
+
+pub fn open_editor(path: &Path, config_editor: Option<&str>) {
+    let argv = editor_command(config_editor);
+    let (prog, args) = argv.split_first().expect("editor command is never empty");
+    match Command::new(prog).args(args).arg(path).status() {
         Ok(s) if s.success() => {}
         Ok(s) => println!("  编辑器以 {:?} 退出", s.code()),
-        Err(e) => println!("  无法启动编辑器 '{editor}': {e}"),
+        Err(e) => println!("  无法启动编辑器 '{prog}': {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mutating EDITOR/VISUAL/PATH here is safe: this is the only test
+    /// that touches these variables (config tests use prefixed names),
+    /// and it restores everything before returning.
+    #[test]
+    fn editor_resolution_chain() {
+        let saved = (
+            std::env::var("EDITOR").ok(),
+            std::env::var("VISUAL").ok(),
+            std::env::var("PATH").ok(),
+        );
+        unsafe {
+            std::env::remove_var("EDITOR");
+            std::env::remove_var("VISUAL");
+            // Hide `code` so the auto-detect leg cannot fire.
+            std::env::set_var("PATH", "/nonexistent-editor-test");
+        }
+
+        // 1) Nothing set anywhere → vi fallback.
+        assert_eq!(editor_command(None), vec!["vi".to_string()]);
+
+        // 2) config editor wins over auto-detection, keeps arguments.
+        assert_eq!(editor_command(Some("kate -n")), vec!["kate".to_string(), "-n".to_string()]);
+
+        // 3) $VISUAL beats config.
+        unsafe { std::env::set_var("VISUAL", "nano"); }
+        assert_eq!(editor_command(Some("kate")), vec!["nano".to_string()]);
+
+        // 4) $EDITOR beats $VISUAL.
+        unsafe { std::env::set_var("EDITOR", "vim -R"); }
+        assert_eq!(editor_command(None), vec!["vim".to_string(), "-R".to_string()]);
+
+        // 5) Empty strings are skipped, not used.
+        unsafe { std::env::set_var("EDITOR", "  "); }
+        assert_eq!(editor_command(None), vec!["nano".to_string()]);
+
+        unsafe {
+            std::env::remove_var("EDITOR");
+            std::env::remove_var("VISUAL");
+            if let Some(p) = saved.2 {
+                std::env::set_var("PATH", p);
+            }
+            if let Some(e) = saved.0 {
+                std::env::set_var("EDITOR", e);
+            }
+            if let Some(v) = saved.1 {
+                std::env::set_var("VISUAL", v);
+            }
+        }
     }
 }

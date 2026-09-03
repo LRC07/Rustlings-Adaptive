@@ -5,3 +5,7 @@
 /.env
 # User's exported conversation records (personal data, never commit)
 /sessions/
+
+# Generated exercises are user-local runtime artifacts (M3.2)
+/exercises/generated/
+/exercises/lib_generated.rs

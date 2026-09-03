@@ -1,14 +1,16 @@
 //! Interactive CLI: exercise menu/loop plus the model-facing commands
-//! (`a` ask / `u` usage / `c` config) required by R2/R3/R6.
+//! (`a` ask / `g` generate / `u` usage / `c` config) required by
+//! R2/R3/R6. The `g` flow lives in `cli/generate.rs`.
 
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 
 use crate::config::{self, ModelConfig};
 use crate::exercise::{self, Exercise};
-use crate::generator;
 use crate::llm::LlmClient;
 use crate::usage;
+
+mod generate;
 
 pub fn run() {
     let root = Path::new("exercises");
@@ -40,15 +42,19 @@ pub fn run() {
 
     println!();
     println!("  欢迎使用 my_rustlings —— 对话式 Rust 诊断教练");
-    println!("  共 {} 道练习；做题时改完文件保存，回到做题界面按 [r] 重新编译。", exercises.len());
-    if client.is_some() {
-        println!("  当前模型：{}（按 [u] 看用量，[c] 改配置）", cfg.model);
-    } else {
-        println!("  模型：未配置 API Key —— 按 [c] 配置，或复制 config.example.toml 为 config.toml（详见 README）。");
-    }
+    println!(
+        "  共 {} 道练习 ｜ 模型：{} ｜ [h] 帮助",
+        exercises.len(),
+        if client.is_some() {
+            cfg.model.as_str()
+        } else {
+            "未配置（[c] 填 API Key）"
+        }
+    );
     println!();
 
     loop {
+        clear_screen();
         show_menu(&exercises, &progress);
         print!("> ");
         io::stdout().flush().ok();
@@ -66,7 +72,7 @@ pub fn run() {
             "v" | "verify" => verify_all(&exercises, &mut progress, &progress_path),
             "n" => {
                 if let Some(idx) = exercises.iter().position(|e| !e.is_done(&progress)) {
-                    run_exercise(idx, &exercises, &mut progress, &progress_path);
+                    run_exercise(idx, &exercises, &mut progress, &progress_path, cfg.editor.as_deref());
                 } else {
                     println!();
                     println!("  所有练习已完成！");
@@ -74,7 +80,7 @@ pub fn run() {
                 }
             }
             "a" => cmd_ask(&cfg, &mut tracker, &client),
-            "g" => cmd_generate(
+            "g" => generate::cmd_generate(
                 &cfg,
                 &mut tracker,
                 &client,
@@ -87,11 +93,20 @@ pub fn run() {
             "h" => print_help(),
             s => match s.parse::<usize>() {
                 Ok(n) if n >= 1 && n <= exercises.len() => {
-                    run_exercise(n - 1, &exercises, &mut progress, &progress_path);
+                    run_exercise(n - 1, &exercises, &mut progress, &progress_path, cfg.editor.as_deref());
                 }
                 _ => println!("未知命令: {s}（可用：数字、n、v、a、g、u、c、h、q）"),
             },
         }
+    }
+}
+
+/// Wipe the terminal before each menu render. Only for real terminals;
+/// piped output (tests, logs) keeps everything for readability.
+fn clear_screen() {
+    if io::stdout().is_terminal() {
+        print!("\x1B[2J\x1B[1;1H");
+        io::stdout().flush().ok();
     }
 }
 
@@ -122,7 +137,8 @@ fn print_help() {
     println!();
     println!("  使用说明：");
     println!("    - 输入编号选择练习。");
-    println!("    - 做题界面内：[r] 重新编译运行   [e] 用 $EDITOR 打开文件（默认 vi）");
+    println!("    - 做题界面内：[r] 重新编译运行   [e] 编辑（编辑器解析链：");
+    println!("                  $EDITOR → $VISUAL → 配置 editor → code --wait → vi，[c] 中可改）");
     println!("                  [n] 下一题         [b] 返回菜单");
     println!("    - 全部测试通过后自动标记完成；n 跳到下一道未完成；v 全部跑一遍。");
     println!("    - a 问模型：一问一答（输入问题回车发送；多轮对话在后续版本提供）");
@@ -232,145 +248,6 @@ fn cmd_ask(cfg: &ModelConfig, tracker: &mut usage::UsageTracker, client: &Option
     }
 }
 
-/// `g` — generate an exercise from a topic (M3 出题基座入口).
-///
-/// Flow: topic input → template pick → slot fill (LLM if configured,
-/// offline fallback otherwise) → triple verify → write into
-/// `exercises/generated/` → optionally enter the practice flow at once.
-#[allow(clippy::too_many_arguments)]
-fn cmd_generate(
-    cfg: &ModelConfig,
-    tracker: &mut usage::UsageTracker,
-    client: &Option<LlmClient>,
-    exercises: &mut Vec<Exercise>,
-    progress: &mut Vec<String>,
-    progress_path: &Path,
-) {
-    println!();
-    println!("── 生成练习 ──");
-    println!("  输入主题：概念（如 trait 关联类型）、错误码（如 E0382）或关键词；直接回车返回。");
-    print!("主题> ");
-    io::stdout().flush().ok();
-    let mut line = String::new();
-    if io::stdin().read_line(&mut line).unwrap_or(0) == 0 {
-        return;
-    }
-    let topic_text = line.trim().to_string();
-    if topic_text.is_empty() {
-        return;
-    }
-
-    // R6: budget gate before any LLM usage.
-    if let Err(e) = usage::check_budget(tracker.all_totals().cost_usd, cfg.budget_usd()) {
-        println!();
-        println!("  LLM 调用被拦截：{e}");
-        println!("  将使用离线模式生成（默认填槽，无 LLM 变体）。");
-    }
-
-    let topic = parse_topic(&topic_text);
-
-    // LLM caller: enforces budget + records usage per call (R6). When no
-    // key is configured the generator runs fully offline.
-    let mut call = |prompt: &str| -> anyhow::Result<crate::llm::LlmReply> {
-        usage::check_budget(tracker.all_totals().cost_usd, cfg.budget_usd())?;
-        let cl = client
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("未配置 API Key，无法调用模型"))?;
-        let reply = cl.chat(prompt)?;
-        let cost = usage::cost_usd(
-            reply.usage.prompt_tokens,
-            reply.usage.completion_tokens,
-            cfg.prices.input,
-            cfg.prices.output,
-        );
-        tracker.record(
-            &cfg.model,
-            reply.usage.prompt_tokens,
-            reply.usage.completion_tokens,
-            cost,
-            "generate",
-        );
-        println!(
-            "  · LLM: 输入 {} tok / 输出 {} tok / ${:.6}",
-            reply.usage.prompt_tokens, reply.usage.completion_tokens, cost
-        );
-        Ok(reply)
-    };
-    let llm: Option<&mut dyn generator::LlmCaller> = if client.is_some() {
-        Some(&mut call)
-    } else {
-        println!("  未配置 API Key —— 使用离线模式（默认填槽）。");
-        None
-    };
-
-    println!("  正在生成：选模板 → 填槽 → 三重校验（最多 {} 轮）…", generator::MAX_ATTEMPTS);
-    let paths = generator::Paths::from_root(Path::new("."));
-    match generator::generate(&topic, &paths, llm) {
-        Ok(out) => {
-            println!();
-            println!("  ✔ 已生成练习（第 {} 轮通过）", out.attempts);
-            println!("    题目   : {}（{}）", out.title, out.difficulty.name_cn());
-            println!("    模板   : {}", out.template_id);
-            println!("    概念   : {}", out.concepts.join("、"));
-            println!("    文件   : {}（练习名 {}）", out.path.display(), out.name);
-            if out.slots.is_empty() {
-                println!("    槽位   : 无");
-            } else {
-                let kv: Vec<String> = out.slots.iter().map(|(k, v)| format!("{k}={v}")).collect();
-                println!("    槽位   : {}（{}）", kv.join(", "), if out.used_llm { "LLM 填槽" } else { "默认填槽" });
-            }
-            println!();
-            print!("  现在开始做这道题？[Y/n] ");
-            io::stdout().flush().ok();
-            let mut go = String::new();
-            if io::stdin().read_line(&mut go).unwrap_or(0) == 0 {
-                return;
-            }
-            let go = go.trim().to_ascii_lowercase();
-            if go == "n" || go == "no" {
-                return;
-            }
-            // Refresh the exercise list so the new file is discoverable.
-            // Path comparison uses canonicalize(): the generator's path
-            // carries a "./" prefix while discover() yields plain
-            // relative paths, so raw equality would always miss.
-            let mut fresh = exercise::discover(Path::new("exercises"));
-            fresh.sort_by(|a, b| a.category.cmp(&b.category).then(a.name.cmp(&b.name)));
-            let want = out.path.canonicalize().ok();
-            if let Some(idx) = fresh.iter().position(|e| e.path.canonicalize().ok() == want) {
-                *exercises = fresh;
-                run_exercise(idx, exercises, progress, progress_path);
-            } else {
-                println!("  生成文件未出现在练习列表（意外），可手动打开 {}", out.path.display());
-            }
-        }
-        Err(e) => {
-            println!();
-            println!("  生成失败：{e:#}");
-            println!("  可换一个主题重试，或检查 templates/ 与 taxonomy/ 的内容。");
-        }
-    }
-}
-
-/// Heuristic topic parsing: `E0382`-style inputs become an error-code
-/// request, dotted ids like `traits.associated-types` become a concept
-/// request, everything else is free text.
-fn parse_topic(input: &str) -> generator::Topic {
-    let t = input.trim();
-    let is_code = t.len() == 5
-        && (t.starts_with('E') || t.starts_with('e'))
-        && t[1..].chars().all(|c| c.is_ascii_digit());
-    let is_concept_id = t.contains('.')
-        && t.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'));
-    if is_code {
-        generator::Topic::ErrorCode(t.to_uppercase())
-    } else if is_concept_id {
-        generator::Topic::Concept(t.to_string())
-    } else {
-        generator::Topic::FreeText(t.to_string())
-    }
-}
-
 /// `u` — usage & cost report (R6).
 fn cmd_usage(cfg: &ModelConfig, tracker: &usage::UsageTracker) {
     let s = tracker.session_totals();
@@ -417,6 +294,13 @@ fn cmd_config(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
                 .unwrap_or_else(|| "未设置".to_string())
         );
         println!(
+            "  5. 编辑器 : {}",
+            cfg.editor
+                .as_deref()
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "未设置（自动：$EDITOR → $VISUAL → code --wait → vi）".to_string())
+        );
+        println!(
             "  · 价格      : 输入 ${:.2}/1M ｜ 输出 ${:.2}/1M（在 config.toml 中修改）",
             cfg.prices.input, cfg.prices.output
         );
@@ -425,7 +309,7 @@ fn cmd_config(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
             cfg.context_len,
             if cfg.think_mode { "开" } else { "关" }
         );
-        println!("  输入编号修改对应项（1/2/3/4），回车返回；修改会写回 config.toml");
+        println!("  输入编号修改对应项（1/2/3/4/5），回车返回；修改会写回 config.toml");
         print!("配置> ");
         io::stdout().flush().ok();
         let mut line = String::new();
@@ -470,6 +354,16 @@ fn cmd_config(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
                     save_and_rebuild(cfg, client);
                 }
             }
+            "5" => {
+                if let Some(v) = read_value("新编辑器命令（如 'code --wait'；'无' 恢复自动）:") {
+                    if v == "无" || v == "none" {
+                        cfg.editor = None;
+                    } else {
+                        cfg.editor = Some(v);
+                    }
+                    save_and_rebuild(cfg, client);
+                }
+            }
             other => println!("  未知选项: {other}"),
         }
     }
@@ -487,7 +381,13 @@ fn save_and_rebuild(cfg: &ModelConfig, client: &mut Option<LlmClient>) {
 // Exercise flow
 // ---------------------------------------------------------------------------
 
-fn run_exercise(idx: usize, exercises: &[Exercise], progress: &mut Vec<String>, progress_path: &Path) {
+pub(super) fn run_exercise(
+    idx: usize,
+    exercises: &[Exercise],
+    progress: &mut Vec<String>,
+    progress_path: &Path,
+    editor: Option<&str>,
+) {
     let ex = &exercises[idx];
     println!();
     println!("--- {} ({}) ---", ex.name, ex.path.display());
@@ -510,10 +410,10 @@ fn run_exercise(idx: usize, exercises: &[Exercise], progress: &mut Vec<String>, 
         }
         match s.trim() {
             "r" | "" => continue,
-            "e" => exercise::open_editor(&ex.path),
+            "e" => exercise::open_editor(&ex.path, editor),
             "n" => {
                 if let Some(next) = next_pending(idx, exercises, progress) {
-                    run_exercise(next, exercises, progress, progress_path);
+                    run_exercise(next, exercises, progress, progress_path, editor);
                 }
                 return;
             }

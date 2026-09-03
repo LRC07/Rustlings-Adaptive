@@ -113,9 +113,11 @@ templates/             手写题目模板 ×12（TOML 格式，M3+M3.1 错误处
 taxonomy/              概念图谱 concepts.toml（37 节点，M3+M3.1）
 ```
 
-`exercises/lib.rs` 用 `#[cfg(rust_analyzer)]` 接线所有练习：rust-analyzer
+`exercises/lib.rs` 用 `#[cfg(rust_analyzer)]` 接线所有种子练习：rust-analyzer
 能全量分析，cargo 视其为空 lib，故意写残的模板不影响构建。CLI 直接用
-`rustc --test` 编译运行每个练习，与该 crate 无关。
+`rustc --test` 编译运行每个练习，与该 crate 无关。`g` 生成的练习落在
+`exercises/generated/` 并接线到 gitignored 的 `exercises/lib_generated.rs`
+（均为用户本地运行时产物，不入库）。
 
 ## 换一个 session 继续开发
 
