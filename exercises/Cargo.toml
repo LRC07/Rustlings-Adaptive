@@ -1,0 +1,14 @@
+[package]
+name = "my_rustlings_exercises"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "lib.rs"
+
+# Tell rustc that `rust_analyzer` is a legitimate cfg name (rust-analyzer
+# sets it during analysis), so `#[cfg(rust_analyzer)]` doesn't trip the
+# `unexpected_cfgs` lint under plain `cargo`.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(rust_analyzer)'] }

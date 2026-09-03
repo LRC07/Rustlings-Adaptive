@@ -1,0 +1,13 @@
+{
+    // rust-analyzer is driven by the workspace in Cargo.toml (members:
+    // ["exercises"]). The exercises crate wires every .rs under exercises/
+    // in as a module gated by `#[cfg(rust_analyzer)]`, so each exercise
+    // file gets full type inference, completion, go-to-definition, and
+    // in-editor diagnostics (including the intentional "method not found"
+    // errors that are the whole point of an unsolved exercise).
+
+    "[rust]": {
+        "editor.formatOnSave": true
+    },
+    "rust-analyzer.checkOnSave": true
+}

@@ -1,0 +1,46 @@
+//! IDE-only crate that wires every exercise up as a module so that
+//! rust-analyzer gives full type inference / completion / go-to-def while
+//! editing them in VS Code.
+//!
+//! Every `mod` below is gated with `#[cfg(rust_analyzer)]`. rust-analyzer
+//! sets that cfg during analysis, so it sees (and analyzes) all exercises.
+//! `cargo` does NOT set it, so to cargo this crate is an empty library —
+//! meaning the intentionally-broken exercise templates never break
+//! `cargo build` / `cargo test` / `cargo run`. The CLI itself compiles each
+//! exercise directly with `rustc --test`, independent of this crate.
+//!
+//! To add a new exercise: drop its `.rs` under `exercises/<category>/`
+//! and add one `#[cfg(rust_analyzer)] #[path = "..."] mod <name>;` line
+//! here. The CLI auto-discovers new `.rs` files, so no CLI change needed.
+
+#[cfg(rust_analyzer)]
+#[path = "generics/generics1.rs"]
+mod generics1;
+
+#[cfg(rust_analyzer)]
+#[path = "generics/generics2.rs"]
+mod generics2;
+
+#[cfg(rust_analyzer)]
+#[path = "generics/generics3.rs"]
+mod generics3;
+
+#[cfg(rust_analyzer)]
+#[path = "generics/generics4.rs"]
+mod generics4;
+
+#[cfg(rust_analyzer)]
+#[path = "traits/traits1.rs"]
+mod traits1;
+
+#[cfg(rust_analyzer)]
+#[path = "traits/traits2.rs"]
+mod traits2;
+
+#[cfg(rust_analyzer)]
+#[path = "traits/traits3.rs"]
+mod traits3;
+
+#[cfg(rust_analyzer)]
+#[path = "traits/traits4.rs"]
+mod traits4;

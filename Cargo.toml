@@ -1,0 +1,14 @@
+[package]
+name = "my_rustlings"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+# `exercises` is an IDE-only sub-crate: its modules are gated behind
+# `#[cfg(rust_analyzer)]`, so cargo sees an empty lib there while
+# rust-analyzer gets full analysis of every exercise file. It is excluded
+# from default cargo commands so it never interferes with the CLI.
+[workspace]
+members = ["exercises"]
+default-members = ["."]
