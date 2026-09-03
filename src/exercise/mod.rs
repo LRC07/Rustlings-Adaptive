@@ -3,7 +3,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 pub struct Exercise {
     pub path: PathBuf,
@@ -201,10 +201,38 @@ fn command_on_path(cmd: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Editors that open a GUI window instead of taking over the terminal.
+/// For these we detach stdin (they must not consume/hold our tty input;
+/// matters especially under WSL interop) and print a hint, because
+/// `--wait` blocks until the file tab is closed — which otherwise looks
+/// like the CLI froze.
+const GUI_EDITORS: &[&str] = &["code", "code-insiders", "codium", "subl", "gedit", "notepad"];
+
+fn is_gui_editor(prog: &str) -> bool {
+    let stem = std::path::Path::new(prog)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(prog);
+    GUI_EDITORS.iter().any(|g| g.eq_ignore_ascii_case(stem))
+}
+
 pub fn open_editor(path: &Path, config_editor: Option<&str>) {
     let argv = editor_command(config_editor);
     let (prog, args) = argv.split_first().expect("editor command is never empty");
-    match Command::new(prog).args(args).arg(path).status() {
+    let gui = is_gui_editor(prog);
+    if gui {
+        println!(
+            "  已用 {prog} 打开 {}：关闭该文件的编辑器标签页后这里会继续（等待中…）",
+            path.display()
+        );
+        println!("  提示：等待期间敲入的按键会被缓存，回来后如有多余输出按一次回车即可。");
+    }
+    let mut cmd = Command::new(prog);
+    cmd.args(args).arg(path);
+    if gui {
+        cmd.stdin(Stdio::null());
+    }
+    match cmd.status() {
         Ok(s) if s.success() => {}
         Ok(s) => println!("  编辑器以 {:?} 退出", s.code()),
         Err(e) => println!("  无法启动编辑器 '{prog}': {e}"),
@@ -218,6 +246,18 @@ mod tests {
     /// Mutating EDITOR/VISUAL/PATH here is safe: this is the only test
     /// that touches these variables (config tests use prefixed names),
     /// and it restores everything before returning.
+    #[test]
+    fn gui_editor_detection() {
+        // WSL interop path: /mnt/c/.../bin/code → stem "code".
+        assert!(is_gui_editor("code"));
+        assert!(is_gui_editor("/mnt/c/Programs/Microsoft VS Code/bin/code"));
+        assert!(is_gui_editor("CODE"));
+        assert!(is_gui_editor("code.cmd"));
+        assert!(!is_gui_editor("vi"));
+        assert!(!is_gui_editor("vim -R")); // args never reach here; stem is "vim"
+        assert!(!is_gui_editor("nano"));
+    }
+
     #[test]
     fn editor_resolution_chain() {
         let saved = (

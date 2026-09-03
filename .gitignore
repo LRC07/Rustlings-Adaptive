@@ -9,3 +9,6 @@
 # Generated exercises are user-local runtime artifacts (M3.2)
 /exercises/generated/
 /exercises/lib_generated.rs
+
+# Course slides (user-provided teaching material, not project artifacts)
+/slides/
