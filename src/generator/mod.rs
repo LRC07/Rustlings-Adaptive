@@ -26,6 +26,17 @@ pub const MAX_ATTEMPTS: u32 = 3;
 /// Category directory (under `exercises/`) for generated exercises.
 pub const OUT_CATEGORY: &str = "generated";
 
+/// Progress event emitted while a generation run is in flight (M4:
+/// rendered by the CLI's spinner so long runs feel alive, R4).
+#[derive(Debug, Clone, Copy)]
+pub struct GenerateStage {
+    /// 1-based attempt number currently running.
+    pub attempt: u32,
+    pub total_attempts: u32,
+    /// Human-readable stage label ("选模板", "填槽+校验").
+    pub stage: &'static str,
+}
+
 /// Filesystem layout used by one generation run (parameterizable for
 /// tests; the CLI passes the repo root).
 #[derive(Debug, Clone)]
@@ -68,6 +79,27 @@ impl Topic {
             Topic::FreeText(t) => t.clone(),
         }
     }
+
+    /// Heuristic topic parsing shared by the CLI and the agent tool:
+    /// `E0382`-style inputs become an error-code request, dotted ids
+    /// like `traits.associated-types` become a concept request,
+    /// everything else is free text.
+    pub fn from_input(input: &str) -> Topic {
+        let t = input.trim();
+        let is_code = t.len() == 5
+            && (t.starts_with('E') || t.starts_with('e'))
+            && t[1..].chars().all(|c| c.is_ascii_digit());
+        let is_concept_id = t.contains('.')
+            && t.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'));
+        if is_code {
+            Topic::ErrorCode(t.to_uppercase())
+        } else if is_concept_id {
+            Topic::Concept(t.to_string())
+        } else {
+            Topic::FreeText(t.to_string())
+        }
+    }
 }
 
 /// Result of a successful generation.
@@ -102,7 +134,20 @@ impl<F: FnMut(&str) -> Result<LlmReply>> LlmCaller for F {
 // Entry point
 // ---------------------------------------------------------------------------
 
-pub fn generate(topic: &Topic, paths: &Paths, mut llm: Option<&mut dyn LlmCaller>) -> Result<Outcome> {
+pub fn generate(
+    topic: &Topic,
+    paths: &Paths,
+    mut llm: Option<&mut dyn LlmCaller>,
+    mut progress: Option<&mut dyn FnMut(GenerateStage)>,
+) -> Result<Outcome> {
+    macro_rules! report_stage {
+        ($stage:expr, $attempt:expr) => {
+            if let Some(cb) = progress.as_mut() {
+                cb(GenerateStage { attempt: $attempt, total_attempts: MAX_ATTEMPTS, stage: $stage });
+            }
+        };
+    }
+
     let graph = ConceptGraph::load(&paths.taxonomy_file)
         .context("概念图谱加载失败")?;
     let mut graph = graph;
@@ -120,6 +165,7 @@ pub fn generate(topic: &Topic, paths: &Paths, mut llm: Option<&mut dyn LlmCaller
         Some(c) => Some(&mut **c),
         None => None,
     };
+    report_stage!("选模板", 1);
     let (t, used_llm_select) = choose_template(&templates, &graph, topic, sel_call)?;
 
     // Parse constraints once (spec strings were validated at load).
@@ -128,6 +174,11 @@ pub fn generate(topic: &Topic, paths: &Paths, mut llm: Option<&mut dyn LlmCaller
     let mut last_fail = String::from("尚未尝试");
     let mut used_llm = used_llm_select;
     for attempt in 0..MAX_ATTEMPTS {
+        if crate::agent::is_interrupted() {
+            crate::agent::reset_interrupt();
+            bail!("已打断");
+        }
+        report_stage!("填槽+校验", attempt + 1);
         // Base values: defaults (attempt 0) then deterministic rotation.
         let mut values = template::fill_for_attempt(&t, attempt as usize);
 
@@ -624,7 +675,7 @@ fn add(a: i32, b: i32) -> i32 {
     fn generates_with_defaults_offline() {
         let fx = Fixture::new();
         let paths = fx.paths();
-        let out = generate(&Topic::Concept("test.concept".into()), &paths, None).unwrap();
+        let out = generate(&Topic::Concept("test.concept".into()), &paths, None, None).unwrap();
 
         assert_eq!(out.name, "mini_add");
         assert_eq!(out.template_id, "mini-add");
@@ -652,8 +703,8 @@ fn add(a: i32, b: i32) -> i32 {
     fn second_generation_picks_free_name_and_wires_both() {
         let fx = Fixture::new();
         let paths = fx.paths();
-        let out1 = generate(&Topic::Concept("test".into()), &paths, None).unwrap();
-        let out2 = generate(&Topic::ErrorCode("E0308".into()), &paths, None).unwrap();
+        let out1 = generate(&Topic::Concept("test".into()), &paths, None, None).unwrap();
+        let out2 = generate(&Topic::ErrorCode("E0308".into()), &paths, None, None).unwrap();
         assert_eq!(out1.name, "mini_add");
         assert_eq!(out2.name, "mini_add_2");
         let lib = fs::read_to_string(&paths.wiring_rs).unwrap();
@@ -664,7 +715,7 @@ fn add(a: i32, b: i32) -> i32 {
     #[test]
     fn error_code_routes_via_reverse_index() {
         let fx = Fixture::new();
-        let out = generate(&Topic::ErrorCode("e0308".into()), &fx.paths(), None).unwrap();
+        let out = generate(&Topic::ErrorCode("e0308".into()), &fx.paths(), None, None).unwrap();
         assert_eq!(out.template_id, "mini-add");
     }
 
@@ -672,9 +723,9 @@ fn add(a: i32, b: i32) -> i32 {
     fn unknown_concept_and_code_are_clear_errors() {
         let fx = Fixture::new();
         let paths = fx.paths();
-        let err = generate(&Topic::Concept("没有的东西".into()), &paths, None).unwrap_err();
+        let err = generate(&Topic::Concept("没有的东西".into()), &paths, None, None).unwrap_err();
         assert!(err.to_string().contains("解析为概念"), "{err}");
-        let err = generate(&Topic::ErrorCode("E9999".into()), &paths, None).unwrap_err();
+        let err = generate(&Topic::ErrorCode("E9999".into()), &paths, None, None).unwrap_err();
         assert!(err.to_string().contains("E9999"), "{err}");
     }
 
@@ -682,9 +733,9 @@ fn add(a: i32, b: i32) -> i32 {
     fn free_text_matches_by_taxonomy_name_or_title() {
         let fx = Fixture::new();
         let paths = fx.paths();
-        let out = generate(&Topic::FreeText("来一道 测试概念 的题".into()), &paths, None).unwrap();
+        let out = generate(&Topic::FreeText("来一道 测试概念 的题".into()), &paths, None, None).unwrap();
         assert_eq!(out.template_id, "mini-add");
-        let out = generate(&Topic::FreeText("加法".into()), &paths, None).unwrap();
+        let out = generate(&Topic::FreeText("加法".into()), &paths, None, None).unwrap();
         assert_eq!(out.template_id, "mini-add");
     }
 
@@ -714,7 +765,7 @@ fn add(a: i32, b: i32) -> i32 {
                 Ok(reply(r#"{"slots": {"word": "b"}}"#))
             }
         };
-        let out = generate(&Topic::FreeText("随便来一道".into()), &paths, Some(&mut call)).unwrap();
+        let out = generate(&Topic::FreeText("随便来一道".into()), &paths, Some(&mut call), None).unwrap();
         assert_eq!(out.template_id, "mini-add");
         assert_eq!(out.slots.get("word").map(String::as_str), Some("b"));
         assert!(out.used_llm);
@@ -726,7 +777,7 @@ fn add(a: i32, b: i32) -> i32 {
         let fx = Fixture::new();
         let paths = fx.paths();
         let mut call = |_prompt: &str| -> Result<LlmReply> { Ok(reply("这不是 JSON")) };
-        let out = generate(&Topic::Concept("test.concept".into()), &paths, Some(&mut call)).unwrap();
+        let out = generate(&Topic::Concept("test.concept".into()), &paths, Some(&mut call), None).unwrap();
         assert!(!out.used_llm, "LLM 输出无效时不算用上 LLM");
         assert!(out.path.exists());
     }

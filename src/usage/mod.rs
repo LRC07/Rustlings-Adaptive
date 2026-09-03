@@ -121,6 +121,20 @@ impl UsageTracker {
         self.totals_from(0)
     }
 
+    /// Session usage grouped by phase ("chat" / "generate" / …),
+    /// ordered by phase name — the /usage page's breakdown.
+    pub fn session_by_phase(&self) -> Vec<(String, Totals)> {
+        let mut map: std::collections::BTreeMap<String, Totals> = std::collections::BTreeMap::new();
+        for r in &self.records[self.session_start.min(self.records.len())..] {
+            let t = map.entry(r.phase.clone()).or_default();
+            t.calls += 1;
+            t.input_tokens += r.input_tokens;
+            t.output_tokens += r.output_tokens;
+            t.cost_usd += r.cost_usd;
+        }
+        map.into_iter().collect()
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }

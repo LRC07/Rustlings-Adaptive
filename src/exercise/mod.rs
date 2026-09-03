@@ -237,6 +237,10 @@ pub fn open_editor(path: &Path, config_editor: Option<&str>) {
         Ok(s) => println!("  编辑器以 {:?} 退出", s.code()),
         Err(e) => println!("  无法启动编辑器 '{prog}': {e}"),
     }
+    // Root fix for the buffered-input problem: keys typed while the
+    // editor held the foreground sit in the tty line buffer; flush
+    // them so they never execute as commands afterwards.
+    crate::cli::flush_stdin();
 }
 
 #[cfg(test)]

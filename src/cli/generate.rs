@@ -1,66 +1,69 @@
-//! `g` 生成练习命令（M3 出题基座的 CLI 入口）。
-//!
-//! Flow: topic input → template pick → slot fill (LLM if configured,
-//! offline fallback otherwise) → triple verify → write into
-//! `exercises/generated/` → optionally enter the practice flow at once.
+//! `/generate` — exercise generation entry (M3 pipeline; offline
+//! capable). Shared by the REPL command and used by the agent's
+//! `generate_exercise` tool (the tool calls `generator::generate`
+//! directly). Progress prints stage lines; Ctrl-C aborts between
+//! rounds (the interrupt flag is checked inside the generator).
 
-use std::io::{self, Write};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use crate::config::ModelConfig;
-use crate::exercise::Exercise;
 use crate::generator;
 use crate::llm::LlmClient;
-use crate::usage;
+use crate::usage::UsageTracker;
 
-/// `g` — generate an exercise from a topic (M3 出题基座入口).
-#[allow(clippy::too_many_arguments)]
-pub(super) fn cmd_generate(
+use super::{practice, read_line_trimmed};
+
+/// `g` / `/generate` — generate an exercise from a topic. `arg` may
+/// carry the topic directly (`/g E0382`); otherwise it is prompted.
+pub(crate) fn cmd_generate(
     cfg: &ModelConfig,
-    tracker: &mut usage::UsageTracker,
+    tracker: &Arc<Mutex<UsageTracker>>,
     client: &Option<LlmClient>,
-    exercises: &mut Vec<Exercise>,
-    progress: &mut Vec<String>,
-    progress_path: &Path,
+    ctx: &practice::PracticeCtx,
+    arg: Option<&str>,
 ) {
     println!();
     println!("── 生成练习 ──");
-    println!("  输入主题：概念（如 trait 关联类型）、错误码（如 E0382）或关键词；直接回车返回。");
-    print!("主题> ");
-    io::stdout().flush().ok();
-    let mut line = String::new();
-    if io::stdin().read_line(&mut line).unwrap_or(0) == 0 {
-        return;
-    }
-    let topic_text = line.trim().to_string();
-    if topic_text.is_empty() {
-        return;
-    }
+    let topic_text = match arg {
+        Some(t) => t.to_string(),
+        None => {
+            println!("  输入主题：概念（如 trait 关联类型）、错误码（如 E0382）或关键词；直接回车返回。");
+            match read_line_trimmed("主题> ") {
+                None => return,
+                Some(t) if t.is_empty() => return,
+                Some(t) => t,
+            }
+        }
+    };
 
+    let totals = tracker.lock().expect("usage lock").all_totals().cost_usd;
     // R6: budget gate before any LLM usage.
-    if let Err(e) = usage::check_budget(tracker.all_totals().cost_usd, cfg.budget_usd()) {
+    if let Err(e) = crate::usage::check_budget(totals, cfg.budget_usd()) {
         println!();
         println!("  LLM 调用被拦截：{e}");
         println!("  将使用离线模式生成（默认填槽，无 LLM 变体）。");
     }
 
-    let topic = parse_topic(&topic_text);
+    let topic = generator::Topic::from_input(&topic_text);
 
-    // LLM caller: enforces budget + records usage per call (R6). When no
-    // key is configured the generator runs fully offline.
-    let mut call = |prompt: &str| -> anyhow::Result<crate::llm::LlmReply> {
-        usage::check_budget(tracker.all_totals().cost_usd, cfg.budget_usd())?;
+    // LLM caller: enforces budget + records usage per call (R6). When
+    // no key is configured the generator runs fully offline.
+    let tracker2 = tracker.clone();
+    let mut call = move |prompt: &str| -> anyhow::Result<crate::llm::LlmReply> {
+        let totals = tracker2.lock().expect("usage lock").all_totals().cost_usd;
+        crate::usage::check_budget(totals, cfg.budget_usd())?;
         let cl = client
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("未配置 API Key，无法调用模型"))?;
         let reply = cl.chat(prompt)?;
-        let cost = usage::cost_usd(
+        let cost = crate::usage::cost_usd(
             reply.usage.prompt_tokens,
             reply.usage.completion_tokens,
             cfg.prices.input,
             cfg.prices.output,
         );
-        tracker.record(
+        tracker2.lock().expect("usage lock").record(
             &cfg.model,
             reply.usage.prompt_tokens,
             reply.usage.completion_tokens,
@@ -85,10 +88,19 @@ pub(super) fn cmd_generate(
         generator::MAX_ATTEMPTS
     );
     let paths = generator::Paths::from_root(Path::new("."));
-    match generator::generate(&topic, &paths, llm) {
+    match generator::generate(
+        &topic,
+        &paths,
+        llm,
+        Some(&mut |stage| {
+            println!(
+                "  · {}（第 {}/{} 轮）…",
+                stage.stage, stage.attempt, stage.total_attempts
+            );
+        }),
+    ) {
         Ok(out) => {
-            let slots: Vec<String> =
-                out.slots.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            let slots: Vec<String> = out.slots.iter().map(|(k, v)| format!("{k}={v}")).collect();
             println!();
             println!(
                 "  ✔ 已生成（第 {} 轮通过）：{}（{}）",
@@ -108,29 +120,15 @@ pub(super) fn cmd_generate(
             }
             println!("    文件 {}（练习名 {}）", out.path.display(), out.name);
             println!();
-            print!("  现在开始做这道题？[Y/n] ");
-            io::stdout().flush().ok();
-            let mut go = String::new();
-            if io::stdin().read_line(&mut go).unwrap_or(0) == 0 {
-                return;
-            }
-            let go = go.trim().to_ascii_lowercase();
+            let go = read_line_trimmed("  现在开始做这道题？[Y/n] ").unwrap_or_default();
+            let go = go.to_ascii_lowercase();
             if go == "n" || go == "no" {
                 return;
             }
-            // Refresh the exercise list so the new file is discoverable.
             // Path comparison uses canonicalize(): the generator's path
             // carries a "./" prefix while discover() yields plain
             // relative paths, so raw equality would always miss.
-            let mut fresh = crate::exercise::discover(Path::new("exercises"));
-            fresh.sort_by(|a, b| a.category.cmp(&b.category).then(a.name.cmp(&b.name)));
-            let want = out.path.canonicalize().ok();
-            if let Some(idx) = fresh.iter().position(|e| e.path.canonicalize().ok() == want) {
-                *exercises = fresh;
-                super::run_exercise(idx, exercises, progress, progress_path, cfg.editor.as_deref());
-            } else {
-                println!("  生成文件未出现在练习列表（意外），可手动打开 {}", out.path.display());
-            }
+            practice::enter_at(ctx, &out.path);
         }
         Err(e) => {
             println!();
@@ -140,50 +138,22 @@ pub(super) fn cmd_generate(
     }
 }
 
-/// Heuristic topic parsing: `E0382`-style inputs become an error-code
-/// request, dotted ids like `traits.associated-types` become a concept
-/// request, everything else is free text.
-fn parse_topic(input: &str) -> generator::Topic {
-    let t = input.trim();
-    let is_code = t.len() == 5
-        && (t.starts_with('E') || t.starts_with('e'))
-        && t[1..].chars().all(|c| c.is_ascii_digit());
-    let is_concept_id = t.contains('.')
-        && t.chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'));
-    if is_code {
-        generator::Topic::ErrorCode(t.to_uppercase())
-    } else if is_concept_id {
-        generator::Topic::Concept(t.to_string())
-    } else {
-        generator::Topic::FreeText(t.to_string())
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::generator::Topic;
-
     #[test]
-    fn topic_parsing_heuristics() {
+    fn topic_parsing_heuristics_via_generator() {
+        use crate::generator::Topic;
+        assert_eq!(Topic::from_input("e0382"), Topic::ErrorCode("E0382".to_string()));
+        assert_eq!(Topic::from_input("E0277"), Topic::ErrorCode("E0277".to_string()));
         assert_eq!(
-            parse_topic("e0382"),
-            Topic::ErrorCode("E0382".to_string())
-        );
-        assert_eq!(
-            parse_topic("E0277"),
-            Topic::ErrorCode("E0277".to_string())
-        );
-        assert_eq!(
-            parse_topic("traits.associated-types"),
+            Topic::from_input("traits.associated-types"),
             Topic::Concept("traits.associated-types".to_string())
         );
         assert_eq!(
-            parse_topic("来一道 Box<dyn Error> 的题"),
+            Topic::from_input("来一道 Box<dyn Error> 的题"),
             Topic::FreeText("来一道 Box<dyn Error> 的题".to_string())
         );
         // Not a 4-digit code → free text.
-        assert_eq!(parse_topic("E99999"), Topic::FreeText("E99999".to_string()));
+        assert_eq!(Topic::from_input("E99999"), Topic::FreeText("E99999".to_string()));
     }
 }

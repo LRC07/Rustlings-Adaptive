@@ -1,0 +1,522 @@
+//! Agent environment & loop (M4): the conversation engine that turns
+//! user input into model calls plus local tool executions (design
+//! §7.3). One `run_turn` = one user turn; it may loop through several
+//! model calls while tools run, and always returns the updated history
+//! so the REPL can persist it as the session trajectory (R5).
+//!
+//! Design notes:
+//! - The caller is an injected trait (`ChatTurnCaller`): production
+//!   wires the blocking `LlmClient`, tests wire mocks.
+//! - Tool calls are consumed from the OpenAI `tool_calls` field; models
+//!   without native function calling can fall back to a JSON directive
+//!   in the text (system prompt documents it).
+//! - R6: every model call's usage is recorded (phase `chat` / per-tool
+//!   `generate`) and summed per turn for the CLI footer line.
+//! - R4: the loop checks the global interrupt flag between steps so
+//!   Ctrl-C aborts a turn promptly (an in-flight HTTP call finishes in
+//!   the background; its usage is still recorded).
+
+pub mod session;
+pub mod tools;
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+use anyhow::{anyhow, Result};
+
+use crate::config::ModelConfig;
+use crate::llm::{ChatMessage, Tool, TurnOutput};
+use crate::usage::{self, UsageTracker};
+
+/// System prompt: role, teaching stance, tool protocol (incl. the text
+/// fallback for models without native function calling).
+pub const SYSTEM_PROMPT: &str = "\
+You are the coach of RustLings-Adaptive, a Rust diagnostics tutor \
+running inside a local CLI. The user is a Rust learner stuck on \
+ownership/borrowing/lifetimes/traits/generics-style issues. Reply in \
+简体中文, compactly (terminal UI).
+
+Principles:
+- Anchor diagnoses to facts: rustc error codes (E0xxx) plus the \
+fine-grained concept ids from the local taxonomy. Never invent codes.
+- Real execution over speculation: when the user pastes code or an \
+error, call `check_code` to compile it locally first and explain from \
+the real diagnostics.
+- Teach, don't dump solutions: give hints and next steps first.
+- When the user wants to practice, or a quick focused exercise would \
+verify their understanding, call `generate_exercise` with a topic (a \
+concept id from `list_concepts`, an error code like E0382, or free \
+text). After it succeeds, say the exercise is ready and can be started \
+immediately.
+- At most a few tool calls per turn; never call the same tool twice \
+with identical arguments.
+
+Tools:
+- `list_concepts` {} — list the concept ids covered by the taxonomy.
+- `generate_exercise` {\"topic\": string} — generate a small 10-40 line \
+fill-in exercise, triple-verified locally (compiles / reference \
+solution passes all tests / unfinished template fails). It is written \
+to the exercise directory; the user can start at once.
+- `check_code` {\"code\": string} — compile a Rust snippet with local \
+rustc and return real diagnostics (codes, messages, lines).
+
+If your runtime cannot emit native tool calls, output a single JSON \
+object on its own line instead: {\"tool\": \"<name>\", \"arguments\": \
+{...}} — the harness runs it and feeds the result back.";
+
+/// Blocking chat-turn caller; trait so tests can mock the model.
+pub trait ChatTurnCaller: Send + Sync {
+    fn chat_turn(&self, messages: &[ChatMessage], tools: &[Tool]) -> Result<TurnOutput>;
+}
+
+impl ChatTurnCaller for crate::llm::LlmClient {
+    fn chat_turn(&self, messages: &[ChatMessage], tools: &[Tool]) -> Result<TurnOutput> {
+        crate::llm::LlmClient::chat_turn(self, messages, tools)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Interrupt flag (R4). The ctrlc handler in the CLI sets it; the agent
+// loop and long-running tools poll it.
+// ---------------------------------------------------------------------------
+
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_interrupt() {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+pub fn reset_interrupt() {
+    INTERRUPTED.store(false, Ordering::SeqCst);
+}
+
+pub fn is_interrupted() -> bool {
+    INTERRUPTED.load(Ordering::SeqCst)
+}
+
+// ---------------------------------------------------------------------------
+// Environment & turn
+// ---------------------------------------------------------------------------
+
+/// Everything a turn (and its tools) needs from the outside.
+pub struct AgentEnv {
+    pub caller: Arc<dyn ChatTurnCaller>,
+    pub tracker: Arc<Mutex<UsageTracker>>,
+    pub cfg: ModelConfig,
+    /// Repo root (templates/, taxonomy/, exercises/ live under it).
+    pub root: PathBuf,
+}
+
+/// Offer to jump into the practice sub-mode after an exercise was
+/// generated inside a turn.
+#[derive(Debug, Clone)]
+pub struct PracticeOffer {
+    pub title: String,
+    pub path: PathBuf,
+    pub difficulty: String,
+}
+
+/// Result of one completed user turn.
+#[derive(Debug)]
+pub struct TurnOutcome {
+    /// Full updated history (including system prompt, user input, tool
+    /// traffic, final assistant reply) — the session persists this.
+    pub history: Vec<ChatMessage>,
+    /// Final assistant text to display (None when aborted early).
+    pub reply: Option<String>,
+    /// Human-readable tool trace lines ("生成成功：…").
+    pub tool_notes: Vec<String>,
+    pub practice: Option<PracticeOffer>,
+    /// Usage of this turn (direct calls + tool-internal calls).
+    pub calls: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost_usd: f64,
+}
+
+/// How many model⇄tool round trips per user turn before bailing out.
+pub const MAX_TOOL_ROUNDS: u32 = 5;
+/// Messages sent to the model: system + this many latest messages.
+pub const WINDOW_MESSAGES: usize = 24;
+/// Tool results are trimmed to this length before entering history.
+const TOOL_RESULT_CHARS: usize = 1500;
+
+/// Run one user turn. `progress` receives short status strings for the
+/// CLI spinner ("思考中…", "工具 check_code…").
+pub fn run_turn(
+    history: &[ChatMessage],
+    input: &str,
+    env: &AgentEnv,
+    progress: &dyn Fn(&str),
+) -> Result<TurnOutcome> {
+    let mut msgs: Vec<ChatMessage> = history.to_vec();
+    if msgs.is_empty() {
+        msgs.push(ChatMessage::system(SYSTEM_PROMPT));
+    }
+    msgs.push(ChatMessage::user(input));
+
+    let mut totals = tools::UsageAcc::default();
+    let mut tool_notes = Vec::new();
+    let mut practice = None;
+    let mut reply: Option<String> = None;
+
+    for _round in 0..MAX_TOOL_ROUNDS {
+        if is_interrupted() {
+            return Err(anyhow!("已打断"));
+        }
+
+        // R6: budget gate before every direct model call.
+        if let Err(e) = usage::check_budget(
+            env.tracker.lock().expect("usage lock").all_totals().cost_usd,
+            env.cfg.budget_usd(),
+        ) {
+            reply = Some(format!("（模型调用被拦截：{e}。可在 /config 调整预算或查看 /usage。）"));
+            msgs.push(ChatMessage::assistant(reply.clone().unwrap()));
+            return Ok(TurnOutcome {
+                history: msgs,
+                reply,
+                tool_notes,
+                practice,
+                calls: totals.calls,
+                input_tokens: totals.input_tokens,
+                output_tokens: totals.output_tokens,
+                cost_usd: totals.cost_usd,
+            });
+        }
+
+        progress("思考中…");
+        let out = env
+            .caller
+            .chat_turn(&window(&msgs), &tools::tool_schemas())
+            .map_err(|e| {
+                if is_interrupted() {
+                    anyhow!("已打断")
+                } else {
+                    e
+                }
+            })?;
+        record(env, out.usage, "chat", &mut totals);
+
+        if !out.has_tool_calls() {
+            // Text-protocol fallback: a JSON {"tool": ...} directive.
+            if let Some((name, args, raw)) = out.content.as_deref().and_then(parse_text_directive) {
+                msgs.push(ChatMessage::assistant(raw.clone()));
+                progress(&format!("工具 {name}…"));
+                let result = run_tool(&name, &args, env, progress, &mut totals, &mut tool_notes, &mut practice);
+                msgs.push(ChatMessage::user(format!("[工具 {name} 结果]\n{result}")));
+                continue;
+            }
+            // Final answer for this turn.
+            let text = out
+                .content
+                .filter(|c| !c.trim().is_empty())
+                .unwrap_or_else(|| "（模型返回了空回复，请重试）".to_string());
+            msgs.push(ChatMessage::assistant(text.clone()));
+            reply = Some(text);
+            break;
+        }
+
+        // Native tool calls: answer them via role:"tool" messages.
+        msgs.push(ChatMessage::assistant_with_calls(out.tool_calls.clone()));
+        for call in &out.tool_calls {
+            if is_interrupted() {
+                return Err(anyhow!("已打断"));
+            }
+            progress(&format!("工具 {}…", call.name));
+            let result = run_tool(
+                &call.name,
+                &call.arguments,
+                env,
+                progress,
+                &mut totals,
+                &mut tool_notes,
+                &mut practice,
+            );
+            msgs.push(ChatMessage::tool_result(call.id.clone(), result));
+        }
+    }
+
+    if reply.is_none() {
+        // Tool-round budget exhausted: close the turn gracefully.
+        let text = "（本回合的工具调用轮次已达上限，先回答到这里；可以继续追问或换个问法。）".to_string();
+        msgs.push(ChatMessage::assistant(text.clone()));
+        reply = Some(text);
+    }
+
+    Ok(TurnOutcome {
+        history: msgs,
+        reply,
+        tool_notes,
+        practice,
+        calls: totals.calls,
+        input_tokens: totals.input_tokens,
+        output_tokens: totals.output_tokens,
+        cost_usd: totals.cost_usd,
+    })
+}
+
+/// Execute one tool call: on success return its JSON; on failure
+/// return an error JSON (the model can react, e.g. retry with
+/// different arguments).
+fn run_tool(
+    name: &str,
+    arguments: &str,
+    env: &AgentEnv,
+    progress: &dyn Fn(&str),
+    totals: &mut tools::UsageAcc,
+    tool_notes: &mut Vec<String>,
+    practice: &mut Option<PracticeOffer>,
+) -> String {
+    match tools::execute(name, arguments, env, progress) {
+        Ok(outcome) => {
+            totals.calls += outcome.usage.calls;
+            totals.input_tokens += outcome.usage.input_tokens;
+            totals.output_tokens += outcome.usage.output_tokens;
+            totals.cost_usd += outcome.usage.cost_usd;
+            if let Some(n) = outcome.note {
+                tool_notes.push(n);
+            }
+            if outcome.practice.is_some() {
+                *practice = outcome.practice;
+            }
+            ellipsize(&outcome.value.to_string(), TOOL_RESULT_CHARS)
+        }
+        Err(e) => {
+            let msg = format!("工具执行失败：{e:#}");
+            tool_notes.push(msg.clone());
+            serde_json::json!({ "ok": false, "error": ellipsize(&msg, TOOL_RESULT_CHARS) }).to_string()
+        }
+    }
+}
+
+/// Record one model call into the usage tracker (R6).
+fn record(env: &AgentEnv, u: crate::llm::Usage, phase: &str, totals: &mut tools::UsageAcc) {
+    let cost = usage::cost_usd(u.prompt_tokens, u.completion_tokens, env.cfg.prices.input, env.cfg.prices.output);
+    env.tracker
+        .lock()
+        .expect("usage lock")
+        .record(&env.cfg.model, u.prompt_tokens, u.completion_tokens, cost, phase);
+    totals.add(u.prompt_tokens, u.completion_tokens, cost);
+}
+
+// ---------------------------------------------------------------------------
+// Context window & text protocol
+// ---------------------------------------------------------------------------
+
+/// Outgoing message window: system prompt + the latest messages, with
+/// oversized contents trimmed. Leading orphan tool results (cut loose
+/// by the window) are dropped so the wire format stays valid.
+pub fn window(msgs: &[ChatMessage]) -> Vec<ChatMessage> {
+    let mut out: Vec<ChatMessage> = if msgs.len() <= WINDOW_MESSAGES + 1 {
+        msgs.to_vec()
+    } else {
+        let mut v = vec![msgs[0].clone()];
+        v.extend(msgs[msgs.len() - WINDOW_MESSAGES..].iter().cloned());
+        v
+    };
+    // Drop tool results whose assistant tool_calls message was cut off.
+    while out.len() > 1 && out[1].role == "tool" {
+        out.remove(1);
+    }
+    for m in &mut out {
+        if let Some(c) = m.content.as_mut().filter(|c| c.chars().count() > TOOL_RESULT_CHARS) {
+            *c = ellipsize(c, TOOL_RESULT_CHARS);
+        }
+    }
+    out
+}
+
+/// Detect the text-protocol directive `{"tool": ..., "arguments": ...}`
+/// in a model reply. Returns (name, arguments-json, raw-text).
+fn parse_text_directive(content: &str) -> Option<(String, String, String)> {
+    let start = content.find('{')?;
+    let end = content.rfind('}')?;
+    if end < start {
+        return None;
+    }
+    let candidate = &content[start..=end];
+    let v: serde_json::Value = serde_json::from_str(candidate).ok()?;
+    let name = v.get("tool")?.as_str()?.to_string();
+    let args = v
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()))
+        .to_string();
+    Some((name, args, content.to_string()))
+}
+
+fn ellipsize(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max_chars).collect();
+    format!("{head}…")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::{ToolCall, Usage};
+
+    fn reply(content: &str) -> TurnOutput {
+        TurnOutput { content: Some(content.into()), tool_calls: vec![], usage: Usage { prompt_tokens: 10, completion_tokens: 5 } }
+    }
+
+    fn calls_output(calls: Vec<ToolCall>) -> TurnOutput {
+        TurnOutput { content: None, tool_calls: calls, usage: Usage { prompt_tokens: 10, completion_tokens: 5 } }
+    }
+
+    fn call(id: &str, name: &str, args: &str) -> ToolCall {
+        ToolCall { id: id.into(), name: name.into(), arguments: args.into() }
+    }
+
+    /// Scripted model: pops queued outputs in order.
+    struct Mock {
+        turns: std::sync::Mutex<Vec<Result<TurnOutput>>>,
+    }
+    impl Mock {
+        fn new(turns: Vec<Result<TurnOutput>>) -> Self {
+            Self { turns: std::sync::Mutex::new(turns) }
+        }
+    }
+    impl ChatTurnCaller for Mock {
+        fn chat_turn(&self, _m: &[ChatMessage], _t: &[Tool]) -> Result<TurnOutput> {
+            self.turns.lock().unwrap().remove(0)
+        }
+    }
+
+    fn test_env(caller: Arc<dyn ChatTurnCaller>) -> AgentEnv {
+        AgentEnv {
+            caller,
+            tracker: Arc::new(Mutex::new(usage::UsageTracker::from_path(
+                std::env::temp_dir().join(format!("rs_agent_usage_{}.json", std::process::id())),
+            ))),
+            cfg: ModelConfig::default(),
+            root: PathBuf::from("."),
+        }
+    }
+
+    fn noop(_: &str) {}
+
+    #[test]
+    fn plain_reply_updates_history_and_records_usage() {
+        let env = test_env(Arc::new(Mock::new(vec![Ok(reply("E0382 是所有权移动"))])));
+        let out = run_turn(&[], "为什么报错", &env, &noop).unwrap();
+        assert_eq!(out.reply.as_deref(), Some("E0382 是所有权移动"));
+        assert!(out.tool_notes.is_empty());
+        assert_eq!(out.calls, 1);
+        assert_eq!(out.input_tokens, 10);
+        // system + user + assistant
+        assert_eq!(out.history.len(), 3);
+        assert_eq!(out.history[0].role, "system");
+        assert_eq!(out.history[2].role, "assistant");
+        // usage recorded into the tracker
+        assert_eq!(env.tracker.lock().unwrap().session_totals().calls, 1);
+        assert!(env.tracker.lock().unwrap().session_totals().cost_usd > 0.0);
+    }
+
+    #[test]
+    fn tool_round_trips_then_answers() {
+        let env = test_env(Arc::new(Mock::new(vec![
+            Ok(calls_output(vec![call("c1", tools::TOOL_LIST_CONCEPTS, "{}")])),
+            Ok(reply("概念图谱有这些主题…")),
+        ])));
+        let out = run_turn(&[], "能出什么题", &env, &noop).unwrap();
+        assert_eq!(out.reply.as_deref(), Some("概念图谱有这些主题…"));
+        assert_eq!(out.history.len(), 5); // sys + user + asst(calls) + tool + asst
+        assert_eq!(out.history[3].role, "tool");
+        assert_eq!(out.history[3].tool_call_id.as_deref(), Some("c1"));
+        assert!(out.history[3].content.as_deref().unwrap().contains("concepts"));
+        assert_eq!(out.calls, 2);
+        assert!(!out.tool_notes.is_empty());
+    }
+
+    #[test]
+    fn text_protocol_fallback_runs_tools() {
+        let env = test_env(Arc::new(Mock::new(vec![
+            Ok(reply("{\"tool\": \"list_concepts\", \"arguments\": {}}")),
+            Ok(reply("这些是可用主题")),
+        ])));
+        let out = run_turn(&[], "主题", &env, &noop).unwrap();
+        assert_eq!(out.reply.as_deref(), Some("这些是可用主题"));
+        // fallback feeds results as user messages
+        assert_eq!(out.history.len(), 5);
+        assert_eq!(out.history[3].role, "user");
+        assert!(out.history[3].content.as_deref().unwrap().starts_with("[工具 list_concepts 结果]"));
+    }
+
+    #[test]
+    fn failed_tool_returns_error_json_and_loop_continues() {
+        let env = test_env(Arc::new(Mock::new(vec![
+            Ok(calls_output(vec![call("c1", "no_such_tool", "{}")])),
+            Ok(reply("明白了，换个方式")),
+        ])));
+        let out = run_turn(&[], "x", &env, &noop).unwrap();
+        assert_eq!(out.history[3].role, "tool");
+        assert!(out.history[3].content.as_deref().unwrap().contains("\"ok\":false"));
+        assert!(out.tool_notes.iter().any(|n| n.contains("工具执行失败")));
+    }
+
+    #[test]
+    fn budget_exhausted_blocks_before_calling() {
+        let mut env = test_env(Arc::new(Mock::new(vec![Ok(reply("不该被调用"))])));
+        env.cfg.budget = Some(crate::config::Budget { usd: 0.0 });
+        let out = run_turn(&[], "问个问题", &env, &noop).unwrap();
+        assert!(out.reply.as_deref().unwrap().contains("被拦截"), "{out:?}");
+        assert_eq!(out.calls, 0);
+        assert!(out.history.iter().any(|m| m.role == "assistant" && m.content.as_deref().unwrap().contains("被拦截")));
+    }
+
+    #[test]
+    fn window_keeps_system_and_latest() {
+        let msgs: Vec<ChatMessage> = std::iter::once(ChatMessage::system("sys"))
+            .chain((0..40).map(|i| ChatMessage::user(format!("m{i}"))))
+            .collect();
+        let w = window(&msgs);
+        assert_eq!(w.len(), WINDOW_MESSAGES + 1);
+        assert_eq!(w[0].content.as_deref(), Some("sys"));
+        assert_eq!(w[1].content.as_deref(), Some("m16"));
+        assert_eq!(w.last().unwrap().content.as_deref(), Some("m39"));
+    }
+
+    #[test]
+    fn window_drops_orphan_tool_results() {
+        // Defensive shape: a tool result whose assistant tool_calls
+        // message was cut off (boundary case) must be dropped, or the
+        // request would be wire-invalid.
+        let msgs = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::tool_result("c1", "r"),
+            ChatMessage::user("later"),
+        ];
+        let w = window(&msgs);
+        assert!(w.iter().all(|m| m.role != "tool"), "orphan tool result must be dropped");
+        assert_eq!(w.len(), 2);
+        assert_eq!(w[0].role, "system");
+    }
+
+    #[test]
+    fn long_tool_results_are_trimmed() {
+        let big = "x".repeat(5000);
+        let msgs = vec![
+            ChatMessage::system("s"),
+            ChatMessage::user("q"),
+            ChatMessage::assistant_with_calls(vec![call("c1", "t", "{}")]),
+            ChatMessage::tool_result("c1", big),
+        ];
+        let w = window(&msgs);
+        let tool_msg = w.iter().find(|m| m.role == "tool").unwrap();
+        assert!(tool_msg.content.as_deref().unwrap().chars().count() <= TOOL_RESULT_CHARS + 2);
+    }
+
+    #[test]
+    fn text_directive_parsing() {
+        let (name, args, raw) = parse_text_directive("好的 {\"tool\": \"check_code\", \"arguments\": {\"code\": \"fn main(){}\"}} 就绪").unwrap();
+        assert_eq!(name, "check_code");
+        assert!(args.contains("fn main"));
+        assert!(raw.contains("就绪"));
+        assert!(parse_text_directive("没有 JSON").is_none());
+        assert!(parse_text_directive("{\"other\": 1}").is_none());
+    }
+}
