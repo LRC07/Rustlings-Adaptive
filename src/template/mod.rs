@@ -1,0 +1,726 @@
+//! Exercise template library (v3 design §7.2, M3): hand-written TOML
+//! files under `templates/` are the deterministic base for question
+//! generation. A template is a small Rust snippet with `{{slot}}`
+//! placeholders, shared tests, a reference solution and abstract
+//! constraints.
+//!
+//! This module provides:
+//! - loading + validating a directory of templates (rule filter from
+//!   design §7.4-2: ≤2 concepts, 10–40 body lines, ≤2 todo!-macros,
+//!   tests present, slot declarations consistent with placeholders),
+//! - rendering (slot filling) with per-kind value validation,
+//! - a deterministic default fill so generation also works offline
+//!   (no LLM) and retries can rotate through the declared candidates.
+
+use std::path::Path;
+
+use anyhow::{bail, Context, Result};
+use serde::Deserialize;
+
+use crate::constraints::Constraint;
+
+// ---------------------------------------------------------------------------
+// Data model
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Difficulty {
+    Easy,
+    #[default]
+    Medium,
+    Hard,
+}
+
+impl Difficulty {
+    pub fn name_cn(&self) -> &'static str {
+        match self {
+            Difficulty::Easy => "简单",
+            Difficulty::Medium => "中等",
+            Difficulty::Hard => "困难",
+        }
+    }
+}
+
+/// What kind of value a slot expects (design §7.2: ident | type | literal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SlotKind {
+    /// A Rust identifier (e.g. a variable or function name).
+    Ident,
+    /// A type expression (e.g. `u32`, `Vec<String>`).
+    Type,
+    /// A literal / small expression used as a value.
+    Literal,
+}
+
+impl SlotKind {
+    pub fn name_cn(&self) -> &'static str {
+        match self {
+            SlotKind::Ident => "标识符",
+            SlotKind::Type => "类型",
+            SlotKind::Literal => "字面量",
+        }
+    }
+}
+
+/// One `{{name}}` hole in the template, with allowed candidate values
+/// (for LLM-guided variety and retry rotation) and a deterministic
+/// default (offline fallback).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SlotSpec {
+    pub name: String,
+    pub kind: SlotKind,
+    #[serde(default)]
+    pub values: Vec<String>,
+    #[serde(default)]
+    pub default: String,
+}
+
+/// Seeds for the M5 review gate (root-cause keywords, misconception
+/// options). Optional; templates may omit it.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewHints {
+    #[allow(dead_code)] // consumed by the M5 review gate
+    #[serde(default)]
+    pub root_cause: Vec<String>,
+    #[allow(dead_code)] // consumed by the M5 review gate
+    #[serde(default)]
+    pub misconceptions: Vec<String>,
+}
+
+/// A validated, in-memory exercise template.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Template {
+    pub id: String,
+    /// Short Chinese title (also used as the first comment line of the
+    /// generated exercise file).
+    pub title: String,
+    /// Concept ids from `taxonomy/concepts.toml` (≤2, rule filter).
+    pub concepts: Vec<String>,
+    /// Error codes this exercise typically triggers when solved wrong.
+    #[serde(default)]
+    pub error_codes: Vec<String>,
+    #[serde(default)]
+    pub difficulty: Difficulty,
+    /// Instruction comments + code with `{{slot}}` placeholders and a
+    /// TODO marker (what the user sees and edits).
+    pub body: String,
+    /// `#[cfg(test)] mod tests { … }` shared by template and reference.
+    pub tests: String,
+    /// Reference solution (same placeholders), must pass the triple gate
+    /// and its own declared constraints.
+    pub reference: String,
+    #[serde(default)]
+    pub slots: Vec<SlotSpec>,
+    /// Constraint spec strings (`no-clone`, `max-lines=25`, …), parsed
+    /// via `constraints::Constraint::from_spec`.
+    #[serde(default)]
+    pub constraints: Vec<String>,
+    #[allow(dead_code)] // consumed by the M5 review gate
+    #[serde(default)]
+    pub review_hints: Option<ReviewHints>,
+}
+
+/// The result of filling all slots of a template.
+#[derive(Debug, Clone, Default)]
+pub struct RenderedExercise {
+    pub body: String,
+    pub tests: String,
+    pub reference: String,
+}
+
+impl RenderedExercise {
+    /// The file the user edits (body + tests).
+    pub fn user_file(&self) -> String {
+        format!("{}\n{}\n", self.body.trim_end(), self.tests.trim())
+    }
+
+    /// The hidden reference file used by the triple gate (same tests).
+    pub fn reference_file(&self) -> String {
+        format!("{}\n{}\n", self.reference.trim_end(), self.tests.trim())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Loading + rule filter
+// ---------------------------------------------------------------------------
+
+/// Load every `*.toml` under `dir` (sorted by id). Each file must be a
+/// single template and must pass the rule filter.
+pub fn load_dir(dir: &Path) -> Result<Vec<Template>> {
+    let mut files: Vec<_> = std::fs::read_dir(dir)
+        .with_context(|| format!("读取模板目录 {} 失败", dir.display()))?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("toml"))
+        .collect();
+    files.sort();
+
+    let mut out = Vec::new();
+    let mut errors = Vec::new();
+    for path in files {
+        match load_file(&path) {
+            Ok(t) => out.push(t),
+            Err(e) => errors.push(format!("{}: {e:#}", path.display())),
+        }
+    }
+    if let Some(dup) = find_duplicate_id(&out) {
+        errors.push(format!("模板 id 重复: '{dup}'"));
+    }
+    if !errors.is_empty() {
+        bail!("模板库校验失败（{} 个文件）:\n  - {}", errors.len(), errors.join("\n  - "));
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(out)
+}
+
+fn find_duplicate_id(templates: &[Template]) -> Option<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for t in templates {
+        if !seen.insert(t.id.as_str()) {
+            return Some(t.id.clone());
+        }
+    }
+    None
+}
+
+/// Load and validate a single template file.
+pub fn load_file(path: &Path) -> Result<Template> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("读取 {} 失败", path.display()))?;
+    let t: Template = toml::from_str(&text)
+        .with_context(|| format!("TOML 解析失败（{}）", path.display()))?;
+    let violations = rule_filter(&t);
+    if !violations.is_empty() {
+        bail!("规则过滤未通过:\n  - {}", violations.join("\n  - "));
+    }
+    // Parse constraint spec strings into real constraints (also
+    // re-serializable for display).
+    let _ = constraints_of(&t)?;
+    Ok(t)
+}
+
+/// Parsed constraints of a template (spec strings → `Constraint`).
+pub fn constraints_of(t: &Template) -> Result<Vec<Constraint>> {
+    let mut out = Vec::new();
+    for spec in &t.constraints {
+        let c = Constraint::from_spec(spec)
+            .with_context(|| format!("模板 '{}' 的约束 '{}' 无法解析", t.id, spec))?;
+        out.push(c);
+    }
+    Ok(out)
+}
+
+/// Rule filter from design §7.4-2 (static, boolean, no scoring).
+/// Returns violation descriptions; empty means the template is fine.
+pub fn rule_filter(t: &Template) -> Vec<String> {
+    let mut v = Vec::new();
+
+    if t.id.trim().is_empty() {
+        v.push("缺少 id".into());
+    }
+    if t.title.trim().is_empty() {
+        v.push("缺少 title".into());
+    }
+    if t.concepts.is_empty() {
+        v.push("至少标注 1 个概念".into());
+    } else if t.concepts.len() > 2 {
+        v.push(format!("概念数 {} 超过上限 2", t.concepts.len()));
+    }
+    for c in &t.concepts {
+        if c.trim().is_empty() {
+            v.push("存在空概念 id".into());
+            break;
+        }
+    }
+
+    // 10–40 non-empty body lines (instruction comments count: they are
+    // part of the rendered snippet; tests are separate and uncounted).
+    let body_lines = t.body.lines().filter(|l| !l.trim().is_empty()).count();
+    if !(10..=40).contains(&body_lines) {
+        v.push(format!("body 非空行数 {body_lines} 不在 10–40 范围"));
+    }
+
+    let todos = count_todo(&t.body);
+    if todos > 2 {
+        v.push(format!("todo!/unimplemented! 出现 {todos} 次，超过上限 2"));
+    }
+
+    if t.tests.trim().is_empty() || !t.tests.contains("#[test]") {
+        v.push("tests 缺失（需要含 #[test] 的测试模块）".into());
+    }
+
+    if t.reference.trim().is_empty() {
+        v.push("reference 缺失".into());
+    } else {
+        if count_todo(&t.reference) > 0 {
+            v.push("reference 不能包含 todo!/unimplemented!".into());
+        }
+        if t.reference.contains("I AM NOT DONE") {
+            v.push("reference 不能包含 I AM NOT DONE".into());
+        }
+    }
+
+    // Slot declarations vs. placeholders must match exactly, and each
+    // declared slot needs a usable default.
+    let declared: std::collections::BTreeSet<&str> =
+        t.slots.iter().map(|s| s.name.as_str()).collect();
+    if declared.len() != t.slots.len() {
+        v.push("slots 存在重名".into());
+    }
+    let mut used = std::collections::BTreeSet::new();
+    for text in [&t.body, &t.tests, &t.reference] {
+        for name in placeholders(text) {
+            if !declared.contains(name.as_str()) {
+                v.push(format!("占位符 {{{{{name}}}}} 未在 slots 中声明"));
+            }
+            used.insert(name);
+        }
+    }
+    for s in &t.slots {
+        if !used.contains(s.name.as_str()) {
+            v.push(format!("槽位 '{}' 声明了但未被使用", s.name));
+        }
+        if s.default.trim().is_empty() {
+            v.push(format!("槽位 '{}' 缺少 default（离线回退需要）", s.name));
+        } else if !s.values.is_empty() && !s.values.iter().any(|x| x == &s.default) {
+            v.push(format!("槽位 '{}' 的 default 不在 values 中", s.name));
+        }
+    }
+
+    v
+}
+
+fn count_todo(text: &str) -> usize {
+    // Count actual macro invocations, not mentions inside comments.
+    let stripped = strip_line_comments(text);
+    stripped.matches("todo!").count() + stripped.matches("unimplemented!").count()
+}
+
+/// Naive `//` line-comment stripper (same limitation as
+/// `constraints::check`: string literals are not parsed).
+fn strip_line_comments(code: &str) -> String {
+    code.lines()
+        .map(|l| match l.find("//") {
+            Some(idx) if !l[..idx].matches('"').count() % 2 == 1 => &l[..idx],
+            _ => l,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Extract all `{{name}}` placeholder names from a text.
+pub fn placeholders(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("{{") {
+        let after = &rest[start + 2..];
+        if let Some(end) = after.find("}}") {
+            let name = after[..end].trim();
+            if !name.is_empty() {
+                out.push(name.to_string());
+            }
+            rest = &after[end + 2..];
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Slot filling / rendering
+// ---------------------------------------------------------------------------
+
+/// Validate one slot value against its declared kind (light checks; the
+/// triple gate is the real safety net).
+pub fn validate_slot_value(kind: SlotKind, value: &str) -> Result<()> {
+    let bad = |why: &str| anyhow::anyhow!("槽位值 '{value}' 不是合法的{}：{why}", kind.name_cn());
+    if value.trim().is_empty() {
+        return Err(bad("为空"));
+    }
+    if value.contains("{{") || value.contains("}}") {
+        return Err(bad("包含占位符记号"));
+    }
+    if value.lines().count() > 1 {
+        return Err(bad("包含换行"));
+    }
+    match kind {
+        SlotKind::Ident => {
+            let mut chars = value.chars();
+            let first = chars.next().unwrap();
+            let ok = (first.is_alphabetic() || first == '_')
+                && chars.all(|c| c.is_alphanumeric() || c == '_');
+            if !ok {
+                return Err(bad("标识符需以字母/下划线开头且只含字母数字下划线"));
+            }
+        }
+        SlotKind::Type => {
+            let mut depth: i32 = 0;
+            for c in value.chars() {
+                match c {
+                    '<' => depth += 1,
+                    '>' => {
+                        depth -= 1;
+                        if depth < 0 {
+                            return Err(bad("尖括号不配对"));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if depth != 0 {
+                return Err(bad("尖括号不配对"));
+            }
+        }
+        SlotKind::Literal => {}
+    }
+    Ok(())
+}
+
+/// Deterministic fill for attempt `attempt` (0-based). Attempt 0 uses
+/// each slot's `default`; later attempts rotate through `values` so
+/// retries naturally try different variations without an LLM.
+pub fn fill_for_attempt(t: &Template, attempt: usize) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    for (i, slot) in t.slots.iter().enumerate() {
+        let value = if attempt == 0 || slot.values.is_empty() {
+            slot.default.clone()
+        } else {
+            // Rotate deterministically; attempt N tries a fresh combo.
+            let idx = (attempt + i) % slot.values.len();
+            slot.values[idx].clone()
+        };
+        out.insert(slot.name.clone(), value);
+    }
+    out
+}
+
+/// Render a template with the given slot values. Errors on unknown
+/// slots, missing values, invalid values, or leftover placeholders.
+pub fn render(t: &Template, values: &std::collections::BTreeMap<String, String>) -> Result<RenderedExercise> {
+    for slot in &t.slots {
+        let Some(v) = values.get(&slot.name) else {
+            bail!("槽位 '{}' 没有提供值", slot.name);
+        };
+        validate_slot_value(slot.kind, v)
+            .with_context(|| format!("模板 '{}' 的槽位 '{}'", t.id, slot.name))?;
+    }
+    for name in values.keys() {
+        if !t.slots.iter().any(|s| &s.name == name) {
+            bail!("槽位 '{}' 未在模板 '{}' 中声明", name, t.id);
+        }
+    }
+
+    let fill = |text: &str| -> Result<String> {
+        let mut out = text.to_string();
+        for (k, v) in values {
+            out = out.replace(&format!("{{{{{k}}}}}"), v);
+        }
+        // Also tolerate spaces inside braces, e.g. {{ name }}.
+        if let Some(left) = leftovers(&out) {
+            bail!("模板 '{}' 填充后仍有占位符: {{{{{left}}}}}", t.id);
+        }
+        Ok(out)
+    };
+
+    Ok(RenderedExercise {
+        body: fill(&t.body)?,
+        tests: fill(&t.tests)?,
+        reference: fill(&t.reference)?,
+    })
+}
+
+/// After substitution, find the first leftover `{{…}}` (if any).
+fn leftovers(text: &str) -> Option<String> {
+    let rest = text;
+    while let Some(start) = rest.find("{{") {
+        let after = &rest[start + 2..];
+        match after.find("}}") {
+            Some(end) => return Some(after[..end].trim().to_string()),
+            None => return None,
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE: &str = r#"
+id = "own-move-struct"
+title = "所有权移动：把值交给函数"
+concepts = ["ownership.move"]
+error_codes = ["E0382"]
+difficulty = "easy"
+constraints = ["no-clone", "max-lines=30"]
+
+body = '''
+// 把一个 String 交给 summarize，之后再使用它会触发 E0382。
+// 请通过借用（&）或重建所有权来修复。
+struct Item {
+    name: String,
+}
+
+fn summarize(item: &Item) -> String {
+    // TODO: 返回 item.name 的格式化描述
+    format!("{}: {}", "{{prefix}}", item.name)
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summarizes() {
+        let it = Item { name: "pen".to_string() };
+        assert_eq!(summarize(&it), "item: pen");
+        // name 仍可用：说明没有发生移动
+        assert_eq!(it.name, "pen");
+    }
+}
+'''
+
+reference = '''
+struct Item {
+    name: String,
+}
+
+fn summarize(item: &Item) -> String {
+    format!("{}: {}", "{{prefix}}", item.name)
+}
+'''
+
+[[slots]]
+name = "prefix"
+kind = "literal"
+values = ["item", "thing"]
+default = "item"
+
+[review_hints]
+root_cause = ["借用 vs 移动"]
+misconceptions = ["以为 String 赋值会深拷贝"]
+"#;
+
+    fn sample() -> Template {
+        toml::from_str(SAMPLE).unwrap()
+    }
+
+    #[test]
+    fn parses_template_and_constraints() {
+        let t = sample();
+        assert_eq!(t.id, "own-move-struct");
+        assert_eq!(t.difficulty, Difficulty::Easy);
+        assert_eq!(t.slots.len(), 1);
+        assert_eq!(t.slots[0].kind, SlotKind::Literal);
+        let cs = constraints_of(&t).unwrap();
+        assert_eq!(cs.len(), 2);
+        assert!(rule_filter(&t).is_empty());
+    }
+
+    #[test]
+    fn rule_filter_flags_each_violation() {
+        let mut t = sample();
+
+        t.concepts = vec!["a".into(), "b".into(), "c".into()];
+        assert!(rule_filter(&t)[0].contains("概念数"));
+
+        t.concepts.clear();
+        assert!(rule_filter(&t).iter().any(|s| s.contains("至少标注")));
+
+        let mut t = sample();
+        t.body = "too short".into();
+        assert!(rule_filter(&t).iter().any(|s| s.contains("10–40")));
+
+        let mut t = sample();
+        t.tests = "no tests here".into();
+        assert!(rule_filter(&t).iter().any(|s| s.contains("tests 缺失")));
+
+        let mut t = sample();
+        t.reference = "let x = todo!();".into();
+        assert!(rule_filter(&t).iter().any(|s| s.contains("reference 不能包含")));
+
+        let mut t = sample();
+        t.body = t.body.replace("{{prefix}}", "{{ghost}}");
+        assert!(rule_filter(&t).iter().any(|s| s.contains("ghost")));
+
+        let mut t = sample();
+        t.slots[0].default = String::new();
+        assert!(rule_filter(&t).iter().any(|s| s.contains("default")));
+
+        let mut t = sample();
+        t.slots[0].values = vec!["other".into()];
+        assert!(rule_filter(&t).iter().any(|s| s.contains("default 不在 values")));
+    }
+
+    #[test]
+    fn placeholder_extraction() {
+        assert_eq!(placeholders("a {{x}} b {{ y }} c {{ }} d"), vec!["x", "y"]);
+        assert_eq!(placeholders("no slots"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn render_with_defaults_and_validation() {
+        let t = sample();
+        let values = fill_for_attempt(&t, 0);
+        let r = render(&t, &values).unwrap();
+        assert!(r.body.contains(r#"format!("{}: {}", "item""#));
+        assert!(r.reference.contains(r#"format!("{}: {}", "item""#));
+        assert!(r.user_file().contains("mod tests"));
+        assert!(r.reference_file().ends_with("}\n"));
+    }
+
+    #[test]
+    fn render_rejects_missing_unknown_and_invalid_values() {
+        let t = sample();
+
+        // Missing slot value.
+        assert!(render(&t, &Default::default()).is_err());
+
+        // Unknown slot.
+        let mut values = fill_for_attempt(&t, 0);
+        values.insert("ghost".into(), "x".into());
+        assert!(render(&t, &values).is_err());
+
+        // Invalid ident value (spaces / leading digit).
+        let mut t2 = sample();
+        t2.slots[0].kind = SlotKind::Ident;
+        let mut v2 = fill_for_attempt(&t2, 0);
+        v2.insert("prefix".into(), "9bad".into());
+        assert!(render(&t2, &v2).is_err());
+        v2.insert("prefix".into(), "ok_name".into());
+        assert!(render(&t2, &v2).is_ok());
+    }
+
+    #[test]
+    fn slot_kind_validation() {
+        assert!(validate_slot_value(SlotKind::Ident, "_a1").is_ok());
+        assert!(validate_slot_value(SlotKind::Ident, "1a").is_err());
+        assert!(validate_slot_value(SlotKind::Ident, "a b").is_err());
+        assert!(validate_slot_value(SlotKind::Type, "Vec<HashMap<u8, String>>").is_ok());
+        assert!(validate_slot_value(SlotKind::Type, "Vec<u8").is_err());
+        assert!(validate_slot_value(SlotKind::Type, "u8>").is_err());
+        assert!(validate_slot_value(SlotKind::Literal, "42").is_ok());
+        assert!(validate_slot_value(SlotKind::Literal, "").is_err());
+        assert!(validate_slot_value(SlotKind::Type, "a\nb").is_err());
+        assert!(validate_slot_value(SlotKind::Type, "x{{y}}").is_err());
+    }
+
+    #[test]
+    fn attempt_rotation_varies_values() {
+        let t = sample();
+        let a0 = fill_for_attempt(&t, 0);
+        let a1 = fill_for_attempt(&t, 1);
+        assert_eq!(a0["prefix"], "item");
+        assert_eq!(a1["prefix"], "thing");
+        // Attempt 3 wraps back around (2 values).
+        assert_eq!(fill_for_attempt(&t, 3)["prefix"], "thing");
+    }
+
+    #[test]
+    fn leftover_placeholders_are_errors() {
+        let t = sample();
+        let mut values = fill_for_attempt(&t, 0);
+        values.remove("prefix");
+        assert!(render(&t, &values).is_err());
+
+        // A value that itself reintroduces braces is caught.
+        let mut values = fill_for_attempt(&t, 0);
+        values.insert("prefix".into(), "{{prefix}}".into());
+        assert!(render(&t, &values).is_err());
+    }
+
+    #[test]
+    fn load_dir_reports_errors() {
+        let dir = std::env::temp_dir().join(format!("rustlings_tpl_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(dir.join("good.toml"), SAMPLE).unwrap();
+        std::fs::write(dir.join("bad.toml"), "id = \"broken\"\nbody = \"x\"\n").unwrap();
+        std::fs::write(dir.join("ignore.txt"), "not toml").unwrap();
+
+        let err = load_dir(&dir).unwrap_err();
+        assert!(err.to_string().contains("bad.toml"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn difficulty_names() {
+        assert_eq!(Difficulty::Easy.name_cn(), "简单");
+        assert_eq!(Difficulty::Medium.name_cn(), "中等");
+        assert_eq!(Difficulty::Hard.name_cn(), "困难");
+        let t: Template = toml::from_str(SAMPLE).unwrap();
+        assert_eq!(t.difficulty, Difficulty::Easy);
+    }
+
+    /// Repo-level fixture test: the whole hand-written template library
+    /// must load cleanly, reference valid taxonomy concepts/codes, and —
+    /// most importantly — every template must pass the triple gate with
+    /// its default slot fill (design §7.4 gates 1–3).
+    #[test]
+    fn repo_template_library_is_consistent_and_valid() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let templates = load_dir(&root.join("templates")).unwrap();
+        assert_eq!(templates.len(), 10, "首批模板库应为 10 个");
+        let graph =
+            crate::taxonomy::ConceptGraph::load(&root.join("taxonomy/concepts.toml")).unwrap();
+        assert!(graph.len() >= 30, "概念图谱首批应 ≥30 节点，实际 {}", graph.len());
+
+        // Link templates into the graph; dangling references fail load.
+        let items: Vec<(&str, &[String])> =
+            templates.iter().map(|t| (t.id.as_str(), t.concepts.as_slice())).collect();
+        let mut linked = graph.clone();
+        linked.link_templates(items).unwrap();
+
+        // Every template error code must exist somewhere in the graph.
+        let all_codes = linked.all_error_codes();
+        for t in &templates {
+            for code in &t.error_codes {
+                assert!(
+                    all_codes.contains(code.as_str()),
+                    "模板 {} 的错误码 {code} 不在概念图谱中",
+                    t.id
+                );
+            }
+        }
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let wd = std::env::temp_dir().join(format!("rustlings_tpl_lib_{nanos}"));
+        std::fs::create_dir_all(&wd).unwrap();
+
+        for t in &templates {
+            // Retry rotations must all be renderable (values valid).
+            for attempt in 1..4 {
+                let vals = fill_for_attempt(t, attempt);
+                assert!(render(t, &vals).is_ok(), "模板 {} 第 {attempt} 次填槽非法", t.id);
+            }
+
+            let values = fill_for_attempt(t, 0);
+            let r = render(t, &values).unwrap();
+
+            // Gate 3: reference satisfies its own declared constraints.
+            let cs = constraints_of(t).unwrap();
+            let v = crate::constraints::check(&r.reference_file(), &cs);
+            assert!(v.is_empty(), "模板 {} 参考解违反自身约束: {v:?}", t.id);
+
+            // Gate 1: triple verification (template fails, ref passes).
+            let report =
+                crate::verifier::verify_exercise(&r.user_file(), &r.reference_file(), &wd)
+                    .unwrap();
+            assert!(report.all_pass(), "模板 {} 未通过三重校验: {report:?}", t.id);
+        }
+        let _ = std::fs::remove_dir_all(&wd);
+    }
+}

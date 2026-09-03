@@ -1,0 +1,209 @@
+# 概念图谱（细轨锚点，设计文档 v3 §7.2 / §6）
+#
+# 每个节点：
+#   id           点分 id（如 borrow.split-fields）
+#   name         中文显示名
+#   parents      上位概念（图边向上，可多父，必须无环）
+#   error_codes  该概念缺失时常触发的 rustc 错误码（与粗轨互为校验，多对多）
+#   fix_patterns 常见修复模式标识（M5/M6 使用）
+#
+# 注意：节点的 templates 字段不在这里维护 —— 加载时由 template.concepts
+# 反向填充（template::load_dir + taxonomy::ConceptGraph::link_templates）。
+
+[[concept]]
+id = "ownership"
+name = "所有权"
+
+[[concept]]
+id = "ownership.move"
+name = "所有权移动（move）"
+parents = ["ownership"]
+error_codes = ["E0382", "E0505", "E0507", "E0373"]
+fix_patterns = ["borrow-instead-of-move", "move-into-closure"]
+
+[[concept]]
+id = "ownership.copy-clone"
+name = "Copy 与 Clone"
+parents = ["ownership"]
+error_codes = ["E0382", "E0507"]
+fix_patterns = ["derive-copy", "clone-at-boundary"]
+
+[[concept]]
+id = "ownership.partial-move"
+name = "部分移动"
+parents = ["ownership"]
+error_codes = ["E0382"]
+fix_patterns = ["destructure-then-rebuild"]
+
+[[concept]]
+id = "ownership.drop"
+name = "Drop 与资源释放"
+parents = ["ownership"]
+fix_patterns = ["rely-on-raii"]
+
+[[concept]]
+id = "ownership.immut"
+name = "可变绑定与遮蔽"
+parents = ["ownership"]
+error_codes = ["E0384", "E0596"]
+fix_patterns = ["add-mut"]
+
+[[concept]]
+id = "borrowing"
+name = "借用与引用"
+
+[[concept]]
+id = "borrowing.shared-mut"
+name = "共享与可变借用互斥"
+parents = ["borrowing"]
+error_codes = ["E0502", "E0499"]
+fix_patterns = ["narrow-borrow-scope", "reorder-statements"]
+
+[[concept]]
+id = "borrowing.multiple-mut"
+name = "多重可变借用"
+parents = ["borrowing"]
+error_codes = ["E0499"]
+fix_patterns = ["split-borrows", "restructure-loop"]
+
+[[concept]]
+id = "borrowing.split-fields"
+name = "按字段拆分借用"
+parents = ["borrowing"]
+error_codes = ["E0502", "E0499"]
+fix_patterns = ["borrow-fields-directly"]
+
+[[concept]]
+id = "borrowing.mut-binding"
+name = "可变性前提：mut 绑定"
+parents = ["borrowing"]
+error_codes = ["E0596"]
+fix_patterns = ["add-mut"]
+
+[[concept]]
+id = "borrowing.dangling"
+name = "悬垂引用"
+parents = ["borrowing"]
+error_codes = ["E0597", "E0515"]
+fix_patterns = ["return-owned", "bind-then-borrow"]
+
+[[concept]]
+id = "lifetimes"
+name = "生命周期"
+
+[[concept]]
+id = "lifetimes.annotations"
+name = "生命周期标注"
+parents = ["lifetimes"]
+error_codes = ["E0106", "E0621"]
+fix_patterns = ["add-lifetime"]
+
+[[concept]]
+id = "lifetimes.elision"
+name = "生命周期省略规则"
+parents = ["lifetimes"]
+error_codes = ["E0106"]
+fix_patterns = ["rely-on-elision", "add-lifetime"]
+
+[[concept]]
+id = "lifetimes.struct-holders"
+name = "持有引用的结构体"
+parents = ["lifetimes"]
+error_codes = ["E0106", "E0597"]
+fix_patterns = ["add-lifetime"]
+
+[[concept]]
+id = "lifetimes.static"
+name = "'static 与字符串字面量"
+parents = ["lifetimes"]
+error_codes = ["E0597", "E0716"]
+fix_patterns = ["use-static-str", "to-owned"]
+
+[[concept]]
+id = "lifetimes.scopes"
+name = "作用域与 NLL"
+parents = ["lifetimes", "borrowing"]
+error_codes = ["E0597", "E0502"]
+fix_patterns = ["shrink-scope"]
+
+[[concept]]
+id = "traits"
+name = "trait 与多态"
+
+[[concept]]
+id = "traits.basics"
+name = "trait 定义与实现"
+parents = ["traits"]
+error_codes = ["E0277", "E0599"]
+fix_patterns = ["impl-trait"]
+
+[[concept]]
+id = "traits.bounds"
+name = "trait 约束与泛型函数"
+parents = ["traits", "generics"]
+error_codes = ["E0277"]
+fix_patterns = ["add-bound"]
+
+[[concept]]
+id = "traits.associated-types"
+name = "关联类型"
+parents = ["traits"]
+error_codes = ["E0277", "E0191"]
+fix_patterns = ["type-alias-in-impl"]
+
+[[concept]]
+id = "traits.objects"
+name = "trait 对象与 impl Trait"
+parents = ["traits"]
+error_codes = ["E0277", "E0038"]
+fix_patterns = ["use-dyn", "use-impl-trait"]
+
+[[concept]]
+id = "traits.derive"
+name = "派生与常用 trait"
+parents = ["traits"]
+error_codes = ["E0277"]
+fix_patterns = ["derive-debug"]
+
+[[concept]]
+id = "generics"
+name = "泛型"
+
+[[concept]]
+id = "generics.functions"
+name = "泛型函数与单态化"
+parents = ["generics"]
+error_codes = ["E0277", "E0308"]
+fix_patterns = ["add-bound"]
+
+[[concept]]
+id = "generics.structs"
+name = "泛型结构体与方法"
+parents = ["generics"]
+error_codes = ["E0308", "E0507"]
+fix_patterns = ["impl-block-generic"]
+
+[[concept]]
+id = "generics.inference"
+name = "类型推断与标注"
+parents = ["generics"]
+error_codes = ["E0282", "E0283", "E0308"]
+fix_patterns = ["annotate-type", "turbofish"]
+
+[[concept]]
+id = "types"
+name = "类型系统"
+
+[[concept]]
+id = "types.mismatch"
+name = "类型不匹配与转换"
+parents = ["types"]
+error_codes = ["E0308"]
+fix_patterns = ["use-as", "use-from"]
+
+[[concept]]
+id = "types.strings"
+name = "String 与 &str"
+parents = ["types"]
+error_codes = ["E0308", "E0277"]
+fix_patterns = ["deref-coercion", "to-owned"]

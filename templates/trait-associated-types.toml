@@ -1,0 +1,107 @@
+# T7 trait ×1：关联类型（E0277/E0599）
+id = "trait-associated-types"
+title = "关联类型：每个实现各自指定 Key"
+concepts = ["traits.associated-types"]
+error_codes = ["E0277", "E0599"]
+difficulty = "medium"
+constraints = ["no-clone"]
+
+body = '''
+// Registry 用关联类型 Key 表示"查找键的类型"：每个实现自己选。
+//
+// TODO: 为 ByName 与 ByIndex 分别实现 Registry：
+//   * ByName  -> type Key = String;  按名字查，返回 u32
+//   * ByIndex -> type Key = usize;   按下标查，越界返回 None
+// 不许用 clone。
+use std::collections::HashMap;
+
+pub trait Registry {
+    type Key;
+    fn get(&self, key: &Self::Key) -> Option<u32>;
+}
+
+pub struct ByName {
+    pub data: HashMap<String, u32>,
+}
+
+pub struct ByIndex {
+    pub data: Vec<u32>,
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn by_name_lookup() {
+        let mut r = ByName { data: HashMap::new() };
+        r.data.insert("{{who}}".into(), {{num}});
+        assert_eq!(r.get(&"{{who}}".to_string()), Some({{num}}));
+        assert_eq!(r.get(&"missing".to_string()), None);
+    }
+
+    #[test]
+    fn by_index_lookup() {
+        let r = ByIndex { data: vec![{{num}}, 9] };
+        assert_eq!(r.get(&0), Some({{num}}));
+        assert_eq!(r.get(&5), None);
+    }
+
+    #[test]
+    fn keys_differ_per_impl() {
+        fn takes<R: Registry>(_: &R) {}
+        takes(&ByName { data: HashMap::new() });
+        takes(&ByIndex { data: vec![] });
+    }
+}
+'''
+
+reference = '''
+use std::collections::HashMap;
+
+pub trait Registry {
+    type Key;
+    fn get(&self, key: &Self::Key) -> Option<u32>;
+}
+
+pub struct ByName {
+    pub data: HashMap<String, u32>,
+}
+
+pub struct ByIndex {
+    pub data: Vec<u32>,
+}
+
+impl Registry for ByName {
+    type Key = String;
+    fn get(&self, key: &Self::Key) -> Option<u32> {
+        self.data.get(key).copied()
+    }
+}
+
+impl Registry for ByIndex {
+    type Key = usize;
+    fn get(&self, key: &Self::Key) -> Option<u32> {
+        self.data.get(*key).copied()
+    }
+}
+'''
+
+[[slots]]
+name = "who"
+kind = "literal"
+values = ["alice", "bob"]
+default = "alice"
+
+[[slots]]
+name = "num"
+kind = "literal"
+values = ["7", "42"]
+default = "7"
+
+[review_hints]
+root_cause = ["关联类型在每个 impl 里确定一次，避免在 trait 上泛型化导致的多次实现", "Self::Key 在不同实现中是不同的具体类型"]
+misconceptions = ["以为关联类型和泛型参数完全等价", "以为一个类型可以对同一 trait 写多个 impl 来换 Key"]

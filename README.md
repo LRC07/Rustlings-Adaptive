@@ -19,7 +19,7 @@ Agent 解释并锚定知识点（细分概念图谱 + rustc 错误码双轨）�
 | M0 | CLI 骨架 + 8 道种子练习 + IDE 子 crate + rustc --test 跑练习 | — | ✅ 完成 |
 | M1 | 模块拆分 + LLM 接入 + 模型配置 + token 计费 | R1/R3/R6 | ✅ 完成 |
 | M2 | 验证器：rustc --json 解析 + 三重校验 + 约束静态检查 | R1 | ✅ 完成 |
-| M3 | 模板库（TOML）+ 概念图谱（concepts.toml）+ 填槽生成 | — | ⬜ **下一个** |
+| M3 | 模板库（TOML）+ 概念图谱（concepts.toml）+ 填槽生成 | — | ✅ 完成 |
 | M4 | 对话 REPL + Agent 工具环 + 进度/打断 + 会话历史 | R2/R4/R5 | ⬜ 9.6 展示基线 |
 | M5 | 解答评审门 + 交互式复盘（解释/更优解挑战/对比表/再练决策） | — | ⬜ |
 | M6 | 双轨画像（错误码 + 概念 SM-2）+ 错题本 | R5 | ⬜ |
@@ -62,7 +62,7 @@ cargo run            # 必须在项目根目录运行
 主菜单：
 
 ```
-  <数字> 选题   n 下一题   v 全部验证   a 问模型   u 用量   c 配置   h 帮助   q 退出
+  <数字> 选题   n 下一题   v 全部验证   a 问模型   g 生成练习   u 用量   c 配置   h 帮助   q 退出
 ```
 
 - 做题流内：`r` 重跑 / `e` 用 `$EDITOR` 打开（默认 vi）/ `n` 下一题 / `b` 返回
@@ -70,6 +70,9 @@ cargo run            # 必须在项目根目录运行
   token 用量和花费；累计花费达到预算会被拦截
 - `u` 用量：本次会话与历史累计的调用次数 / token / 花费 / 预算余量
   （明细持久化在 `~/.rustlings_adaptive/usage.json`）
+- `g` 生成练习：输入主题（概念如 `trait 关联类型` / 错误码如 `E0382` /
+  关键词）→ 选模板 → 填槽（LLM，未配 Key 则离线默认填槽）→ 三重校验
+  （最多 3 轮重试）→ 写入 `exercises/generated/` 并接线 lib.rs → 可立即开练
 
 ## 演示用例
 
@@ -82,6 +85,9 @@ cargo run            # 必须在项目根目录运行
    `deepseek-chat`）→ 再按 `a`，新模型立即生效；
 4. **做题流（M0）**：输入 `2` → 按 `e` 编辑练习补全 TODO → `r` 重跑 →
    全部测试通过后自动标记完成；`n` 跳下一题，`v` 全部验证。
+5. **生成练习（M3）**：按 `g` → 输入 `trait 关联类型`（或 `E0382`、
+   `ownership`）→ 看到选模板/填槽/三重校验的生成报告 → 回车进入做题；
+   未配置 API Key 时自动走离线模式（默认填槽），仍可生成。
 
 ## 目录结构
 
@@ -97,9 +103,12 @@ src/llm/               OpenAI 兼容 chat 客户端 + usage 解析（R1）
 src/usage/             token/费用统计、预算拦截、JSON 持久化（R6）
 src/verifier/          rustc --json 诊断解析、三重校验、测试失败解析（M2）
 src/constraints/       抽象约束静态检查：no-clone 等（M2）
+src/taxonomy/          概念图谱加载、校验（无环）、错误码反查索引（M3）
+src/template/          模板库加载（TOML）、规则过滤、{{slot}} 填充渲染（M3）
+src/generator/         选模板 + LLM 填槽 + 三重校验重试 + 写入并接线（M3）
 config.example.toml    配置样例（复制为 config.toml 使用；后者已 gitignore）
-templates/             （M3）手写题目模板，TOML 格式
-taxonomy/              （M3）概念图谱 concepts.toml
+templates/             手写题目模板 ×10（TOML 格式，M3）
+taxonomy/              概念图谱 concepts.toml（31 节点，M3）
 ```
 
 `exercises/lib.rs` 用 `#[cfg(rust_analyzer)]` 接线所有练习：rust-analyzer

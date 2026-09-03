@@ -1,0 +1,98 @@
+# T8 trait ×2：泛型函数的 trait 约束（E0277）
+id = "trait-bounds"
+title = "trait 约束：泛型函数必须声明它需要的能力"
+concepts = ["traits.bounds"]
+error_codes = ["E0277"]
+difficulty = "easy"
+constraints = ["no-clone", "max-lines=38"]
+
+body = '''
+// summaries 想对"任何能自我描述的类型"工作 —— 但泛型参数 T 没有声明
+// 实现 Summary，编译器拒绝调用 summarize（E0277）。
+//
+// TODO: 给 T 加上 trait 约束（两种写法任选：<T: Summary> 或
+//       where T: Summary）。不许用 clone。
+pub trait Summary {
+    fn summarize(&self) -> String;
+}
+
+pub struct Article {
+    pub title: String,
+}
+
+impl Summary for Article {
+    fn summarize(&self) -> String {
+        format!("[article] {}", self.title)
+    }
+}
+
+pub fn summaries<T>(items: &[T]) -> Vec<String> {
+    items.iter().map(|it| it.summarize()).collect()
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    pub struct Blog {
+        pub tag: String,
+    }
+
+    impl Summary for Blog {
+        fn summarize(&self) -> String {
+            format!("[blog] {}", self.tag)
+        }
+    }
+
+    #[test]
+    fn collects_summaries() {
+        let arts = vec![Article { title: "{{w1}}".into() }];
+        let blogs = vec![Blog { tag: "{{w2}}".into() }];
+        let mut all = summaries(&arts);
+        all.extend(summaries(&blogs));
+        assert_eq!(
+            all,
+            vec!["[article] {{w1}}".to_string(), "[blog] {{w2}}".to_string()]
+        );
+    }
+}
+'''
+
+reference = '''
+pub trait Summary {
+    fn summarize(&self) -> String;
+}
+
+pub struct Article {
+    pub title: String,
+}
+
+impl Summary for Article {
+    fn summarize(&self) -> String {
+        format!("[article] {}", self.title)
+    }
+}
+
+pub fn summaries<T: Summary>(items: &[T]) -> Vec<String> {
+    items.iter().map(|it| it.summarize()).collect()
+}
+'''
+
+[[slots]]
+name = "w1"
+kind = "literal"
+values = ["news", "rust"]
+default = "news"
+
+[[slots]]
+name = "w2"
+kind = "literal"
+values = ["dev", "life"]
+default = "dev"
+
+[review_hints]
+root_cause = ["泛型参数默认没有任何能力，必须用 trait 约束声明", "约束写在泛型函数上而不是调用处"]
+misconceptions = ["以为只要类型实现了 trait，泛型函数就能自动调用其方法", "以为约束要加在 struct 上"]

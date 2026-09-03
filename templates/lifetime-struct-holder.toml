@@ -1,0 +1,75 @@
+# T6 生命周期 ×2：持有引用的结构体（E0106/E0597）
+id = "lifetime-struct-holder"
+title = "生命周期：结构体持有引用"
+concepts = ["lifetimes.struct-holders"]
+error_codes = ["E0106", "E0597"]
+difficulty = "medium"
+constraints = ["no-clone", "max-lines=34"]
+
+body = '''
+// Excerpt（摘录）保存一段借来的文本与出处 —— 结构体持有引用时，
+// 每个引用字段都需要生命周期参数（E0106）。
+//
+// TODO: 给 struct Excerpt 与 impl 块补上生命周期参数（用 'a），
+//       并让 new / 返回类型也带上它。函数体不用改。
+pub struct Excerpt {
+    text: &str,
+    origin: &str,
+}
+
+impl Excerpt {
+    pub fn new(text: &str, origin: &str) -> Excerpt {
+        let cut = text.len().min(3);
+        Excerpt { text: &text[..cut], origin }
+    }
+
+    pub fn text(&self) -> &str {
+        self.text
+    }
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn excerpt_borrows() {
+        let doc = String::from("{{word}}");
+        let w = "{{word}}";
+        let ex = Excerpt::new(&doc, "test");
+        assert_eq!(ex.text(), &w[..3]);
+        assert_eq!(ex.text().len(), 3);
+    }
+}
+'''
+
+reference = '''
+pub struct Excerpt<'a> {
+    text: &'a str,
+    origin: &'a str,
+}
+
+impl<'a> Excerpt<'a> {
+    pub fn new(text: &'a str, origin: &'a str) -> Excerpt<'a> {
+        let cut = text.len().min(3);
+        Excerpt { text: &text[..cut], origin }
+    }
+
+    pub fn text(&self) -> &str {
+        self.text
+    }
+}
+'''
+
+[[slots]]
+name = "word"
+kind = "literal"
+values = ["borrow", "move", "heap"]
+default = "borrow"
+
+[review_hints]
+root_cause = ["结构体里的引用让整个结构体实例的存活范围受限于被借的数据", "生命周期参数是结构体类型的一部分"]
+misconceptions = ["以为只有一个引用字段就不需要标注", "以为直接返回结构体函数值就能绕开生命周期"]

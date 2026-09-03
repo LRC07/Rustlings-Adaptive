@@ -1,0 +1,78 @@
+# T3 借用 ×1：共享借用存活期间不能可变借用（E0502）
+id = "borrow-shared-mut"
+title = "借用互斥：共享借用在世时不能可变借用"
+concepts = ["borrowing.shared-mut"]
+error_codes = ["E0502"]
+difficulty = "medium"
+constraints = ["no-clone", "max-lines=35"]
+
+body = '''
+struct Ledger {
+    total: i64,
+    log: Vec<String>,
+}
+
+// snapshot 以共享借用借走了 log，在它还要使用期间调用 record
+// 需要 &mut Ledger —— E0502。
+//
+// TODO: 调整函数内的语句顺序（或用块收紧借用的作用域）修复冲突。
+//       不许用 clone，不许改 struct 与 record 的定义。
+fn audit(led: &mut Ledger, note: &str) -> String {
+    let snapshot: Vec<&String> = led.log.iter().collect();
+    led.record(note);
+    format!("{} 条记录，共 {}", snapshot.len(), led.total)
+}
+
+impl Ledger {
+    fn record(&mut self, note: &str) {
+        self.log.push(note.to_string());
+        self.total += 1;
+    }
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audit_records() {
+        let mut l = Ledger { total: 0, log: Vec::new() };
+        assert_eq!(audit(&mut l, "{{note}}"), "1 条记录，共 1");
+        assert_eq!(audit(&mut l, "x"), "2 条记录，共 2");
+        assert_eq!(l.log[0], "{{note}}");
+    }
+}
+'''
+
+reference = '''
+struct Ledger {
+    total: i64,
+    log: Vec<String>,
+}
+
+fn audit(led: &mut Ledger, note: &str) -> String {
+    led.record(note);
+    let snapshot: Vec<&String> = led.log.iter().collect();
+    format!("{} 条记录，共 {}", snapshot.len(), led.total)
+}
+
+impl Ledger {
+    fn record(&mut self, note: &str) {
+        self.log.push(note.to_string());
+        self.total += 1;
+    }
+}
+'''
+
+[[slots]]
+name = "note"
+kind = "literal"
+values = ["audit", "check", "review"]
+default = "audit"
+
+[review_hints]
+root_cause = ["可变借用要求独占", "共享借用的存活范围由最后一次使用决定（NLL）"]
+misconceptions = ["以为借用规则以行为单位而不是以作用域为单位", "以为 clone 是修复借用错误的唯一办法"]

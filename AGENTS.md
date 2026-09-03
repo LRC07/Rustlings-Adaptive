@@ -8,6 +8,8 @@
   API Key 等敏感信息。需要了解配置结构时看 `config.example.toml`；
   需要修改配置时让用户本人操作
 - `~/.rustlings_adaptive/` 下是用户本地数据（用量、会话历史），同样不要读取
+- **不要读取 `sessions/`**：用户导出的对话记录（个人数据），非必要不阅读，
+  **一律不得 commit**（已在 .gitignore）
 
 ## 开始任何工作前
 

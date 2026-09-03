@@ -1,0 +1,74 @@
+# T10 泛型 ×2：泛型求和 + 迭代器约束（E0308/E0277）
+id = "generic-sum"
+title = "泛型 + 迭代器：让求和对多种数值类型工作"
+concepts = ["generics.inference", "generics.functions"]
+error_codes = ["E0308", "E0277"]
+difficulty = "medium"
+constraints = ["iterator-only", "no-clone", "max-lines=26"]
+
+body = '''
+// total 想对 &[T] 求和。直接在 for 循环里写 sum = sum + *x 会撞上
+// 类型问题（sum 的初始值是 i32，与 T 不一定相符，E0308/E0277）。
+//
+// TODO: 用迭代器一行完成求和（items.iter().copied().sum()），
+//       并给 T 加上所需的约束（Copy 与 Sum）。
+//       禁止 for / while / loop，禁止 clone。
+pub fn total<T>(items: &[T]) -> T {
+    let mut sum = 0;
+    for x in items {
+        sum = sum + *x;
+    }
+    sum
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sums_i32() {
+        let (a, b, c) = ({{a}}, {{b}}, {{c}});
+        assert_eq!(total(&[a, b, c]), a + b + c);
+    }
+
+    #[test]
+    fn sums_u64_and_empty() {
+        assert_eq!(total(&vec![10u64, 20]), 30u64);
+        assert_eq!(total::<i64>(&[]), 0);
+    }
+}
+'''
+
+reference = '''
+pub fn total<T>(items: &[T]) -> T
+where
+    T: Copy + std::iter::Sum,
+{
+    items.iter().copied().sum()
+}
+'''
+
+[[slots]]
+name = "a"
+kind = "literal"
+values = ["1", "4"]
+default = "1"
+
+[[slots]]
+name = "b"
+kind = "literal"
+values = ["2", "5"]
+default = "2"
+
+[[slots]]
+name = "c"
+kind = "literal"
+values = ["3", "6"]
+default = "3"
+
+[review_hints]
+root_cause = ["泛型数值函数应借助 Sum 这类 trait 而不是手写循环", "iter().copied() 把 &[T] 变成 T 的迭代器"]
+misconceptions = ["以为 sum = 0 能自动适配任何数值类型", "以为泛型函数体里的字面量会推断成 T"]

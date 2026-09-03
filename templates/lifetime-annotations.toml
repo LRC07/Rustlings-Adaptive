@@ -1,0 +1,65 @@
+# T5 生命周期 ×1：函数签名上的生命周期标注（E0106）
+id = "lifetime-annotations"
+title = "生命周期：两个输入引用，一个返回引用"
+concepts = ["lifetimes.annotations"]
+error_codes = ["E0106"]
+difficulty = "easy"
+constraints = ["no-clone", "max-lines=28"]
+
+body = '''
+// longest 返回两个 &str 中较长的那个。两个输入引用都可能被返回，
+// 编译器推不出返回引用能与谁绑定 —— E0106。
+//
+// TODO: 给 longest 与 pick 补上生命周期标注（让各自的所有引用
+//       共用一个即可），不需要改动函数体，也不许用 clone。
+fn longest(a: &str, b: &str) -> &str {
+    if a.chars().count() >= b.chars().count() {
+        a
+    } else {
+        b
+    }
+}
+
+pub fn pick(long: &str, short: &str) -> &str {
+    longest(short, long)
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn picks_longer() {
+        let tmp = String::from("{{word}}!");
+        assert_eq!(longest(&tmp, "ab"), tmp.as_str());
+        assert_eq!(pick("xy", "abcd"), "abcd");
+    }
+}
+'''
+
+reference = '''
+fn longest<'a>(a: &'a str, b: &'a str) -> &'a str {
+    if a.chars().count() >= b.chars().count() {
+        a
+    } else {
+        b
+    }
+}
+
+pub fn pick<'a>(long: &'a str, short: &'a str) -> &'a str {
+    longest(short, long)
+}
+'''
+
+[[slots]]
+name = "word"
+kind = "literal"
+values = ["serialize", "parse", "borrow"]
+default = "serialize"
+
+[review_hints]
+root_cause = ["生命周期描述引用的存活范围关系，不改变任何值", "多个输入引用时编译器需要人工声明返回值与谁绑定"]
+misconceptions = ["以为生命周期标注会改变引用的实际存活时间", "以为报错要求把变量改成 'static"]

@@ -1,0 +1,66 @@
+# T2 所有权 ×2：返回的闭包必须拥有捕获的变量
+id = "own-closure-capture"
+title = "闭包捕获：被返回的闭包需要拥有环境"
+concepts = ["ownership.move"]
+error_codes = ["E0373"]
+difficulty = "medium"
+constraints = ["no-clone"]
+
+body = '''
+// 闭包默认只"借用"捕获的变量；但被返回的闭包可能活得比函数更久，
+// 被借用的局部变量 prefix 就会悬垂 —— 这就是 E0373。
+//
+// 对比：只在函数体内立即调用的闭包不需要 move。
+//
+// TODO: 给闭包加上 move 关键字，让它拥有 prefix 的所有权。
+//       （函数签名已定，请勿改动；也不许用 clone。）
+fn make_greeter(prefix: String) -> impl Fn(&str) -> String {
+    |name| format!("{prefix}, {name}")
+}
+
+pub fn demo() -> String {
+    let g = make_greeter(String::from("{{word}}"));
+    g("world")
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn greeter_owns_prefix() {
+        let g = make_greeter(String::from("{{word}}"));
+        assert_eq!(g("a"), "{{word}}, a");
+        assert_eq!(g("b"), "{{word}}, b");
+    }
+
+    #[test]
+    fn demo_uses_greeter() {
+        assert_eq!(demo(), "{{word}}, world");
+    }
+}
+'''
+
+reference = '''
+fn make_greeter(prefix: String) -> impl Fn(&str) -> String {
+    move |name| format!("{prefix}, {name}")
+}
+
+pub fn demo() -> String {
+    let g = make_greeter(String::from("{{word}}"));
+    g("world")
+}
+'''
+
+[[slots]]
+name = "word"
+kind = "literal"
+values = ["hello", "hey", "hiya"]
+default = "hello"
+
+[review_hints]
+root_cause = ["闭包默认借用捕获变量", "move 把环境所有权移入闭包"]
+misconceptions = ["以为闭包总是复制捕获的变量", "以为 move 会把局部变量借出去"]

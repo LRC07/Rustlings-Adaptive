@@ -1,0 +1,86 @@
+# T9 泛型 ×1：泛型结构体 + mem::swap（E0507）
+id = "generic-struct-swap"
+title = "泛型结构体：不复制数据完成交换"
+concepts = ["generics.structs"]
+error_codes = ["E0308", "E0507"]
+difficulty = "easy"
+constraints = ["no-clone", "max-lines=30"]
+
+body = '''
+// Pair<T> 持有两个同类型的值。swapped 想返回"交换后的副本"：
+// 但 &self 只有共享引用，把字段 move 出来是 E0507；给 T 加 Clone
+// 又违反本题的 no-clone 约束。
+//
+// TODO: 把 swapped 改成原地交换的方法（签名：pub fn swap(&mut self)），
+//       用 std::mem::swap 完成，不许 clone。
+pub struct Pair<T> {
+    pub first: T,
+    pub second: T,
+}
+
+impl<T> Pair<T> {
+    pub fn swapped(&self) -> Pair<T> {
+        Pair { first: self.second, second: self.first }
+    }
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn swap_in_place() {
+        let mut p = Pair::<{{t}}> { first: {{a}}, second: {{b}} };
+        p.swap();
+        assert_eq!(p.first, {{b}});
+        assert_eq!(p.second, {{a}});
+    }
+
+    #[test]
+    fn swap_twice_restores() {
+        let mut p = Pair::<{{t}}> { first: {{a}}, second: {{b}} };
+        p.swap();
+        p.swap();
+        assert_eq!(p.first, {{a}});
+        assert_eq!(p.second, {{b}});
+    }
+}
+'''
+
+reference = '''
+pub struct Pair<T> {
+    pub first: T,
+    pub second: T,
+}
+
+impl<T> Pair<T> {
+    pub fn swap(&mut self) {
+        std::mem::swap(&mut self.first, &mut self.second);
+    }
+}
+'''
+
+[[slots]]
+name = "t"
+kind = "type"
+values = ["i32", "u8", "i64"]
+default = "i32"
+
+[[slots]]
+name = "a"
+kind = "literal"
+values = ["1", "10"]
+default = "1"
+
+[[slots]]
+name = "b"
+kind = "literal"
+values = ["2", "20"]
+default = "2"
+
+[review_hints]
+root_cause = ["&self 不能把字段 move 出去", "mem::swap 在两个可变位置之间交换，不需要复制"]
+misconceptions = ["以为加 Clone 约束是唯一修复方式", "以为 Copy 类型不需要考虑借用规则"]
