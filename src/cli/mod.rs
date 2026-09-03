@@ -331,9 +331,13 @@ fn cmd_generate(
                 return;
             }
             // Refresh the exercise list so the new file is discoverable.
+            // Path comparison uses canonicalize(): the generator's path
+            // carries a "./" prefix while discover() yields plain
+            // relative paths, so raw equality would always miss.
             let mut fresh = exercise::discover(Path::new("exercises"));
             fresh.sort_by(|a, b| a.category.cmp(&b.category).then(a.name.cmp(&b.name)));
-            if let Some(idx) = fresh.iter().position(|e| e.path == out.path) {
+            let want = out.path.canonicalize().ok();
+            if let Some(idx) = fresh.iter().position(|e| e.path.canonicalize().ok() == want) {
                 *exercises = fresh;
                 run_exercise(idx, exercises, progress, progress_path);
             } else {

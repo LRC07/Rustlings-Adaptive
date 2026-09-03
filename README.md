@@ -73,6 +73,7 @@ cargo run            # 必须在项目根目录运行
 - `g` 生成练习：输入主题（概念如 `trait 关联类型` / 错误码如 `E0382` /
   关键词）→ 选模板 → 填槽（LLM，未配 Key 则离线默认填槽）→ 三重校验
   （最多 3 轮重试）→ 写入 `exercises/generated/` 并接线 lib.rs → 可立即开练
+  （覆盖不足的主题由 M4.5"分层出题"承接：模板改编 + 自由生成）
 
 ## 演示用例
 
@@ -85,9 +86,9 @@ cargo run            # 必须在项目根目录运行
    `deepseek-chat`）→ 再按 `a`，新模型立即生效；
 4. **做题流（M0）**：输入 `2` → 按 `e` 编辑练习补全 TODO → `r` 重跑 →
    全部测试通过后自动标记完成；`n` 跳下一题，`v` 全部验证。
-5. **生成练习（M3）**：按 `g` → 输入 `trait 关联类型`（或 `E0382`、
-   `ownership`）→ 看到选模板/填槽/三重校验的生成报告 → 回车进入做题；
-   未配置 API Key 时自动走离线模式（默认填槽），仍可生成。
+5. **生成练习（M3）**：按 `g` → 输入 `Box<dyn Error>` 相关主题（或
+   `E0382`、`ownership`、`错误传播`）→ 看到选模板/填槽/三重校验的生成
+   报告 → 回车进入做题；未配置 API Key 时自动走离线模式（默认填槽）。
 
 ## 目录结构
 
@@ -107,8 +108,8 @@ src/taxonomy/          概念图谱加载、校验（无环）、错误码反查
 src/template/          模板库加载（TOML）、规则过滤、{{slot}} 填充渲染（M3）
 src/generator/         选模板 + LLM 填槽 + 三重校验重试 + 写入并接线（M3）
 config.example.toml    配置样例（复制为 config.toml 使用；后者已 gitignore）
-templates/             手写题目模板 ×10（TOML 格式，M3）
-taxonomy/              概念图谱 concepts.toml（31 节点，M3）
+templates/             手写题目模板 ×12（TOML 格式，M3+M3.1 错误处理）
+taxonomy/              概念图谱 concepts.toml（37 节点，M3+M3.1）
 ```
 
 `exercises/lib.rs` 用 `#[cfg(rust_analyzer)]` 接线所有练习：rust-analyzer

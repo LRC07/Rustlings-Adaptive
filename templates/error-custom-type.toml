@@ -1,0 +1,120 @@
+# 错误处理 ×2：自定义错误类型（Display + Error）
+id = "error-custom-type"
+title = "自定义错误：让错误类型能打印、能传播"
+concepts = ["errors.custom", "errors.propagation"]
+error_codes = ["E0277"]
+difficulty = "medium"
+constraints = ["no-unwrap"]
+
+body = '''
+// 自定义错误类型：ConfigError 要能被打印（Display）、能当错误用
+// （impl Error），get_timeout 用 ? 把两种失败都变成它。
+//
+// TODO:
+//   1. 为 ConfigError 实现 fmt::Display（为两种变体输出可读信息）
+//   2. 实现 std::error::Error（空实现体即可）
+//   3. 补全 get_timeout：
+//        * 缺键       → ConfigError::Missing(键名)
+//        * 解析失败   → ConfigError::NotANumber(原始字符串)
+//      提示：ok_or_else + map_err；禁止 unwrap/expect。
+use std::collections::HashMap;
+use std::fmt;
+
+#[derive(Debug)]
+pub enum ConfigError {
+    Missing(String),
+    NotANumber(String),
+}
+
+pub struct Config {
+    pub map: HashMap<String, String>,
+}
+
+pub fn get_timeout(cfg: &Config) -> Result<u64, ConfigError> {
+    todo!()
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg_with(v: &str) -> Config {
+        let mut m = HashMap::new();
+        m.insert("timeout".to_string(), v.to_string());
+        Config { map: m }
+    }
+
+    #[test]
+    fn parses_timeout() {
+        assert!(get_timeout(&cfg_with("{{secs}}")).is_ok_and(|v| v == {{secs}}));
+    }
+
+    #[test]
+    fn missing_key_reports_custom_error() {
+        let cfg = Config { map: HashMap::new() };
+        let err = get_timeout(&cfg).unwrap_err();
+        assert_eq!(format!("{err}"), "缺少配置项: timeout");
+        let _: &dyn std::error::Error = &err;
+    }
+
+    #[test]
+    fn bad_value_reports_custom_error() {
+        let err = get_timeout(&cfg_with("{{bad}}")).unwrap_err();
+        assert_eq!(format!("{err}"), "不是数字: {{bad}}");
+    }
+}
+'''
+
+reference = '''
+use std::collections::HashMap;
+use std::fmt;
+
+#[derive(Debug)]
+pub enum ConfigError {
+    Missing(String),
+    NotANumber(String),
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConfigError::Missing(k) => write!(f, "缺少配置项: {k}"),
+            ConfigError::NotANumber(v) => write!(f, "不是数字: {v}"),
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
+pub struct Config {
+    pub map: HashMap<String, String>,
+}
+
+pub fn get_timeout(cfg: &Config) -> Result<u64, ConfigError> {
+    let raw = cfg
+        .map
+        .get("timeout")
+        .ok_or_else(|| ConfigError::Missing("timeout".to_string()))?;
+    raw.parse::<u64>()
+        .map_err(|_| ConfigError::NotANumber(raw.clone()))
+}
+'''
+
+[[slots]]
+name = "secs"
+kind = "literal"
+values = ["30", "60"]
+default = "30"
+
+[[slots]]
+name = "bad"
+kind = "literal"
+values = ["abc", "x7"]
+default = "abc"
+
+[review_hints]
+root_cause = ["错误类型实现 Display 才能被打印、实现 Error 才能进 Box<dyn Error>/? 链", "ok_or_else/map_err 在不 panic 的前提下把失败翻译成自己的错误类型"]
+misconceptions = ["以为实现 Error 必须写 source/description", "以为用 panic!/unwrap 也能算错误传播"]

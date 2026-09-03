@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::constraints::Constraint;
@@ -172,7 +172,11 @@ pub fn load_dir(dir: &Path) -> Result<Vec<Template>> {
         errors.push(format!("模板 id 重复: '{dup}'"));
     }
     if !errors.is_empty() {
-        bail!("模板库校验失败（{} 个文件）:\n  - {}", errors.len(), errors.join("\n  - "));
+        bail!(
+            "模板库校验失败（{} 个文件）:\n  - {}",
+            errors.len(),
+            errors.join("\n  - ")
+        );
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(out)
@@ -190,10 +194,10 @@ fn find_duplicate_id(templates: &[Template]) -> Option<String> {
 
 /// Load and validate a single template file.
 pub fn load_file(path: &Path) -> Result<Template> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("读取 {} 失败", path.display()))?;
-    let t: Template = toml::from_str(&text)
-        .with_context(|| format!("TOML 解析失败（{}）", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("读取 {} 失败", path.display()))?;
+    let t: Template =
+        toml::from_str(&text).with_context(|| format!("TOML 解析失败（{}）", path.display()))?;
     let violations = rule_filter(&t);
     if !violations.is_empty() {
         bail!("规则过滤未通过:\n  - {}", violations.join("\n  - "));
@@ -385,7 +389,10 @@ pub fn validate_slot_value(kind: SlotKind, value: &str) -> Result<()> {
 /// Deterministic fill for attempt `attempt` (0-based). Attempt 0 uses
 /// each slot's `default`; later attempts rotate through `values` so
 /// retries naturally try different variations without an LLM.
-pub fn fill_for_attempt(t: &Template, attempt: usize) -> std::collections::BTreeMap<String, String> {
+pub fn fill_for_attempt(
+    t: &Template,
+    attempt: usize,
+) -> std::collections::BTreeMap<String, String> {
     let mut out = std::collections::BTreeMap::new();
     for (i, slot) in t.slots.iter().enumerate() {
         let value = if attempt == 0 || slot.values.is_empty() {
@@ -402,7 +409,10 @@ pub fn fill_for_attempt(t: &Template, attempt: usize) -> std::collections::BTree
 
 /// Render a template with the given slot values. Errors on unknown
 /// slots, missing values, invalid values, or leftover placeholders.
-pub fn render(t: &Template, values: &std::collections::BTreeMap<String, String>) -> Result<RenderedExercise> {
+pub fn render(
+    t: &Template,
+    values: &std::collections::BTreeMap<String, String>,
+) -> Result<RenderedExercise> {
     for slot in &t.slots {
         let Some(v) = values.get(&slot.name) else {
             bail!("槽位 '{}' 没有提供值", slot.name);
@@ -546,7 +556,11 @@ misconceptions = ["以为 String 赋值会深拷贝"]
 
         let mut t = sample();
         t.reference = "let x = todo!();".into();
-        assert!(rule_filter(&t).iter().any(|s| s.contains("reference 不能包含")));
+        assert!(
+            rule_filter(&t)
+                .iter()
+                .any(|s| s.contains("reference 不能包含"))
+        );
 
         let mut t = sample();
         t.body = t.body.replace("{{prefix}}", "{{ghost}}");
@@ -558,7 +572,11 @@ misconceptions = ["以为 String 赋值会深拷贝"]
 
         let mut t = sample();
         t.slots[0].values = vec!["other".into()];
-        assert!(rule_filter(&t).iter().any(|s| s.contains("default 不在 values")));
+        assert!(
+            rule_filter(&t)
+                .iter()
+                .any(|s| s.contains("default 不在 values"))
+        );
     }
 
     #[test]
@@ -670,14 +688,20 @@ misconceptions = ["以为 String 赋值会深拷贝"]
     fn repo_template_library_is_consistent_and_valid() {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let templates = load_dir(&root.join("templates")).unwrap();
-        assert_eq!(templates.len(), 10, "首批模板库应为 10 个");
+        assert_eq!(templates.len(), 12, "模板库应为 12 个（M3 首批 10 + M3.1 错误处理 2）");
         let graph =
             crate::taxonomy::ConceptGraph::load(&root.join("taxonomy/concepts.toml")).unwrap();
-        assert!(graph.len() >= 30, "概念图谱首批应 ≥30 节点，实际 {}", graph.len());
+        assert!(
+            graph.len() >= 30,
+            "概念图谱应 ≥36 节点，实际 {}",
+            graph.len()
+        );
 
         // Link templates into the graph; dangling references fail load.
-        let items: Vec<(&str, &[String])> =
-            templates.iter().map(|t| (t.id.as_str(), t.concepts.as_slice())).collect();
+        let items: Vec<(&str, &[String])> = templates
+            .iter()
+            .map(|t| (t.id.as_str(), t.concepts.as_slice()))
+            .collect();
         let mut linked = graph.clone();
         linked.link_templates(items).unwrap();
 
@@ -704,7 +728,11 @@ misconceptions = ["以为 String 赋值会深拷贝"]
             // Retry rotations must all be renderable (values valid).
             for attempt in 1..4 {
                 let vals = fill_for_attempt(t, attempt);
-                assert!(render(t, &vals).is_ok(), "模板 {} 第 {attempt} 次填槽非法", t.id);
+                assert!(
+                    render(t, &vals).is_ok(),
+                    "模板 {} 第 {attempt} 次填槽非法",
+                    t.id
+                );
             }
 
             let values = fill_for_attempt(t, 0);
@@ -717,9 +745,12 @@ misconceptions = ["以为 String 赋值会深拷贝"]
 
             // Gate 1: triple verification (template fails, ref passes).
             let report =
-                crate::verifier::verify_exercise(&r.user_file(), &r.reference_file(), &wd)
-                    .unwrap();
-            assert!(report.all_pass(), "模板 {} 未通过三重校验: {report:?}", t.id);
+                crate::verifier::verify_exercise(&r.user_file(), &r.reference_file(), &wd).unwrap();
+            assert!(
+                report.all_pass(),
+                "模板 {} 未通过三重校验: {report:?}",
+                t.id
+            );
         }
         let _ = std::fs::remove_dir_all(&wd);
     }

@@ -207,3 +207,42 @@ name = "String 与 &str"
 parents = ["types"]
 error_codes = ["E0308", "E0277"]
 fix_patterns = ["deref-coercion", "to-owned"]
+
+[[concept]]
+id = "errors"
+name = "错误处理"
+
+[[concept]]
+id = "errors.propagation"
+name = "? 与错误传播"
+parents = ["errors"]
+error_codes = ["E0277", "E0308"]
+fix_patterns = ["propagate-with-question", "map-err"]
+
+[[concept]]
+id = "errors.box-dyn"
+name = "Box<dyn Error> 与错误类型擦除"
+parents = ["errors"]
+error_codes = ["E0308", "E0277"]
+fix_patterns = ["box-dyn-error", "from-str-impl"]
+
+[[concept]]
+id = "errors.custom"
+name = "自定义错误类型（Display/Error）"
+parents = ["errors"]
+error_codes = ["E0277"]
+fix_patterns = ["impl-display-error"]
+
+[[concept]]
+id = "errors.from-into"
+name = "From/Into 与错误转换"
+parents = ["errors"]
+error_codes = ["E0277", "E0308"]
+fix_patterns = ["impl-from"]
+
+[[concept]]
+id = "types.option-result"
+name = "Option 与 Result 基础"
+parents = ["types", "errors"]
+error_codes = ["E0308"]
+fix_patterns = ["ok-or", "map-or-else"]

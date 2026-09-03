@@ -1,0 +1,71 @@
+# 错误处理 ×1：Box<dyn Error> 与 ? 统一传播
+id = "error-propagate-box"
+title = "错误传播：用 ? 把多层错误统一成 Box<dyn Error>"
+concepts = ["errors.propagation", "errors.box-dyn"]
+error_codes = ["E0308", "E0277"]
+difficulty = "medium"
+constraints = ["no-unwrap", "max-lines=32"]
+
+body = '''
+// 把 "3,5" 这样的输入解析成两个 i32 并求和，错误统一用
+// Box<dyn Error> 向上传播：
+//   * 没有逗号   → Err（&str 可以直接 ? 进 Box<dyn Error>）
+//   * 解析失败   → ParseIntError 由 ? 自动转换
+//
+// TODO: 补全函数体：全部用 ? 传播错误（不要 match、不要 unwrap）。
+//       提示：先用 split_once 拆分；let a: i32 = ... ? 需要标注类型。
+//       提示：From<&str> 与 From<ParseIntError> for Box<dyn Error> 都已存在。
+fn sum_pair(raw: &str) -> Result<i32, Box<dyn std::error::Error>> {
+    todo!()
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sums_valid_pair() {
+        let raw = "{{a}},{{b}}";
+        let expected: i32 = raw.split(',').filter_map(|x| x.trim().parse::<i32>().ok()).sum();
+        assert!(sum_pair(raw).is_ok_and(|v| v == expected), "应为 Ok({expected})");
+    }
+
+    #[test]
+    fn missing_comma_is_error() {
+        assert!(sum_pair("{{a}}").is_err());
+    }
+
+    #[test]
+    fn unparseable_is_error() {
+        assert!(sum_pair("{{a}},x{{b}}").is_err());
+    }
+}
+'''
+
+reference = '''
+fn sum_pair(raw: &str) -> Result<i32, Box<dyn std::error::Error>> {
+    let (a, b) = raw.split_once(',').ok_or("missing comma")?;
+    let a: i32 = a.trim().parse()?;
+    let b: i32 = b.trim().parse()?;
+    Ok(a + b)
+}
+'''
+
+[[slots]]
+name = "a"
+kind = "literal"
+values = ["3", "10"]
+default = "3"
+
+[[slots]]
+name = "b"
+kind = "literal"
+values = ["5", "20"]
+default = "5"
+
+[review_hints]
+root_cause = ["? 只能在返回 Result/Option 的函数里使用", "Box<dyn Error> 用 From 把任意实现了 Error（或 &str）的错误类型擦除"]
+misconceptions = ["以为 ? 会 panic", "以为 Box<dyn Error> 需要手动 Box::new 每一层错误"]
