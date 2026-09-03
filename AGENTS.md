@@ -2,6 +2,13 @@
 
 本仓库是课程 AI Agent 大作业：RustLings-Adaptive（对话式 Rust 诊断教练）。
 
+## 隐私红线（最高优先级）
+
+- **不要读取、打印、复制或提交 `config.toml` 与 `.env`**：它们含用户的
+  API Key 等敏感信息。需要了解配置结构时看 `config.example.toml`；
+  需要修改配置时让用户本人操作
+- `~/.rustlings_adaptive/` 下是用户本地数据（用量、会话历史），同样不要读取
+
 ## 开始任何工作前
 
 1. 读 `README.md` —— 当前开发状态表与"换一个 session 继续开发"一节

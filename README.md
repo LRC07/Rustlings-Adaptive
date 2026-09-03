@@ -18,8 +18,8 @@ Agent 解释并锚定知识点（细分概念图谱 + rustc 错误码双轨）�
 |---|---|---|---|
 | M0 | CLI 骨架 + 8 道种子练习 + IDE 子 crate + rustc --test 跑练习 | — | ✅ 完成 |
 | M1 | 模块拆分 + LLM 接入 + 模型配置 + token 计费 | R1/R3/R6 | ✅ 完成 |
-| M2 | 验证器：rustc --json 解析 + 三重校验 + 约束静态检查 | R1 | ⬜ **下一个** |
-| M3 | 模板库（TOML）+ 概念图谱（concepts.toml）+ 填槽生成 | — | ⬜ |
+| M2 | 验证器：rustc --json 解析 + 三重校验 + 约束静态检查 | R1 | ✅ 完成 |
+| M3 | 模板库（TOML）+ 概念图谱（concepts.toml）+ 填槽生成 | — | ⬜ **下一个** |
 | M4 | 对话 REPL + Agent 工具环 + 进度/打断 + 会话历史 | R2/R4/R5 | ⬜ 9.6 展示基线 |
 | M5 | 解答评审门 + 交互式复盘（解释/更优解挑战/对比表/再练决策） | — | ⬜ |
 | M6 | 双轨画像（错误码 + 概念 SM-2）+ 错题本 | R5 | ⬜ |
@@ -95,6 +95,8 @@ src/exercise/          练习发现、标题解析、rustc --test 运行器
 src/config/            模型配置加载（config.toml + .env 覆盖，R3）
 src/llm/               OpenAI 兼容 chat 客户端 + usage 解析（R1）
 src/usage/             token/费用统计、预算拦截、JSON 持久化（R6）
+src/verifier/          rustc --json 诊断解析、三重校验、测试失败解析（M2）
+src/constraints/       抽象约束静态检查：no-clone 等（M2）
 config.example.toml    配置样例（复制为 config.toml 使用；后者已 gitignore）
 templates/             （M3）手写题目模板，TOML 格式
 taxonomy/              （M3）概念图谱 concepts.toml
@@ -106,7 +108,7 @@ taxonomy/              （M3）概念图谱 concepts.toml
 
 ## 换一个 session 继续开发
 
-1. **读本文件的状态表**，确定下一个里程碑（当前：M2）。
+1. **读本文件的状态表**，确定下一个里程碑（当前：M3）。
 2. 读 `docs/设计文档_v3.md`，尤其 §8 的对应里程碑（目标/产出/验收/
    提示要点）与 §8.2 交接纪律。
 3. 硬要求对照：`agent/requirements.md` §三（R1–R6）。
