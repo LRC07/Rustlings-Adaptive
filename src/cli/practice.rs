@@ -18,6 +18,7 @@ use std::path::Path;
 use crate::exercise::{self, index::ExerciseIndex, Exercise};
 use crate::taxonomy::ConceptGraph;
 
+use super::debrief::{self, DebriefDeps};
 use super::render;
 use super::{read_line, Line};
 
@@ -75,9 +76,9 @@ const FIXTURE_TOPIC: &str = "fixtures";
 // ---------------------------------------------------------------------------
 
 /// Enter the list menu. Returns Some(coach-message) when the user asked
-/// the coach about an exercise (`[a]`); the REPL turns that into a
-/// conversation turn.
-pub(crate) fn enter(ctx: &PracticeCtx, opts: EnterOpts) -> Option<String> {
+/// the coach about an exercise (`[a]`) or the debrief handed back a
+/// follow-up request (M5); the REPL turns that into a conversation turn.
+pub(crate) fn enter(ctx: &PracticeCtx, opts: EnterOpts, debrief: Option<&DebriefDeps>) -> Option<String> {
     let mut index = ctx.load_index();
     let items = load_items(ctx);
     let graph = load_graph(ctx);
@@ -103,7 +104,7 @@ pub(crate) fn enter(ctx: &PracticeCtx, opts: EnterOpts) -> Option<String> {
             "n" => {
                 match first_pending(&items, &index, opts.include_fixtures) {
                     Some(idx) => {
-                        if let Some(msg) = run_exercise(ctx, &mut index, idx, &items) {
+                        if let Some(msg) = run_exercise(ctx, &mut index, idx, &items, debrief) {
                             return Some(msg);
                         }
                     }
@@ -127,7 +128,7 @@ pub(crate) fn enter(ctx: &PracticeCtx, opts: EnterOpts) -> Option<String> {
                 match other.parse::<usize>() {
                     Ok(n) if n >= 1 && n <= visible.len() => {
                         let idx = visible[n - 1];
-                        if let Some(msg) = run_exercise(ctx, &mut index, idx, &items) {
+                        if let Some(msg) = run_exercise(ctx, &mut index, idx, &items, debrief) {
                             return Some(msg);
                         }
                     }
@@ -140,20 +141,25 @@ pub(crate) fn enter(ctx: &PracticeCtx, opts: EnterOpts) -> Option<String> {
 
 /// Jump straight into one exercise (by path), then fall through to the
 /// list menu. Used after a generated exercise.
-pub(crate) fn enter_at(ctx: &PracticeCtx, path: &Path, opts: EnterOpts) -> Option<String> {
+pub(crate) fn enter_at(
+    ctx: &PracticeCtx,
+    path: &Path,
+    opts: EnterOpts,
+    debrief: Option<&DebriefDeps>,
+) -> Option<String> {
     let mut index = ctx.load_index();
     let items = load_items(ctx);
     let want = path.canonicalize().ok();
     let idx = items.iter().position(|i| i.ex.path.canonicalize().ok() == want);
     match idx {
         Some(i) => {
-            if let Some(msg) = run_exercise(ctx, &mut index, i, &items) {
+            if let Some(msg) = run_exercise(ctx, &mut index, i, &items, debrief) {
                 return Some(msg);
             }
         }
         None => println!("  生成文件未出现在练习列表（意外），可手动打开 {}", path.display()),
     }
-    enter(ctx, opts)
+    enter(ctx, opts, debrief)
 }
 
 // ---------------------------------------------------------------------------
@@ -431,27 +437,47 @@ fn read_prompt(prompt: &str) -> Option<String> {
     }
 }
 
-/// Practice one exercise. Returns Some(coach-message) for `[a] 问教练`.
+/// Practice one exercise. Returns Some(coach-message) for `[a] 问教练`
+/// or a debrief follow-up request.
 fn run_exercise(
     ctx: &PracticeCtx,
     index: &mut ExerciseIndex,
     idx: usize,
     items: &[Item],
+    debrief: Option<&DebriefDeps>,
 ) -> Option<String> {
     let mut cur = idx;
     let mut hint_idx = 0usize; // one more hint revealed per [h]
+    let mut last_fail: Option<String> = None; // session-local failure snapshot (debrief Step 1)
     loop {
         let item = &items[cur];
         let key = item.key.clone();
         let meta = index.get(&key).cloned();
         repaint_exercise(&item.ex, meta.as_ref(), None);
         loop {
+            let was_passed_before = index
+                .get(&key)
+                .map(|m| matches!(m.status, crate::exercise::index::Status::Passed))
+                .unwrap_or(false);
             let res = exercise::compile_and_run(&item.ex);
             index.record_attempt(&key, res.passed, res.first_error.as_deref());
+            if !res.passed && let Some(code) = &res.first_error {
+                last_fail = Some(code.clone());
+            }
             let meta = index.get(&key).cloned();
             if res.passed {
                 println!();
                 println!("  练习 '{}' 完成 - 已标记。", item.ex.name);
+                // M5.2: review gate on the first pass (seed fixtures and
+                // gateless entries keep the plain flow).
+                if !was_passed_before
+                    && let (Some(deps), Some(m)) = (debrief, meta.as_ref())
+                    && !matches!(m.source, crate::exercise::index::Source::Seed)
+                    && let Some(msg) =
+                        debrief::after_pass(deps, index, &key, m, &item.ex, &ctx.repo_root, last_fail.as_deref())
+                {
+                    return Some(msg);
+                }
             }
             println!();
             println!("  [r] 重跑   [e] 编辑   [h] 提示   [a] 问教练   [f] 反馈   [n] 下一题   [b] 返回");
@@ -662,6 +688,7 @@ mod tests {
             slots: Default::default(),
             reference: None,
             constraints: Vec::new(),
+            review_verdict: None,
         }
     }
 

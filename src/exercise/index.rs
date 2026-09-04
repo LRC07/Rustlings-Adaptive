@@ -159,6 +159,10 @@ pub struct ExerciseMeta {
     /// these; empty when unknown (seed fixtures, pre-M5.1 entries).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub constraints: Vec<String>,
+    /// Review-gate verdict of the passing run (M5.2):
+    /// "clean" | "suggestions" | "suspicious"; None = not reviewed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_verdict: Option<String>,
 }
 
 impl ExerciseMeta {
@@ -272,6 +276,19 @@ impl ExerciseIndex {
         }
     }
 
+    /// Persist the review-gate verdict of a passed exercise (M5.2).
+    /// Returns false when the key is unknown.
+    pub fn set_review_verdict(&mut self, key: &str, verdict: &str) -> bool {
+        match self.entries.get_mut(key) {
+            Some(meta) => {
+                meta.review_verdict = Some(verdict.to_string());
+                self.save();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Reconcile with the exercises found on disk: adds a Pending entry
     /// for every untracked exercise, recovering provenance from the
     /// matching template (file name `<sanitized-id>[_N]`). Returns the
@@ -306,6 +323,7 @@ impl ExerciseIndex {
                     slots: Default::default(),
                     reference,
                     constraints,
+                    review_verdict: None,
                 },
             );
             added += 1;
@@ -518,6 +536,7 @@ pub fn register_generated(
         slots: slots.clone(),
         reference: (!reference.trim().is_empty()).then(|| reference.trim_end().to_string()),
         constraints: constraints.to_vec(),
+        review_verdict: None,
     });
     Ok(key)
 }
@@ -581,6 +600,7 @@ mod tests {
             slots: Default::default(),
             reference: None,
             constraints: Vec::new(),
+            review_verdict: None,
         });
 
         idx.record_attempt(key, false, Some("E0382"));
@@ -624,6 +644,7 @@ mod tests {
             slots: Default::default(),
             reference: None,
             constraints: Vec::new(),
+            review_verdict: None,
         });
         assert!(idx.set_feedback("generated/a.rs", Feedback::TooHard));
         assert_eq!(idx.get("generated/a.rs").unwrap().feedback, Some(Feedback::TooHard));
@@ -654,6 +675,7 @@ mod tests {
                 slots: Default::default(),
             reference: None,
             constraints: Vec::new(),
+            review_verdict: None,
             });
         }
         let idx = ExerciseIndex::load_from(path);
@@ -718,6 +740,7 @@ mod tests {
             slots: Default::default(),
             reference: None,
             constraints: Vec::new(),
+            review_verdict: None,
         };
         idx.entries.insert("generated/1.rs".into(), mk("generated/1.rs", "题一", &["ownership.move"], Status::Passed, false));
         idx.entries.insert("generated/2.rs".into(), mk("generated/2.rs", "题二", &["borrow.shared-mut"], Status::Failed { times: 2 }, false));
@@ -761,6 +784,7 @@ mod tests {
                 slots: Default::default(),
             reference: None,
             constraints: Vec::new(),
+            review_verdict: None,
             },
         );
         assert!(seed_only.practice_note(&[]).is_none());

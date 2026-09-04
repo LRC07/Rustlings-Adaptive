@@ -8,6 +8,7 @@
 use crate::config::ModelConfig;
 use crate::llm::LlmClient;
 
+mod debrief;
 mod generate;
 mod input;
 mod md;

@@ -211,6 +211,11 @@ pub(crate) fn cmd_generate(
             // Path comparison uses canonicalize(): the generator's path
             // carries a "./" prefix while discover() yields plain
             // relative paths, so raw equality would always miss.
+            let deps = super::debrief::DebriefDeps {
+                client: client.as_ref(),
+                cfg,
+                tracker: tracker.clone(),
+            };
             practice::enter_at(
                 ctx,
                 &out.path,
@@ -218,6 +223,7 @@ pub(crate) fn cmd_generate(
                     include_fixtures: false,
                     session_paths: session.map(|(_, paths)| paths).unwrap_or(&[]),
                 },
+                Some(&deps),
             );
             Some(out.path)
         }

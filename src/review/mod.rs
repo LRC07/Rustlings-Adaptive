@@ -60,6 +60,15 @@ impl Verdict {
             Verdict::Suspicious => "存疑 · 需要加测验证",
         }
     }
+
+    /// Stable key persisted in the exercise index (`review_verdict`).
+    pub fn key(&self) -> &'static str {
+        match self {
+            Verdict::Clean => "clean",
+            Verdict::Suggestions => "suggestions",
+            Verdict::Suspicious => "suspicious",
+        }
+    }
 }
 
 /// One review finding. `kind` ∈ idiom|readability|maintenance|design|logic;
@@ -301,21 +310,24 @@ pub trait ReviewCaller {
 
 /// Inputs the reviewer sees. Everything comes from real artifacts
 /// (template/draft + the user's file + index meta) — no fabrication.
-pub struct ReviewInput<'a> {
-    pub title: &'a str,
-    pub concepts: &'a [String],
+/// Owned data so the gate can run inside a worker thread.
+pub struct ReviewInput {
+    pub title: String,
+    pub concepts: Vec<String>,
     /// The instruction part of the exercise (what the user saw).
-    pub body: &'a str,
+    pub body: String,
     /// Expected non-idiomatic patterns the exercise is designed to
     /// force away (template `anti_patterns`).
-    pub anti_patterns: &'a [String],
+    pub anti_patterns: Vec<String>,
     /// The language-transfer intuition behind the trap (template
     /// `confusion`), when available.
-    pub confusion: Option<&'a str>,
+    pub confusion: Option<String>,
     /// Hidden reference solution, when persisted (M5.1+).
-    pub reference: Option<&'a str>,
+    pub reference: Option<String>,
     /// The user's full solution file (body + tests).
-    pub user_code: &'a str,
+    pub user_code: String,
+    /// The exercise's declared constraint specs (static layer).
+    pub constraint_specs: Vec<String>,
     /// Attempts before the passing run (0 = first-try pass).
     pub attempts: u32,
 }
@@ -344,18 +356,18 @@ fn review_user_prompt(input: &ReviewInput) -> String {
     p.push_str("\n\n【学习者的解答（已通过全部测试）】\n```rust\n");
     p.push_str(input.user_code.trim());
     p.push_str("\n```\n");
-    if let Some(r) = input.reference {
+    if let Some(r) = &input.reference {
         p.push_str("\n【参考解】\n```rust\n");
         p.push_str(r.trim());
         p.push_str("\n```\n");
     }
     if !input.anti_patterns.is_empty() {
         p.push_str("\n【本题预期迫使学习者避开的写法】\n");
-        for a in input.anti_patterns {
+        for a in &input.anti_patterns {
             p.push_str(&format!("- {a}\n"));
         }
     }
-    if let Some(c) = input.confusion {
+    if let Some(c) = &input.confusion {
         p.push_str(&format!("\n【本题针对的语言迁移直觉】{c}\n"));
     }
     p.push_str("\n请输出评审 JSON。");
@@ -371,6 +383,90 @@ pub fn llm_review(call: &mut dyn ReviewCaller, input: &ReviewInput) -> Result<Ll
         bail!("评审输出在 max_tokens 处被截断");
     }
     parse_llm_review(&reply.content).ok_or_else(|| anyhow!("评审 JSON 无法解析"))
+}
+
+// ---------------------------------------------------------------------------
+// Gate orchestration (static → LLM → probe)
+// ---------------------------------------------------------------------------
+
+/// Full outcome of one review-gate run.
+#[derive(Debug, Clone)]
+pub struct GateOutcome {
+    pub statics: StaticReport,
+    pub llm: Option<LlmReview>,
+    /// Why the LLM layer (or probe) was skipped/failed — surfaced to
+    /// the user honestly ("无 Key / 预算拦截 / 解析失败").
+    pub llm_error: Option<String>,
+    pub probe: Option<ProbeOutcome>,
+    pub verdict: Verdict,
+}
+
+impl GateOutcome {
+    /// suspicious (probe failed or inconclusive) → not counted as
+    /// mastery (design §4.2).
+    pub fn counted_as_mastery(&self) -> bool {
+        self.verdict != Verdict::Suspicious
+    }
+}
+
+/// Run the whole gate. `call` is None offline → static-only verdict.
+/// LLM-layer failures degrade to static-only with `llm_error` set
+/// (never invent a verdict). Progress strings are meant for the CLI
+/// spinner ("评审：静态检查…").
+pub fn run_gate(
+    mut call: Option<Box<dyn ReviewCaller + Send>>,
+    input: ReviewInput,
+    progress: &dyn Fn(&str),
+) -> GateOutcome {
+    progress("评审：静态检查（todo! 残留 / 约束 / clippy）…");
+    let statics = static_checks(&input.user_code, &input.constraint_specs);
+
+    let mut llm = None;
+    let mut llm_error: Option<String> = None;
+    if let Some(c) = call.as_mut() {
+        progress("评审：LLM 逻辑评审…");
+        match llm_review(&mut **c, &input) {
+            Ok(r) => llm = Some(r),
+            Err(e) => llm_error = Some(format!("{e:#}")),
+        }
+    }
+
+    let mut verdict = combine(&statics, llm.as_ref());
+    let mut probe = None;
+
+    if verdict == Verdict::Suspicious
+        && let Some(c) = call.as_mut()
+    {
+        let reason = llm
+            .as_ref()
+            .map(|r| {
+                if r.summary.is_empty() {
+                    "LLM 评审判定解答疑似绕过考点".to_string()
+                } else {
+                    r.summary.clone()
+                }
+            })
+            .unwrap_or_else(|| "静态检查发现 todo! 残留".to_string());
+        progress("评审：生成附加验证测试（probe）…");
+        match run_probe(&mut **c, &input, &reason) {
+            Ok(p) => {
+                if p.passed == Some(true) {
+                    // Suspicion cleared: downgrade to the best verdict
+                    // the remaining signals support.
+                    let findings = llm.as_ref().map(|r| r.findings.len()).unwrap_or(0);
+                    verdict = if statics.has_constraint_violations() || findings > 0 {
+                        Verdict::Suggestions
+                    } else {
+                        Verdict::Clean
+                    };
+                }
+                probe = Some(p);
+            }
+            Err(e) => llm_error = Some(format!("probe 跳过：{e:#}")),
+        }
+    }
+
+    GateOutcome { statics, llm, llm_error, probe, verdict }
 }
 
 // ---------------------------------------------------------------------------
@@ -622,13 +718,14 @@ mod tests {
     #[test]
     fn review_user_prompt_contains_all_sections() {
         let input = ReviewInput {
-            title: "题",
-            concepts: &["ownership.move".to_string()],
-            body: "// TODO",
-            anti_patterns: &["clone 逃逸".to_string()],
-            confusion: Some("来自 C 的值语义直觉"),
-            reference: Some("fn f() {}"),
-            user_code: "fn f() { todo!() }",
+            title: "题".into(),
+            concepts: vec!["ownership.move".to_string()],
+            body: "// TODO".into(),
+            anti_patterns: vec!["clone 逃逸".to_string()],
+            confusion: Some("来自 C 的值语义直觉".into()),
+            reference: Some("fn f() {}".into()),
+            user_code: "fn f() { todo!() }".into(),
+            constraint_specs: vec![],
             attempts: 2,
         };
         let p = review_user_prompt(&input);

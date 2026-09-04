@@ -151,7 +151,8 @@ pub(crate) fn run() {
                     include_fixtures: arg == Some("all"),
                     session_paths: &session.exercises,
                 };
-                match practice::enter(&practice_ctx, opts) {
+                let deps = debrief_deps(&cfg, &tracker, &client);
+                match practice::enter(&practice_ctx, opts, Some(&deps)) {
                     Some(msg) => {
                         repaint_chat(&session, &cfg, &tracker);
                         println!("{} [问教练] 把练习代码带回对话", super::render::bold("你>"));
@@ -211,6 +212,20 @@ pub(crate) fn run() {
 // ---------------------------------------------------------------------------
 // Viewport rendering (M4.2)
 // ---------------------------------------------------------------------------
+
+/// Fresh review-gate/debrief dependencies (M5.2): resolved per entry so
+/// a `/model` switch and budget updates take effect immediately.
+fn debrief_deps<'a>(
+    cfg: &'a ModelConfig,
+    tracker: &'a Arc<Mutex<UsageTracker>>,
+    client: &'a Option<LlmClient>,
+) -> super::debrief::DebriefDeps<'a> {
+    super::debrief::DebriefDeps {
+        client: client.as_ref(),
+        cfg,
+        tracker: tracker.clone(),
+    }
+}
 
 /// Redraw the chat page: clear viewport (view mode, tty only) →
 /// header → dim recap of the last few entries. No-op in scroll mode
@@ -544,7 +559,8 @@ fn agent_turn(
                                 include_fixtures: false,
                                 session_paths: &session.exercises,
                             };
-                            if let Some(msg) = practice::enter_at(practice_ctx, &offer.path, opts) {
+                            let deps = debrief_deps(cfg, tracker, client);
+                            if let Some(msg) = practice::enter_at(practice_ctx, &offer.path, opts, Some(&deps)) {
                                 repaint_chat(session, cfg, tracker);
                                 println!("{} [问教练] 把练习代码带回对话", super::render::bold("你>"));
                                 agent_turn(session, &msg, cfg, tracker, client, practice_ctx);
