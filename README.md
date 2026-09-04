@@ -21,6 +21,7 @@ Agent 解释并锚定知识点（细分概念图谱 + rustc 错误码双轨）�
 | M2 | 验证器：rustc --json 解析 + 三重校验 + 约束静态检查 | R1 | ✅ 完成 |
 | M3 | 模板库（TOML）+ 概念图谱（concepts.toml）+ 填槽生成 | — | ✅ 完成 |
 | M4 | 对话 REPL + Agent 工具环 + 进度/打断 + 会话历史 | R2/R4/R5 | ✅ 完成 |
+| M4.2 | 界面体验打磨：视口重绘清屏策略 + 宽字符折行 + 页面化 | — | ✅ 完成 |
 | M4.5 | 分层出题：模板改编 + 自由生成（同一质量门收口，§7.5） | — | ⬜ **下一个** |
 | M5 | 解答评审门 + 交互式复盘（解释/更优解挑战/对比表/再练决策） | — | ⬜ |
 | M6 | 双轨画像（错误码 + 概念 SM-2）+ 错题本 | R5 | ⬜ |
@@ -63,20 +64,27 @@ cargo run            # 必须在项目根目录运行
 启动即进入**对话 REPL**（M4 默认首屏）：直接输入问题 / 贴报错或代码（多行
 代码用 ``` 围栏包裹，即两行 ``` 之间的内容合为一条消息）。教练会锚定
 错误码与概念、必要时本地编译取证；说"来一道 XX 的题"即可生成可开练的
-练习并进入做题。全程不清屏，输出如聊天一样滚动（`/usage` 等 pages 直接
-内联打印，不再被清屏吞掉）。
+练习并进入做题。
 
-REPL 命令（斜杠命令）：
+**界面模式（M4.2）**：默认**视口重绘**——每回合开始清一次屏幕视口
+（仅 `ESC[2J`，终端回滚缓冲区原样保留，随时上滚可查历史），再渲染
+页眉（会话 · 模型 · 累计花费/预算）与最近几条对话摘要（dim），窗口
+永远只呈现当前语境，不被旧输出淹没；`/ui scroll` 可切回纯滚动，
+`/clear` 手动清屏（`/clear all` 连回滚缓冲区一起清）。中文/emoji 按
+显示宽度折行，代码块内不折行。管道输出（测试/录制）自动零 ANSI。
+
+REPL 命令（斜杠命令，输错有就近提示）：
 
 ```
-  /new 新会话  /practice 做题模式  /generate 出题  /usage 用量
-  /config 配置  /sessions 会话轨迹  /help 帮助  /exit 退出
+  /new 新会话  /clear 清屏  /ui 界面模式  /topics 概念图谱  /practice 做题
+  /generate 出题  /usage 用量  /config 配置  /sessions 会话轨迹  /help /exit
 ```
 
-- **做题子模式**（`/practice` 或对话出题后进入）：`<数字>` 选题 /
-  `r` 重跑 / `e` 编辑（编辑器解析链：$EDITOR → $VISUAL → config
-  `editor` → 自动探测 `code --wait` → vi，`/config` 可改）/ `n` 下一题 /
-  `v` 全部验证 / `b` 返回对话
+- **做题子模式**（`/practice` 或对话出题后进入）：页面化呈现（标题 +
+  `[████░░] 5/12` 进度条），`<数字>` 选题 / `r` 重跑 / `e` 编辑（编辑器
+  解析链：$EDITOR → $VISUAL → config `editor` → 自动探测 `code --wait`
+  → vi，`/config` 可改；编辑器返回后自动重绘并重编译）/ `n` 下一题 /
+  `v` 全部验证（✓/✗ 着色）/ `b` 返回对话
 - **Agent 工具环**：教练可调用三个本地工具——`check_code`（rustc 真实
   诊断取证）、`generate_exercise`（M3 生成管线 + 三重校验，出题后可直接
   开练）、`list_concepts`（概念图谱查询）；累计花费达到预算会被拦截
@@ -120,7 +128,7 @@ agent/                 作业要求与背景（requirements.md 是硬要求 R1-R
 docs/                  设计文档（v3 为当前基线，v1/v2 为历史）；选题各版本
 exercises/             练习仓 + IDE-only 子 crate（rust-analyzer 分析用，cargo 不编译）
 src/main.rs            薄入口
-src/cli/               交互 CLI：对话 REPL（默认首屏）、做题子模式、出题入口、spinner
+src/cli/               交互 CLI：对话 REPL（默认首屏）、渲染基建、做题子模式、出题入口、spinner
 src/agent/             Agent 环：工具注册/调度、会话轨迹落盘与回看（M4）
 src/exercise/          练习发现、标题解析、rustc --test 运行器
 src/config/            模型配置加载（config.toml + .env 覆盖，R3）

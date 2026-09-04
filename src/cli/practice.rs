@@ -33,10 +33,13 @@ impl PracticeCtx {
 }
 
 /// Enter the list menu with a freshly discovered exercise set (so
-/// generated exercises appear without a restart).
+/// generated exercises appear without a restart). Page-framed: clears
+/// the viewport, shows a progress bar, then the list.
 pub(crate) fn enter(ctx: &PracticeCtx) {
     let exercises = fresh_list(&ctx.root);
-    show_menu(&exercises, &ctx.load_progress());
+    let progress = ctx.load_progress();
+    page_frame(&exercises, &progress);
+    show_menu(&exercises, &progress);
     loop {
         let Some(line) = read_prompt("> ") else { return };
         let line = line.trim();
@@ -50,13 +53,17 @@ pub(crate) fn enter(ctx: &PracticeCtx) {
         match line {
             "v" | "verify" => verify_all(&exercises, &mut progress, &ctx.progress_path),
             "n" => match first_pending(&exercises, &progress) {
-                Some(idx) => run_exercise(idx, &exercises, &mut progress, &ctx.progress_path, ctx.editor.as_deref()),
+                Some(idx) => {
+                    run_exercise(idx, &exercises, &mut progress, &ctx.progress_path, ctx.editor.as_deref());
+                    page_frame(&exercises, &progress);
+                }
                 None => println!("  所有练习已完成！"),
             },
             "h" | "help" => println!("  做题模式：<数字> 选题   n 下一题   v 全部验证   b 返回对话"),
             s => match s.parse::<usize>() {
                 Ok(n) if n >= 1 && n <= exercises.len() => {
                     run_exercise(n - 1, &exercises, &mut progress, &ctx.progress_path, ctx.editor.as_deref());
+                    page_frame(&exercises, &progress);
                 }
                 _ => println!("未知命令: {s}（可用：数字、n、v、b）"),
             },
@@ -101,10 +108,6 @@ fn read_prompt(prompt: &str) -> Option<String> {
 }
 
 fn show_menu(exercises: &[Exercise], progress: &[String]) {
-    let done = exercises.iter().filter(|e| e.is_done(progress)).count();
-    let pct = if exercises.is_empty() { 100 } else { done * 100 / exercises.len() };
-    println!();
-    println!("======== 做题模式 ｜ 进度: {}/{} ({}%) ========", done, exercises.len(), pct);
     let mut cat = String::new();
     for (i, ex) in exercises.iter().enumerate() {
         if ex.category != cat {
@@ -118,8 +121,24 @@ fn show_menu(exercises: &[Exercise], progress: &[String]) {
     println!("  <数字> 选题   n 下一题   v 全部验证   b 返回对话");
 }
 
+/// Page frame for the practice list (M4.2): viewport clear + title +
+/// progress bar. Used on entry and after returning from an exercise.
+fn page_frame(exercises: &[Exercise], progress: &[String]) {
+    if super::render::ansi_enabled() {
+        super::render::clear_viewport();
+    }
+    let done = exercises.iter().filter(|e| e.is_done(progress)).count();
+    println!("{}", super::render::cyan("── 做题模式 ──"));
+    println!(
+        "  进度 {}",
+        super::render::progress_bar(done, exercises.len(), 20)
+    );
+    println!();
+}
+
 /// Compile+run one exercise; `r` rerun, `e` edit, `n` next pending,
-/// `b` back to the list.
+/// `b` back to the list. Each (re)entry repaints the exercise page:
+/// viewport clear + title, so compiler output always starts clean.
 pub(crate) fn run_exercise(
     idx: usize,
     exercises: &[Exercise],
@@ -128,8 +147,7 @@ pub(crate) fn run_exercise(
     editor: Option<&str>,
 ) {
     let ex = &exercises[idx];
-    println!();
-    println!("--- {} ({}) ---", ex.name, ex.path.display());
+    repaint_exercise(ex);
     loop {
         let ok = exercise::compile_and_run(ex);
         if ok && !ex.is_done(progress) {
@@ -142,8 +160,11 @@ pub(crate) fn run_exercise(
         println!("  [r] 重跑   [e] 编辑   [n] 下一题   [b] 返回");
         let Some(s) = read_prompt("> ") else { return };
         match s.trim() {
-            "r" | "" => continue,
-            "e" => exercise::open_editor(&ex.path, editor),
+            "r" | "" => repaint_exercise(ex),
+            "e" => {
+                exercise::open_editor(&ex.path, editor);
+                repaint_exercise(ex);
+            }
             "n" => {
                 let next = next_pending(idx, exercises, progress);
                 if let Some(next) = next {
@@ -155,6 +176,14 @@ pub(crate) fn run_exercise(
             other => println!("未知命令: {other}"),
         }
     }
+}
+
+/// Exercise page: viewport clear + title line (before compile output).
+fn repaint_exercise(ex: &Exercise) {
+    if super::render::ansi_enabled() {
+        super::render::clear_viewport();
+    }
+    println!("--- {} ({}) ---", ex.name, ex.path.display());
 }
 
 fn next_pending(from: usize, exercises: &[Exercise], progress: &[String]) -> Option<usize> {
@@ -186,11 +215,15 @@ fn verify_all(exercises: &[Exercise], progress: &mut Vec<String>, progress_path:
             if !ex.is_done(progress) {
                 progress.push(ex.path.to_string_lossy().into_owned());
             }
+            println!("  {}", super::render::green("✓ 通过"));
+        } else {
+            println!("  {}", super::render::red("✗ 未通过"));
         }
     }
     save_progress(progress_path, progress);
     println!();
-    println!("==== 全部验证完成: {pass}/{total} 通过 ====");
+    let summary = format!("==== 全部验证完成: {pass}/{total} 通过 ====");
+    println!("{}", if pass == total { super::render::green(&summary) } else { summary });
 }
 
 fn save_progress(p: &Path, progress: &[String]) {

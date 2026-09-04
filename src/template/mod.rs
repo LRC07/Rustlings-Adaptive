@@ -445,17 +445,13 @@ pub fn render(
     })
 }
 
-/// After substitution, find the first leftover `{{…}}` (if any).
+/// After substitution, find the first leftover `{{…}}` (if any). An
+/// unterminated `{{` (no closing `}}`) is not counted.
 fn leftovers(text: &str) -> Option<String> {
-    let rest = text;
-    while let Some(start) = rest.find("{{") {
-        let after = &rest[start + 2..];
-        match after.find("}}") {
-            Some(end) => return Some(after[..end].trim().to_string()),
-            None => return None,
-        }
-    }
-    None
+    let start = text.find("{{")?;
+    let after = &text[start + 2..];
+    let end = after.find("}}")?;
+    Some(after[..end].trim().to_string())
 }
 
 #[cfg(test)]

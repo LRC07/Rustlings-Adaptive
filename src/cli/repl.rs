@@ -1,8 +1,12 @@
-//! Conversation REPL (M4): the default first screen. Plain input goes
-//! to the agent (model + local tools); slash commands open the
-//! built-in pages. No screen clearing — the transcript scrolls like a
-//! chat, which also fixes the old "menu wipe swallows the usage page"
-//! behavior.
+//! Conversation REPL (M4/M4.2): the default first screen. Plain input
+//! goes to the agent (model + local tools); slash commands open the
+//! built-in pages.
+//!
+//! Rendering (M4.2): two modes. "view" (default) repaints a clean
+//! viewport before every turn — page header + a dim recap of the last
+//! few entries — so the window never drowns in old output; clearing
+//! uses ESC[2J only, scrollback is preserved. "scroll" keeps the plain
+//! scrolling transcript. Piped output never emits ANSI.
 //!
 //! Agent turns run on a worker thread with a live spinner (R4); Ctrl-C
 //! abandons the turn and returns to the prompt. Every completed turn
@@ -18,6 +22,7 @@ use crate::config::ModelConfig;
 use crate::llm::LlmClient;
 use crate::usage::UsageTracker;
 
+use super::render::{self, chat_header, chat_tail, clear_all, clear_viewport};
 use super::{generate, make_client, practice, read_line_trimmed, spinner::Spinner};
 
 pub(crate) fn run() {
@@ -38,25 +43,27 @@ pub(crate) fn run() {
     let mut client = make_client(&cfg);
     install_ctrlc();
 
-    println!();
-    println!("  欢迎使用 my_rustlings —— 对话式 Rust 诊断教练");
-    println!(
-        "  模型：{} ｜ 直接输入问题开始对话，/help 查看全部命令",
-        if client.is_some() { cfg.model.as_str() } else { "未配置（/config 填 API Key）" }
-    );
-
     // R5: resume the newest session so a restart continues the talk.
+    let existing = Session::list();
     let mut session = match Session::resume_latest() {
         Some(s) if !s.messages.is_empty() => {
-            println!(
-                "  已恢复上次会话 {}（{} 条消息；/new 开新会话）",
-                s.id,
-                s.messages.len()
-            );
+            println!();
             s
         }
         _ => Session::new(&cfg.model),
     };
+    let resumed = !session.messages.is_empty();
+    let resumed_msgs = session.messages.len();
+
+    // Viewport-first impression (view mode): clear, then banner page.
+    print_banner(
+        &session,
+        &cfg,
+        first_run(existing.is_empty(), resumed),
+        resumed,
+        resumed_msgs,
+        client.is_some(),
+    );
     println!();
 
     let mut practice_ctx = practice::PracticeCtx::new(&root.join("exercises"), cfg.editor.clone());
@@ -93,27 +100,105 @@ pub(crate) fn run() {
                 session = Session::new(&cfg.model);
                 println!("  已开启新会话 {}（旧会话仍在 /sessions 中可回看）", session.id);
             }
+            Cmd::Clear(deep) => {
+                if deep {
+                    clear_all();
+                } else {
+                    clear_viewport();
+                }
+                println!("{}", chat_header(&short_id(&session.id), &cfg.model, current_spent(&tracker), cfg.budget_usd()));
+            }
+            Cmd::Ui(arg) => switch_ui(&mut cfg, arg),
+            Cmd::Topics => topics_page(),
             Cmd::Practice => {
                 agent::reset_interrupt();
                 practice::enter(&practice_ctx);
+                repaint_chat(&session, &cfg, &tracker);
             }
             Cmd::Generate(arg) => {
                 agent::reset_interrupt();
                 generate::cmd_generate(&cfg, &tracker, &client, &practice_ctx, arg);
+                repaint_chat(&session, &cfg, &tracker);
             }
             Cmd::Usage => print_usage(&cfg, &tracker),
             Cmd::Config => {
                 cmd_config(&mut cfg, &mut client);
                 practice_ctx.editor = cfg.editor.clone();
+                repaint_chat(&session, &cfg, &tracker);
             }
             Cmd::Sessions(arg) => sessions_page(arg.as_deref()),
-            Cmd::Unknown(raw) => println!("  未知命令 {raw}（/help 查看命令列表）"),
-            Cmd::Chat => agent_turn(&mut session, &line, &cfg, &tracker, &client, &practice_ctx),
+            Cmd::Unknown(raw) => {
+                let hint = render::suggest_command(&raw, KNOWN_COMMANDS)
+                    .map(|s| format!("你是不是想用 {s}？"))
+                    .unwrap_or_default();
+                println!("  未知命令 {raw}（{hint}/help 查看命令列表）");
+            }
+            Cmd::Chat => {
+                // View mode: fresh viewport per turn — header, dim recap
+                // of the last entries, then the echoed input.
+                repaint_chat(&session, &cfg, &tracker);
+                println!("{} {}", super::render::bold("你>"), line);
+                agent_turn(&mut session, &line, &cfg, &tracker, &client, &practice_ctx);
+            }
         }
     }
 
     if let Err(e) = session.save() {
         eprintln!("会话保存失败：{e:#}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Viewport rendering (M4.2)
+// ---------------------------------------------------------------------------
+
+/// Redraw the chat page: clear viewport (view mode, tty only) →
+/// header → dim recap of the last few entries. No-op in scroll mode
+/// and on piped output.
+fn repaint_chat(session: &Session, cfg: &ModelConfig, tracker: &Arc<Mutex<UsageTracker>>) {
+    if !cfg.ui.mode_view() || !render::ansi_enabled() {
+        return;
+    }
+    clear_viewport();
+    println!("{}", chat_header(&short_id(&session.id), &cfg.model, current_spent(tracker), cfg.budget_usd()));
+    for (who, text) in chat_tail(&session.messages, 3, 80) {
+        println!("{}", render::dim(&format!(" {who}: {text}")));
+    }
+    println!();
+}
+
+fn current_spent(tracker: &Arc<Mutex<UsageTracker>>) -> f64 {
+    tracker.lock().expect("usage lock").all_totals().cost_usd
+}
+
+fn short_id(id: &str) -> String {
+    id.strip_prefix("session_").unwrap_or(id).to_string()
+}
+
+/// Startup page (view mode clears first): title, model line, resumed
+/// note, and onboarding hints on a first run.
+fn print_banner(
+    session: &Session,
+    cfg: &ModelConfig,
+    first_run: bool,
+    resumed: bool,
+    resumed_msgs: usize,
+    has_key: bool,
+) {
+    if render::ansi_enabled() && cfg.ui.mode_view() {
+        clear_viewport();
+    }
+    println!("{}", render::cyan("  欢迎使用 my_rustlings —— 对话式 Rust 诊断教练"));
+    println!(
+        "  模型：{} ｜ /help 查看全部命令",
+        if has_key { cfg.model.as_str() } else { "未配置（/config 填 API Key）" }
+    );
+    if resumed {
+        println!("  已恢复上次会话 {}（{resumed_msgs} 条消息；/new 开新会话）", session.id);
+    }
+    if first_run {
+        println!("{}", render::dim("  试试：直接提问（如「什么是所有权」）、贴一段报错代码、"));
+        println!("{}", render::dim("  或说「来一道 E0382 的题」；多行代码用两行 ``` 围住。"));
     }
 }
 
@@ -125,6 +210,9 @@ enum Cmd<'a> {
     Exit,
     Help,
     New,
+    Clear(bool),
+    Ui(Option<&'a str>),
+    Topics,
     Practice,
     Generate(Option<&'a str>),
     Usage,
@@ -133,6 +221,10 @@ enum Cmd<'a> {
     Unknown(String),
     Chat,
 }
+
+/// Full command words offered for near-miss suggestions (M4.2).
+const KNOWN_COMMANDS: &[&str] =
+    &["new", "clear", "practice", "generate", "usage", "config", "sessions", "topics", "help", "exit"];
 
 fn parse_command(line: &str) -> Cmd<'_> {
     if !line.starts_with('/') {
@@ -147,22 +239,28 @@ fn parse_command(line: &str) -> Cmd<'_> {
         ("exit", _) | ("quit", _) | ("q", _) => Cmd::Exit,
         ("help", _) | ("h", _) | ("?", _) => Cmd::Help,
         ("new", _) => Cmd::New,
+        ("clear", a) => Cmd::Clear(a == Some("all")),
+        ("ui", a) => Cmd::Ui(a),
+        ("topics", _) => Cmd::Topics,
         ("practice", _) | ("p", _) => Cmd::Practice,
         ("generate", a) | ("g", a) => Cmd::Generate(a),
         ("usage", _) | ("u", _) => Cmd::Usage,
         ("config", _) | ("c", _) => Cmd::Config,
         ("sessions", a) | ("s", a) => Cmd::Sessions(a.map(str::to_string)),
-        (raw, _) => Cmd::Unknown(format!("/{raw}")),
+        (raw, _) => Cmd::Unknown(raw.to_string()),
     }
 }
 
 fn print_help() {
     println!();
-    println!("  对话：直接输入问题 / 贴报错或代码。教练会锚定错误码与概念，");
-    println!("        需要时本地编译你的代码取证（check_code），或生成一道可开练");
-    println!("        的小练习（generate_exercise）。任务执行中可随时 Ctrl-C 打断。");
+    println!("  对话：直接输入问题 / 贴报错或代码（多行用两行 ``` 围住）。教练会锚定");
+    println!("        错误码与概念，需要时本地编译你的代码取证（check_code），或生成");
+    println!("        一道可开练的小练习（generate_exercise）。任务执行中可随时 Ctrl-C 打断。");
     println!("  命令：");
     println!("    /new        开启新会话（旧会话落盘可回看）");
+    println!("    /clear      清屏（/clear all 连同回滚缓冲区一起清）");
+    println!("    /ui         界面模式：/ui view 视口重绘（默认）｜ /ui scroll 滚动");
+    println!("    /topics     查看概念图谱（出题主题的权威列表）");
     println!("    /practice   做题模式（练习列表，数字选题 / n 下一题 / v 全部验证）");
     println!("    /generate   直接生成练习（可带主题：/g E0382；离线也可用）");
     println!("    /usage      用量与花费（本次会话 / 累计 / 预算余量）");
@@ -242,7 +340,7 @@ fn agent_turn(
             session.messages = turn.history;
             println!();
             if let Some(text) = &turn.reply {
-                println!("{text}");
+                print!("{}", render::wrap_text(text, render::term_width(), 0));
             }
             for note in &turn.tool_notes {
                 println!("  · {note}");
@@ -271,13 +369,17 @@ fn agent_turn(
                         let a = ans.trim().to_ascii_lowercase();
                         if a.is_empty() || a == "y" || a == "yes" || a == "是" {
                             practice::enter_at(practice_ctx, &offer.path);
+                            repaint_chat(session, cfg, tracker);
                         }
                     }
                 }
             }
         }
-        Some(Err(e)) => println!("  出错：{e:#}"),
-        None => {} // interrupted: nothing to show; history untouched
+        Some(Err(e)) => {
+            println!("  出错：{e:#}");
+            repaint_chat(session, cfg, tracker);
+        }
+        None => repaint_chat(session, cfg, tracker), // interrupted: history untouched
     }
     println!();
 }
@@ -292,7 +394,7 @@ fn print_usage(cfg: &ModelConfig, tracker: &Arc<Mutex<UsageTracker>>) {
     let s = t.session_totals();
     let a = t.all_totals();
     println!();
-    println!("── 用量与花费 ──");
+    println!("{}", render::cyan("── 用量与花费 ──"));
     println!(
         "  本次会话: {} 次调用 ｜ 输入 {} tok ｜ 输出 {} tok ｜ ${:.4}",
         s.calls, s.input_tokens, s.output_tokens, s.cost_usd
@@ -318,12 +420,18 @@ fn print_usage(cfg: &ModelConfig, tracker: &Arc<Mutex<UsageTracker>>) {
     }
 }
 
-/// `/config` — interactive model config page (R3). Edits are written
-/// back to config.toml; the client is rebuilt so changes apply at once.
+/// `/config` — interactive model config page (R3). Page-framed: the
+/// viewport clears on every redraw so edits never scroll away. Edits
+/// are written back to config.toml; the client is rebuilt so changes
+/// apply at once.
 fn cmd_config(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
     loop {
+        if render::ansi_enabled() {
+            clear_viewport();
+        }
+        println!("{}", render::cyan("── 模型配置 ──"));
+        println!("  输入编号修改对应项（1/2/3/4/5），回车返回；修改会写回 config.toml");
         println!();
-        println!("── 模型配置 ──");
         println!("  1. endpoint : {}", cfg.endpoint);
         println!("  2. model    : {}", cfg.model);
         if cfg.api_key.is_empty() {
@@ -354,7 +462,10 @@ fn cmd_config(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
             cfg.context_len,
             if cfg.think_mode { "开" } else { "关" }
         );
-        println!("  输入编号修改对应项（1/2/3/4/5），回车返回；修改会写回 config.toml");
+        println!(
+            "  · 界面      : {}（/ui view｜scroll 可切换）",
+            if cfg.ui.mode_view() { "视口重绘" } else { "滚动" }
+        );
         let Some(line) = read_line_trimmed("配置> ") else { return };
         match line.as_str() {
             "" => return,
@@ -432,7 +543,7 @@ fn sessions_page(arg: Option<&str>) {
                 match Session::load(&info.path) {
                     Ok(s) => {
                         println!();
-                        println!("── 会话 {}（{} 条消息，开始于 {}）──", s.id, s.messages.len(),
+                        println!("── 会话 {}（{} 条消息，开始于 {}）──", render::cyan(&s.id), s.messages.len(),
                             s.started_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S"));
                         print!("{}", agent::session::trajectory_text(&s.messages, 500));
                         println!();
@@ -445,7 +556,7 @@ fn sessions_page(arg: Option<&str>) {
         return;
     }
     println!();
-    println!("── 会话列表（/sessions <序号> 查看轨迹）──");
+    println!("{}", render::cyan("── 会话列表（/sessions <序号> 查看轨迹）──"));
     for (i, info) in infos.iter().enumerate() {
         println!(
             "  {:>2}. {} ｜ {} 条消息 ｜ 开始 {}",
@@ -455,6 +566,49 @@ fn sessions_page(arg: Option<&str>) {
             info.started_at.with_timezone(&chrono::Local).format("%m-%d %H:%M")
         );
     }
+}
+
+/// `/ui` — switch rendering mode (M4.2): view = repaint viewport per
+/// turn, scroll = plain transcript. Persisted to config.toml.
+fn switch_ui(cfg: &mut ModelConfig, arg: Option<&str>) {
+    let mode = arg.unwrap_or("");
+    match mode {
+        "view" | "scroll" => {
+            cfg.ui.mode = mode.to_string();
+            match cfg.save_to_default_file() {
+                Ok(()) => println!(
+                    "  界面模式已切换为 {}（已写回 config.toml）",
+                    if mode == "view" { "视口重绘" } else { "滚动" }
+                ),
+                Err(e) => println!("  已切换但写回配置失败：{e:#}"),
+            }
+        }
+        _ => println!("  用法：/ui view（视口重绘，默认）或 /ui scroll（滚动，当前：{}）", if cfg.ui.mode_view() { "view" } else { "scroll" }),
+    }
+}
+
+/// `/topics` — the taxonomy listing, exposed for humans (the agent has
+/// the `list_concepts` tool; this is the same data).
+fn topics_page() {
+    match crate::taxonomy::ConceptGraph::load(std::path::Path::new("taxonomy/concepts.toml")) {
+        Ok(g) => {
+            println!();
+            println!("{}", render::cyan("── 概念图谱（出题主题的权威列表）──"));
+            for id in g.ids() {
+                let name = g.get(id).map(|n| n.name.as_str()).unwrap_or("");
+                for piece in render::wrap_line(&format!("  {id} ｜ {name}"), render::term_width()) {
+                    println!("{piece}");
+                }
+            }
+            println!();
+        }
+        Err(e) => println!("  概念图谱加载失败：{e:#}"),
+    }
+}
+
+/// First run = no saved sessions and nothing resumed: show onboarding.
+fn first_run(no_saved: bool, resumed: bool) -> bool {
+    no_saved && !resumed
 }
 
 fn install_ctrlc() {
@@ -468,16 +622,12 @@ fn read_paste() -> Option<String> {
     println!("  ─ 粘贴模式：继续粘贴代码，单独一行 ``` 结束 ─");
     let mut buf = String::new();
     loop {
-        match read_line_trimmed("") {
-            None => return None,
-            Some(l) => {
-                if l.trim() == "```" {
-                    return Some(buf);
-                }
-                buf.push_str(&l);
-                buf.push('\n');
-            }
+        let l = read_line_trimmed("")?;
+        if l.trim() == "```" {
+            return Some(buf);
         }
+        buf.push_str(&l);
+        buf.push('\n');
     }
 }
 
@@ -496,6 +646,11 @@ mod tests {
         assert!(matches!(parse_command("/u"), Cmd::Usage));
         assert!(matches!(parse_command("/config"), Cmd::Config));
         assert!(matches!(parse_command("/new"), Cmd::New));
+        assert!(matches!(parse_command("/topics"), Cmd::Topics));
+        assert!(matches!(parse_command("/clear"), Cmd::Clear(false)));
+        assert!(matches!(parse_command("/clear all"), Cmd::Clear(true)));
+        assert!(matches!(parse_command("/ui"), Cmd::Ui(None)));
+        assert!(matches!(parse_command("/ui scroll"), Cmd::Ui(Some("scroll"))));
         assert!(matches!(parse_command("/sessions"), Cmd::Sessions(None)));
         assert!(matches!(parse_command("/sessions 3"), Cmd::Sessions(Some(_))));
         assert!(matches!(parse_command("/g"), Cmd::Generate(None)));

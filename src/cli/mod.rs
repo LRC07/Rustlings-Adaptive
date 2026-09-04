@@ -13,6 +13,7 @@ use crate::llm::LlmClient;
 mod generate;
 mod practice;
 mod repl;
+pub(crate) mod render;
 mod spinner;
 
 pub fn run() {

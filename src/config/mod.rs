@@ -66,6 +66,21 @@ pub enum KeySource {
     Env,
 }
 
+/// Editor override source of truth is `editor`; UI preferences live
+/// here (M4.2): `mode` = "view" (viewport repaint, default) or "scroll"
+/// (plain scrolling transcript).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UiConfig {
+    #[serde(default)]
+    pub mode: String,
+}
+
+impl UiConfig {
+    pub fn mode_view(&self) -> bool {
+        !self.mode.trim().eq_ignore_ascii_case("scroll")
+    }
+}
+
 /// Model configuration — R3: endpoint / key / model / context length /
 /// thinking mode / prices / budget. `think_mode` and `context_len` are
 /// stored now and consumed by later milestones.
@@ -89,6 +104,9 @@ pub struct ModelConfig {
     /// `code --wait` → vi). Set from the `[c]` config page or by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub editor: Option<String>,
+    /// UI preferences (M4.2). Missing in old config files → default.
+    #[serde(default)]
+    pub ui: UiConfig,
     #[serde(skip, default)]
     pub key_source: KeySource,
 }
@@ -104,6 +122,7 @@ impl Default for ModelConfig {
             prices: Prices::default(),
             budget: None,
             editor: None,
+            ui: UiConfig::default(),
             key_source: KeySource::None,
         }
     }
@@ -245,5 +264,21 @@ usd = 2.5
         assert_eq!(cfg.masked_key(), "****");
         cfg.api_key = "sk-1234567890abcdef".to_string();
         assert_eq!(cfg.masked_key(), "sk-****cdef");
+    }
+
+    #[test]
+    fn ui_mode_defaults_and_roundtrips() {
+        // Old config files without [ui] still load; default is view.
+        let cfg: ModelConfig = toml::from_str("model = \"m\"").unwrap();
+        assert!(cfg.ui.mode_view());
+        // Explicit scroll roundtrips.
+        let cfg: ModelConfig = toml::from_str("model = \"m\"\n\n[ui]\nmode = \"scroll\"\n").unwrap();
+        assert!(!cfg.ui.mode_view());
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        let cfg2: ModelConfig = toml::from_str(&text).unwrap();
+        assert!(!cfg2.ui.mode_view());
+        // Unknown values fall back to view.
+        let cfg: ModelConfig = toml::from_str("[ui]\nmode = \"fancy\"\n").unwrap();
+        assert!(cfg.ui.mode_view());
     }
 }
