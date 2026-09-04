@@ -12,7 +12,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -296,21 +297,108 @@ impl VerifyReport {
     }
 }
 
+/// Hardening (M4.5c 前置): a pathological reference/template (e.g. a
+/// `loop {}` test) must never hang the CLI. Compile and test runs are
+/// polled and killed on timeout; a timed-out test counts as failed.
+const RUSTC_TIMEOUT: Duration = Duration::from_secs(60);
+const TEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Outcome of a polled subprocess run.
+enum RunOutcome {
+    Done(std::process::Output),
+    TimedOut,
+}
+
+/// Spawn `cmd`, poll for exit, kill on timeout. stdout/stderr are
+/// drained via threads so large output cannot deadlock the poll loop.
+fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<RunOutcome> {
+    use std::io::Read;
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("启动 {} 失败", cmd.get_program().to_string_lossy()))?;
+    let mut stderr_pipe = child.stderr.take().expect("stderr piped");
+    let mut stdout_pipe = child.stdout.take().expect("stdout piped");
+    let err_t = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let out_t = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        buf
+    });
+
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stderr = err_t.join().unwrap_or_default();
+                let stdout = out_t.join().unwrap_or_default();
+                return Ok(RunOutcome::Done(std::process::Output { status, stdout, stderr }));
+            }
+            Ok(None) => {}
+            Err(e) => return Err(anyhow::anyhow!("等待进程失败：{e}")),
+        }
+        if start.elapsed() > timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(RunOutcome::TimedOut);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn timeout_diag(what: &str) -> Diagnostic {
+    Diagnostic {
+        code: None,
+        level: "error".to_string(),
+        message: format!("{what}，已中止"),
+        spans: Vec::new(),
+        rendered: None,
+    }
+}
+
 /// Compile `source` with `rustc --test --error-format=json` and, on
-/// success, run the test binary. Files are written into `workdir`
-/// (created by the caller).
+/// success, run the test binary (both under hard timeouts). Files are
+/// written into `workdir` (created by the caller).
 pub fn run_test_flow(source: &str, workdir: &Path, name: &str) -> Result<CompileRun> {
+    run_test_flow_with_timeouts(source, workdir, name, RUSTC_TIMEOUT, TEST_TIMEOUT)
+}
+
+fn run_test_flow_with_timeouts(
+    source: &str,
+    workdir: &Path,
+    name: &str,
+    rustc_timeout: Duration,
+    test_timeout: Duration,
+) -> Result<CompileRun> {
     let src_path: PathBuf = workdir.join(format!("{name}.rs"));
     let bin_path = workdir.join(format!("{name}.bin"));
     fs::write(&src_path, source).with_context(|| format!("写入 {} 失败", src_path.display()))?;
 
-    let out = Command::new("rustc")
-        .args(["--edition", "2024", "--test", "-A", "warnings", "--error-format=json"])
+    let mut cmd = Command::new("rustc");
+    cmd.args(["--edition", "2024", "--test", "-A", "warnings", "--error-format=json"])
         .arg(&src_path)
         .arg("-o")
-        .arg(&bin_path)
-        .output()
-        .context("调用 rustc 失败（本机需要安装 Rust 工具链）")?;
+        .arg(&bin_path);
+    let out = match run_with_timeout(cmd, rustc_timeout)? {
+        RunOutcome::Done(o) => o,
+        RunOutcome::TimedOut => {
+            let _ = fs::remove_file(&bin_path);
+            return Ok(CompileRun {
+                compiled: false,
+                diagnostics: vec![timeout_diag(&format!(
+                    "编译超过 {}s",
+                    rustc_timeout.as_secs()
+                ))],
+                test: None,
+            });
+        }
+    };
     let stderr = String::from_utf8_lossy(&out.stderr);
     let diagnostics = parse_diagnostics(&stderr);
     if !out.status.success() {
@@ -322,12 +410,27 @@ pub fn run_test_flow(source: &str, workdir: &Path, name: &str) -> Result<Compile
         });
     }
 
-    let run = Command::new(&bin_path)
-        .output()
-        .context("运行测试二进制失败")?;
+    let test = match run_with_timeout(Command::new(&bin_path), test_timeout)? {
+        RunOutcome::Done(run) => {
+            let stdout = String::from_utf8_lossy(&run.stdout);
+            parse_test_output(&stdout, run.status.success())
+        }
+        RunOutcome::TimedOut => TestRun {
+            ok: false,
+            passed: 0,
+            failed: 1,
+            failures: vec![TestFailure {
+                test: "<run>".to_string(),
+                output: format!(
+                    "测试运行超过 {}s（可能死循环），已中止",
+                    test_timeout.as_secs()
+                ),
+                left: None,
+                right: None,
+            }],
+        },
+    };
     let _ = fs::remove_file(&bin_path);
-    let stdout = String::from_utf8_lossy(&run.stdout);
-    let test = parse_test_output(&stdout, run.status.success());
     Ok(CompileRun {
         compiled: true,
         diagnostics,
@@ -431,6 +534,26 @@ mod tests {
         assert!(!run.compiled);
         let codes = error_codes(&run.diagnostics);
         assert!(codes.contains(&"E0308".to_string()), "codes: {codes:?}");
+        let _ = fs::remove_dir_all(&wd);
+    }
+
+    #[test]
+    fn timed_out_test_counts_as_failed() {
+        // M4.5c hardening: a `loop {}` test must be killed, not hang.
+        let wd = temp_dir("timeout");
+        let src = "#[test]\nfn spins() { loop {} }\n";
+        let run = run_test_flow_with_timeouts(
+            src,
+            &wd,
+            "spin",
+            Duration::from_secs(60),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(run.compiled, "infinite loop still compiles");
+        let test = run.test.expect("test ran");
+        assert!(!test.ok, "timed-out test must fail");
+        assert!(test.failures.iter().any(|f| f.output.contains("死循环") || f.output.contains("已中止")));
         let _ = fs::remove_dir_all(&wd);
     }
 

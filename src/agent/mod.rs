@@ -55,10 +55,14 @@ with identical arguments.
 
 Tools:
 - `list_concepts` {} — list the concept ids covered by the taxonomy.
-- `generate_exercise` {\"topic\": string} — generate a small 10-40 line \
-fill-in exercise, triple-verified locally (compiles / reference \
-solution passes all tests / unfinished template fails). It is written \
-to the exercise directory; the user can start at once.
+- `generate_exercise` {\"topic\": string, \"reason\": string, \"mode\": \
+\"auto|matched|adapted|free\"} — generate a small 10-40 line fill-in \
+exercise, triple-verified locally (compiles / reference solution passes \
+all tests / unfinished template fails). Layers: matched = fill a \
+hand-written template; adapted = rewrite a nearby template's skeleton \
+to the topic; free = write one from scratch. auto falls through \
+matched → adapted → free. It is written to the exercise directory; \
+the user can start at once.
 - `check_code` {\"code\": string} — compile a Rust snippet with local \
 rustc and return real diagnostics (codes, messages, lines).
 

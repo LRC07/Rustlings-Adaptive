@@ -66,6 +66,12 @@ pub fn tool_schemas() -> Vec<Tool> {
                         "type": "string",
                         "description": "一句话说明为什么现在出这道题（结合对话语境，如「你贴的代码报 E0382」）；\
                                         会展示给用户并随题归档"
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["auto", "matched", "adapted", "free"],
+                        "description": "出题层级（§7.5 三层漏斗）：auto=先模板直配、没有就改编、再自由生成（默认）；\
+                                        matched=只用现有模板；adapted=以相近模板为骨架改写；free=完全自由生成"
                     }
                 },
                 "required": ["topic"]
@@ -197,6 +203,11 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
         return Err(anyhow!("topic 不能为空"));
     }
     let topic = Topic::from_input(&topic_text);
+    let mode = args
+        .get("mode")
+        .and_then(|m| m.as_str())
+        .and_then(generator::GenerateMode::parse)
+        .unwrap_or(generator::GenerateMode::Auto);
     progress(&format!("生成练习（{topic_text}）：选模板…"));
 
     let paths = Paths::from_root(&env.root);
@@ -208,13 +219,18 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
     };
     let outcome = generator::generate(
         &topic,
+        mode,
         &paths,
         Some(&mut bridge),
-        Some(&mut |stage| {
-            progress(&format!(
+        Some(&mut |stage: generator::GenerateStage| {
+            let base = format!(
                 "生成练习（{topic_text}）：{}（第 {}/{} 轮）",
                 stage.stage, stage.attempt, stage.total_attempts
-            ));
+            );
+            match &stage.note {
+                Some(n) => progress(&format!("{base}｜上一轮被拒：{n}")),
+                None => progress(&base),
+            }
         }),
     )?;
 
@@ -236,7 +252,7 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
         &outcome.concepts,
         &outcome.error_codes,
         Some(outcome.difficulty.as_str()),
-        crate::exercise::index::Source::TemplateFill { template_id: outcome.template_id.clone() },
+        outcome.tier.to_source(),
         env.session_id.as_deref(),
         Some(&trigger),
     ) {
@@ -257,9 +273,10 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
     });
     Ok(ToolOutcome {
         note: Some(format!(
-            "生成成功：《{}》（{}，第 {} 轮通过）",
+            "生成成功：《{}》（{}，{}，第 {} 轮通过）",
             outcome.title,
             outcome.difficulty.name_cn(),
+            outcome.tier.label_cn(),
             outcome.attempts
         )),
         practice: Some(PracticeOffer {

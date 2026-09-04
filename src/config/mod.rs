@@ -107,6 +107,10 @@ pub struct ModelConfig {
     /// UI preferences (M4.2). Missing in old config files → default.
     #[serde(default)]
     pub ui: UiConfig,
+    /// Per-request LLM timeout in seconds (R3; slow endpoints can raise
+    /// it). Missing in old configs → default 240.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_timeout_secs: Option<u64>,
     #[serde(skip, default)]
     pub key_source: KeySource,
 }
@@ -123,6 +127,7 @@ impl Default for ModelConfig {
             budget: None,
             editor: None,
             ui: UiConfig::default(),
+            llm_timeout_secs: None,
             key_source: KeySource::None,
         }
     }

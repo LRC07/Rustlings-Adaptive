@@ -27,7 +27,11 @@ pub(crate) fn make_client(cfg: &ModelConfig) -> Option<LlmClient> {
     if cfg.api_key.trim().is_empty() {
         None
     } else {
-        Some(LlmClient::new(&cfg.endpoint, &cfg.api_key, &cfg.model))
+        let timeout = cfg
+            .llm_timeout_secs
+            .map(std::time::Duration::from_secs)
+            .unwrap_or(crate::llm::default_timeout());
+        Some(LlmClient::with_timeout(&cfg.endpoint, &cfg.api_key, &cfg.model, timeout))
     }
 }
 

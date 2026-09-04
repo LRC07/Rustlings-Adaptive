@@ -152,6 +152,41 @@ pub struct RenderedExercise {
     pub reference: String,
 }
 
+/// The tier-independent exercise representation (design §7.5, M4.5c):
+/// hand-written templates, LLM adaptations and free-form generations
+/// all reduce to this shape, and all pass through the same quality
+/// gate (`generator::gate_draft`). A `Template` is a draft plus slot
+/// specs, an id and authoring metadata (confusion/anti-patterns).
+#[derive(Debug, Clone, Default)]
+pub struct ExerciseDraft {
+    pub title: String,
+    /// Concept ids from the taxonomy (≤2, enforced by the rule filter).
+    pub concepts: Vec<String>,
+    pub error_codes: Vec<String>,
+    pub difficulty: Difficulty,
+    /// Constraint spec strings (`no-clone`, `max-lines=25`, …).
+    pub constraints: Vec<String>,
+    /// Instruction comments + code with a TODO marker (what the user
+    /// sees and edits).
+    pub body: String,
+    /// `#[cfg(test)] mod tests { … }` shared by template and reference.
+    pub tests: String,
+    /// Hidden reference solution (same tests).
+    pub reference: String,
+}
+
+impl ExerciseDraft {
+    /// Assemble the two files the verifier sees (no slot substitution —
+    /// drafts are fully concrete).
+    pub fn render(&self) -> RenderedExercise {
+        RenderedExercise {
+            body: self.body.clone(),
+            tests: self.tests.clone(),
+            reference: self.reference.clone(),
+        }
+    }
+}
+
 impl RenderedExercise {
     /// The file the user edits (body + tests).
     pub fn user_file(&self) -> String {
@@ -237,27 +272,28 @@ pub fn load_file(path: &Path) -> Result<Template> {
 /// mismatches and structurally broken bodies. Templates whose body
 /// compiles and fails via tests (`todo!()` style) carry no compile
 /// error, so the check is vacuously satisfied there.
-pub fn first_error_matches(t: &Template, report: &crate::verifier::VerifyReport) -> Result<()> {
+pub fn first_error_matches(error_codes: &[String], report: &crate::verifier::VerifyReport) -> Result<()> {
     let Some(code) = &report.first_error_code else {
         return Ok(());
     };
-    if t.error_codes.is_empty() {
+    if error_codes.is_empty() {
         bail!(
-            "未完成模板编译报 {code}，但模板未声明 error_codes：编译失败型题目必须声明首错误码"
+            "未完成模板编译报 {code}，但未声明 error_codes：编译失败型题目必须声明首错误码"
         );
     }
-    if t.error_codes.contains(code) {
+    if error_codes.contains(code) {
         Ok(())
     } else {
         bail!(
             "未完成模板的首错误码 {code} 不在声明的 error_codes {:?} 中（题目声称的坑与真实报错不一致）",
-            t.error_codes
+            error_codes
         )
     }
 }
 
 /// Parsed constraints of a template (spec strings → `Constraint`).
-pub fn constraints_of(t: &Template) -> Result<Vec<Constraint>> {    let mut out = Vec::new();
+pub fn constraints_of(t: &Template) -> Result<Vec<Constraint>> {
+    let mut out = Vec::new();
     for spec in &t.constraints {
         let c = Constraint::from_spec(spec)
             .with_context(|| format!("模板 '{}' 的约束 '{}' 无法解析", t.id, spec))?;
@@ -266,54 +302,30 @@ pub fn constraints_of(t: &Template) -> Result<Vec<Constraint>> {    let mut out 
     Ok(out)
 }
 
+impl Template {
+    /// Extract the shared draft view (§7.5): everything the quality
+    /// gate needs, minus template-only authoring metadata.
+    pub fn draft(&self) -> ExerciseDraft {
+        ExerciseDraft {
+            title: self.title.clone(),
+            concepts: self.concepts.clone(),
+            error_codes: self.error_codes.clone(),
+            difficulty: self.difficulty,
+            constraints: self.constraints.clone(),
+            body: self.body.clone(),
+            tests: self.tests.clone(),
+            reference: self.reference.clone(),
+        }
+    }
+}
+
 /// Rule filter from design §7.4-2 (static, boolean, no scoring).
 /// Returns violation descriptions; empty means the template is fine.
 pub fn rule_filter(t: &Template) -> Vec<String> {
-    let mut v = Vec::new();
+    let mut v = rule_filter_draft(&t.draft());
 
     if t.id.trim().is_empty() {
         v.push("缺少 id".into());
-    }
-    if t.title.trim().is_empty() {
-        v.push("缺少 title".into());
-    }
-    if t.concepts.is_empty() {
-        v.push("至少标注 1 个概念".into());
-    } else if t.concepts.len() > 2 {
-        v.push(format!("概念数 {} 超过上限 2", t.concepts.len()));
-    }
-    for c in &t.concepts {
-        if c.trim().is_empty() {
-            v.push("存在空概念 id".into());
-            break;
-        }
-    }
-
-    // 10–40 non-empty body lines (instruction comments count: they are
-    // part of the rendered snippet; tests are separate and uncounted).
-    let body_lines = t.body.lines().filter(|l| !l.trim().is_empty()).count();
-    if !(10..=40).contains(&body_lines) {
-        v.push(format!("body 非空行数 {body_lines} 不在 10–40 范围"));
-    }
-
-    let todos = count_todo(&t.body);
-    if todos > 2 {
-        v.push(format!("todo!/unimplemented! 出现 {todos} 次，超过上限 2"));
-    }
-
-    if t.tests.trim().is_empty() || !t.tests.contains("#[test]") {
-        v.push("tests 缺失（需要含 #[test] 的测试模块）".into());
-    }
-
-    if t.reference.trim().is_empty() {
-        v.push("reference 缺失".into());
-    } else {
-        if count_todo(&t.reference) > 0 {
-            v.push("reference 不能包含 todo!/unimplemented!".into());
-        }
-        if t.reference.contains("I AM NOT DONE") {
-            v.push("reference 不能包含 I AM NOT DONE".into());
-        }
     }
 
     // Slot declarations vs. placeholders must match exactly, and each
@@ -340,6 +352,56 @@ pub fn rule_filter(t: &Template) -> Vec<String> {
             v.push(format!("槽位 '{}' 缺少 default（离线回退需要）", s.name));
         } else if !s.values.is_empty() && !s.values.iter().any(|x| x == &s.default) {
             v.push(format!("槽位 '{}' 的 default 不在 values 中", s.name));
+        }
+    }
+
+    v
+}
+
+/// Rule-filter core shared by all three generation tiers (M4.5c):
+/// every static §7.4-2 check except the template-only id/slots rules.
+pub fn rule_filter_draft(d: &ExerciseDraft) -> Vec<String> {
+    let mut v = Vec::new();
+
+    if d.title.trim().is_empty() {
+        v.push("缺少 title".into());
+    }
+    if d.concepts.is_empty() {
+        v.push("至少标注 1 个概念".into());
+    } else if d.concepts.len() > 2 {
+        v.push(format!("概念数 {} 超过上限 2", d.concepts.len()));
+    }
+    for c in &d.concepts {
+        if c.trim().is_empty() {
+            v.push("存在空概念 id".into());
+            break;
+        }
+    }
+
+    // 10–40 non-empty body lines (instruction comments count: they are
+    // part of the rendered snippet; tests are separate and uncounted).
+    let body_lines = d.body.lines().filter(|l| !l.trim().is_empty()).count();
+    if !(10..=40).contains(&body_lines) {
+        v.push(format!("body 非空行数 {body_lines} 不在 10–40 范围"));
+    }
+
+    let todos = count_todo(&d.body);
+    if todos > 2 {
+        v.push(format!("todo!/unimplemented! 出现 {todos} 次，超过上限 2"));
+    }
+
+    if d.tests.trim().is_empty() || !d.tests.contains("#[test]") {
+        v.push("tests 缺失（需要含 #[test] 的测试模块）".into());
+    }
+
+    if d.reference.trim().is_empty() {
+        v.push("reference 缺失".into());
+    } else {
+        if count_todo(&d.reference) > 0 {
+            v.push("reference 不能包含 todo!/unimplemented!".into());
+        }
+        if d.reference.contains("I AM NOT DONE") {
+            v.push("reference 不能包含 I AM NOT DONE".into());
         }
     }
 
@@ -738,13 +800,13 @@ misconceptions = ["以为 String 赋值会深拷贝"]
             first_error_code: Some("E0382".into()),
             ..Default::default()
         };
-        assert!(first_error_matches(&t, &ok).is_ok());
+        assert!(first_error_matches(&t.error_codes, &ok).is_ok());
 
         let mismatch = crate::verifier::VerifyReport {
             first_error_code: Some("E0308".into()),
             ..Default::default()
         };
-        let err = first_error_matches(&t, &mismatch).unwrap_err().to_string();
+        let err = first_error_matches(&t.error_codes, &mismatch).unwrap_err().to_string();
         assert!(err.contains("E0308"), "{err}");
         assert!(err.contains("不一致"), "{err}");
     }
@@ -759,14 +821,14 @@ misconceptions = ["以为 String 赋值会深拷贝"]
             first_error_code: Some("E0382".into()),
             ..Default::default()
         };
-        let err = first_error_matches(&no_codes, &report).unwrap_err().to_string();
+        let err = first_error_matches(&no_codes.error_codes, &report).unwrap_err().to_string();
         assert!(err.contains("必须声明首错误码"), "{err}");
 
         // Test-failure-shaped template (todo!() style) → no compile
         // error, gate vacuously satisfied regardless of codes.
         let todo_report = crate::verifier::VerifyReport::default();
-        assert!(first_error_matches(&t, &todo_report).is_ok());
-        assert!(first_error_matches(&no_codes, &todo_report).is_ok());
+        assert!(first_error_matches(&t.error_codes, &todo_report).is_ok());
+        assert!(first_error_matches(&no_codes.error_codes, &todo_report).is_ok());
     }
 
     #[test]
@@ -858,7 +920,7 @@ misconceptions = ["以为 String 赋值会深拷贝"]
 
             // Gate C1 (M4.5b): the unfinished template's first compile
             // error must be one of the declared error codes.
-            first_error_matches(t, &report)
+            first_error_matches(&t.error_codes, &report)
                 .unwrap_or_else(|e| panic!("模板 {} 首错误码不一致: {e:#}", t.id));
         }
         let _ = std::fs::remove_dir_all(&wd);

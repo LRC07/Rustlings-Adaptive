@@ -354,8 +354,8 @@ name = "A2"
     #[test]
     fn link_templates_fills_and_validates() {
         let mut g = graph();
-        let concepts_own = vec!["ownership.move".to_string()];
-        let concepts_bad = vec!["nope.here".to_string()];
+        let concepts_own = ["ownership.move".to_string()];
+        let concepts_bad = ["nope.here".to_string()];
         g.link_templates([("t-ok", &concepts_own[..])]).unwrap();
         assert_eq!(g.get("ownership.move").unwrap().templates, vec!["t-ok"]);
 
@@ -366,7 +366,7 @@ name = "A2"
     #[test]
     fn link_templates_is_idempotent() {
         let mut g = graph();
-        let c = vec!["ownership.move".to_string()];
+        let c = ["ownership.move".to_string()];
         g.link_templates([("t", &c[..])]).unwrap();
         g.link_templates([("t", &c[..])]).unwrap();
         assert_eq!(g.get("ownership.move").unwrap().templates.len(), 1);

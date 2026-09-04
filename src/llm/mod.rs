@@ -14,7 +14,15 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
+/// 240s: long LLM tasks (tier-2/3 exercise drafts output 3–8k tokens)
+/// can exceed two minutes; short chat turns are unaffected in practice.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(480);
+
+/// The built-in default request timeout (used when config has no
+/// `llm_timeout_secs`).
+pub fn default_timeout() -> Duration {
+    DEFAULT_TIMEOUT
+}
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const ERROR_BODY_SNIPPET: usize = 500;
 
@@ -131,8 +139,14 @@ fn chat_url(endpoint: &str) -> String {
 
 impl LlmClient {
     pub fn new(endpoint: &str, api_key: &str, model: &str) -> Self {
+        Self::with_timeout(endpoint, api_key, model, DEFAULT_TIMEOUT)
+    }
+
+    /// Same client with an explicit per-request timeout (R3: slow /
+    /// congested endpoints need a tunable ceiling).
+    pub fn with_timeout(endpoint: &str, api_key: &str, model: &str, timeout: Duration) -> Self {
         let http = Client::builder()
-            .timeout(DEFAULT_TIMEOUT)
+            .timeout(timeout)
             .connect_timeout(CONNECT_TIMEOUT)
             .build()
             .expect("failed to build HTTP client");

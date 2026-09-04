@@ -87,19 +87,25 @@ pub(crate) fn cmd_generate(
     };
 
     println!(
-        "  正在生成：选模板 → 填槽 → 三重校验（最多 {} 轮）…",
-        generator::MAX_ATTEMPTS
+        "  正在生成分层出题：模板直配 → 模板改编 → 自由生成（每题过三重校验）…"
     );
     let paths = generator::Paths::from_root(Path::new("."));
     match generator::generate(
         &topic,
+        generator::GenerateMode::Auto,
         &paths,
         llm,
-        Some(&mut |stage| {
-            println!(
-                "  · {}（第 {}/{} 轮）…",
-                stage.stage, stage.attempt, stage.total_attempts
-            );
+        Some(&mut |stage: generator::GenerateStage| {
+            match &stage.note {
+                Some(n) => println!(
+                    "  · {}（第 {}/{} 轮）上一轮被拒：{n}",
+                    stage.stage, stage.attempt, stage.total_attempts
+                ),
+                None => println!(
+                    "  · {}（第 {}/{} 轮）…",
+                    stage.stage, stage.attempt, stage.total_attempts
+                ),
+            }
         }),
     ) {
         Ok(out) => {
@@ -111,7 +117,7 @@ pub(crate) fn cmd_generate(
                 out.title,
                 out.difficulty.name_cn()
             );
-            println!("    模板 {} ｜ 概念 {}", out.template_id, out.concepts.join("、"));
+            println!("    来源 {} ｜ 概念 {}", out.tier.label_cn(), out.concepts.join("、"));
             if slots.is_empty() {
                 println!("    槽位 无");
             } else {
@@ -134,7 +140,7 @@ pub(crate) fn cmd_generate(
                 &out.concepts,
                 &out.error_codes,
                 Some(out.difficulty.as_str()),
-                index::Source::TemplateFill { template_id: out.template_id.clone() },
+                out.tier.to_source(),
                 session.map(|(id, _)| id),
                 Some(&trigger),
             ) {
@@ -164,6 +170,8 @@ pub(crate) fn cmd_generate(
             println!();
             println!("  生成失败：{e:#}");
             println!("  可换一个主题重试，或检查 templates/ 与 taxonomy/ 的内容。");
+            println!("  提示：自由生成依赖 LLM 长输出；端点慢时可在 /config 调高");
+            println!("  llm_timeout_secs（或换更快的模型）。");
             None
         }
     }
