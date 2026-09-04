@@ -1944,4 +1944,84 @@ fn add(a: i32, b: i32) -> i32 {
             finish_reason: Some("stop".to_string()),
         }
     }
+
+    /// Live experiment (M4.12, 9.4 晚): does reasoning effort balance
+    /// draft quality against time/cost? The Rc<RefCell<T>> topic failed
+    /// 4/4 rounds with thinking off (user session 20260904_202243).
+    /// Matrix: off (baseline repro) vs on+low; on+high already has two
+    /// successful smoke data points (2 rounds/6m10s and 1 round/2m40s).
+    /// Prints metrics only. Run:
+    /// cargo test live_draft_effort -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn live_draft_effort() {
+        use std::time::Instant;
+        let cfg = crate::config::ModelConfig::load().expect("config");
+        if cfg.api_key.trim().is_empty() {
+            eprintln!("no key configured; skipping");
+            return;
+        }
+        let timeout =
+            std::time::Duration::from_secs(cfg.llm_timeout_secs.unwrap_or(480));
+        let paths = Paths::from_root(Path::new("."));
+        let topic = Topic::FreeText("Rc<RefCell<T>> 共享可变状态与运行时借用".into());
+
+        for (name, thinking, effort) in [
+            ("off", Some(crate::llm::Thinking::Disabled), None),
+            ("on+low", Some(crate::llm::Thinking::Enabled), Some("low".to_string())),
+        ] {
+            for run in 1..=2 {
+                let client = crate::llm::LlmClient::with_timeout(
+                    &cfg.endpoint, &cfg.api_key, &cfg.model, timeout,
+                )
+                .with_thinking(thinking)
+                .with_reasoning_effort(effort.clone());
+                let log: std::rc::Rc<std::cell::RefCell<Vec<(u64, u64, u64)>>> =
+                    Default::default();
+                let log2 = log.clone();
+                let client2 = client.clone();
+                let mut call = move |prompt: &str| -> Result<LlmReply> {
+                    let out = client2.chat_turn_bounded(
+                        &[crate::llm::ChatMessage::user(prompt.to_string())],
+                        &[],
+                        Some(DRAFT_MAX_TOKENS),
+                    )?;
+                    log2.borrow_mut().push((
+                        out.usage.prompt_tokens,
+                        out.usage.completion_tokens,
+                        out.usage.reasoning_tokens,
+                    ));
+                    Ok(LlmReply {
+                        content: out.content.unwrap_or_default(),
+                        usage: out.usage,
+                        finish_reason: out.finish_reason,
+                    })
+                };
+                let t0 = Instant::now();
+                let result = generate_with_mode(
+                    &topic,
+                    GenerateMode::Free,
+                    &paths,
+                    &GenHistory::default(),
+                    Some(&mut call),
+                    None,
+                );
+                let dt = t0.elapsed();
+                let calls = log.borrow();
+                let total_out: u64 = calls.iter().map(|c| c.1).sum();
+                let total_reason: u64 = calls.iter().map(|c| c.2).sum();
+                match result {
+                    Ok(o) => println!(
+                        "== {name} run{run}: PASS attempts={} {dt:.1?} out={total_out} (reason={total_reason}) tok, calls={}",
+                        o.attempts, calls.len()
+                    ),
+                    Err(e) => println!(
+                        "== {name} run{run}: FAIL {dt:.1?} out={total_out} (reason={total_reason}) tok, calls={} — {}",
+                        calls.len(),
+                        e.to_string().lines().next().unwrap_or("")
+                    ),
+                }
+            }
+        }
+    }
 }

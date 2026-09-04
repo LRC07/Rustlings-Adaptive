@@ -149,6 +149,9 @@ pub struct LlmClient {
     /// M4.12 (R3): thinking-mode switch sent on every chat request.
     /// `None` = send nothing (endpoint default).
     thinking: Option<Thinking>,
+    /// Reasoning effort ("low"/"high"/"max") when thinking is on;
+    /// `None` = endpoint default (high on DeepSeek V4).
+    reasoning_effort: Option<String>,
 }
 
 /// Build the chat/completions URL from a base endpoint. Accepts both
@@ -178,6 +181,7 @@ impl LlmClient {
             api_key: api_key.to_string(),
             model: model.to_string(),
             thinking: None,
+            reasoning_effort: None,
         }
     }
 
@@ -185,6 +189,13 @@ impl LlmClient {
     /// `think_mode`). Builder style — `make_client` chains it.
     pub fn with_thinking(mut self, thinking: Option<Thinking>) -> Self {
         self.thinking = thinking;
+        self
+    }
+
+    /// M4.12: reasoning-effort knob ("low"/"high"/"max") to balance
+    /// latency/cost against output quality on thinking models.
+    pub fn with_reasoning_effort(mut self, effort: Option<String>) -> Self {
+        self.reasoning_effort = effort;
         self
     }
 
@@ -203,7 +214,8 @@ impl LlmClient {
         tools: &[Tool],
         max_tokens: Option<u32>,
     ) -> Result<TurnOutput> {
-        let body = build_request_body(&self.model, messages, tools, max_tokens, self.thinking);
+        let effort = self.reasoning_effort.as_deref();
+        let body = build_request_body(&self.model, messages, tools, max_tokens, self.thinking, effort);
         let resp = self
             .http
             .post(chat_url(&self.endpoint))
@@ -229,6 +241,7 @@ pub fn build_request_body(
     tools: &[Tool],
     max_tokens: Option<u32>,
     thinking: Option<Thinking>,
+    reasoning_effort: Option<&str>,
 ) -> serde_json::Value {
     let msgs: Vec<serde_json::Value> = messages
         .iter()
@@ -268,6 +281,9 @@ pub fn build_request_body(
         body["thinking"] = serde_json::json!({
             "type": match t { Thinking::Enabled => "enabled", Thinking::Disabled => "disabled" }
         });
+    }
+    if let Some(e) = reasoning_effort {
+        body["reasoning_effort"] = serde_json::json!(e);
     }
     if !tools.is_empty() {
         let wire_tools: Vec<serde_json::Value> = tools
@@ -492,13 +508,16 @@ mod tests {
     #[test]
     fn thinking_switch_reaches_the_wire() {
         let msgs = [ChatMessage::user("q")];
-        let body = build_request_body("m1", &msgs, &[], None, Some(Thinking::Disabled));
+        let body = build_request_body("m1", &msgs, &[], None, Some(Thinking::Disabled), None);
         assert_eq!(body["thinking"]["type"], "disabled");
-        let body = build_request_body("m1", &msgs, &[], None, Some(Thinking::Enabled));
+        let body = build_request_body("m1", &msgs, &[], None, Some(Thinking::Enabled), None);
         assert_eq!(body["thinking"]["type"], "enabled");
         // Auto/None: the key must be absent for plain endpoints.
-        let body = build_request_body("m1", &msgs, &[], None, None);
+        let body = build_request_body("m1", &msgs, &[], None, None, None);
         assert!(body.get("thinking").is_none());
+        // Effort rides along only when set; it is endpoint-specific.
+        let body = build_request_body("m1", &msgs, &[], None, Some(Thinking::Enabled), Some("low"));
+        assert_eq!(body["reasoning_effort"], "low");
     }
 
     #[test]
@@ -540,7 +559,7 @@ mod tests {
             description: "d".into(),
             parameters: serde_json::json!({"type": "object"}),
         }];
-        let body = build_request_body("m1", &msgs, &tools, None, None);
+        let body = build_request_body("m1", &msgs, &tools, None, None, None);
         assert_eq!(body["model"], "m1");
         assert_eq!(body["messages"].as_array().unwrap().len(), 4);
         let asst = &body["messages"][2];
@@ -556,7 +575,7 @@ mod tests {
 
     #[test]
     fn request_without_tools_omits_tool_keys() {
-        let body = build_request_body("m1", &[ChatMessage::user("q")], &[], None, None);
+        let body = build_request_body("m1", &[ChatMessage::user("q")], &[], None, None, None);
         assert!(body.get("tools").is_none());
         assert!(body.get("tool_choice").is_none());
     }

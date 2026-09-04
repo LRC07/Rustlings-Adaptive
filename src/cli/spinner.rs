@@ -60,7 +60,12 @@ fn render(stop: Arc<AtomicBool>, status: StatusSlot) {
         let text = status.lock().map(|s| s.clone()).unwrap_or_default();
         // First frame moves to a fresh line so the spinner never eats
         // the just-echoed input line ("你> …"); ESC[0K wipes the rest
-        // of the line so a shorter status leaves no residue.
+        // of the line so a shorter status leaves no residue. The text
+        // is clamped to the terminal width — a wrapped line would
+        // break the in-place redraw and flood the screen with one
+        // stale row per frame (9.4 实测："生成练习第几轮"刷屏).
+        let tw = super::render::term_width();
+        let text = super::render::truncate_display(&text, tw.saturating_sub(12));
         if first {
             println!();
             first = false;

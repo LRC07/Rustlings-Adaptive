@@ -192,6 +192,11 @@ pub struct ModelConfig {
     pub context_len: u32,
     #[serde(default)]
     pub think_mode: ThinkMode,
+    /// Reasoning effort when thinking is on (M4.12): "low" | "high" |
+    /// "max"（DeepSeek V4 语义；缺省不发 = 端点默认 high）。调节思考
+    /// 深度以平衡时间成本与产出质量。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     #[serde(default)]
     pub prices: Prices,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -223,6 +228,7 @@ impl Default for ModelConfig {
             model: default_model(),
             context_len: default_context_len(),
             think_mode: ThinkMode::Auto,
+            reasoning_effort: None,
             prices: Prices::default(),
             budget: None,
             editor: None,
@@ -266,6 +272,15 @@ impl ModelConfig {
         }
         if let Some(m) = get("MODEL") {
             self.model = m.trim().to_string();
+        }
+        if let Some(t) = get("THINK_MODE") {
+            self.think_mode = ThinkMode::from_word(&t).unwrap_or(ThinkMode::Auto);
+        }
+        if let Some(e) = get("REASONING_EFFORT") {
+            let e = e.trim().to_ascii_lowercase();
+            if matches!(e.as_str(), "low" | "high" | "max") {
+                self.reasoning_effort = Some(e);
+            }
         }
     }
 

@@ -63,9 +63,11 @@ cargo build          # 或 cargo build --release
 1. **配置文件（推荐）**：`cp config.example.toml config.toml`，然后编辑
    `endpoint` / `api_key` / `model`，按需修改价格表 `[prices]` 与预算 `[budget]`；
    可配置多组 `[[models]]` 档案，运行中 `/model <名>` 一键切换（M4.6）；
-   **思考模式 `think_mode`**（M4.12）：推理型模型（如 DeepSeek V4）默认开
-   思考且思维链按输出 token 计费、不受 max_tokens 约束——`"off"` 可立刻
-   数倍省钱提速（`/config` 选 6 交互修改，写回 config.toml）；
+   **思考模式 `think_mode` + `reasoning_effort`**（M4.12）：推理型模型
+   （如 DeepSeek V4）默认开思考且思维链按输出 token 计费、不受
+   max_tokens 约束。实测：off 快但出题成功率 ~1/3；`"on"` +
+   `reasoning_effort = "low"` 全过且平均最快——推荐组合（`/config` 选 6
+   改思考模式，effort 在 config.toml 中设置）；
 2. **环境变量**：在项目根目录建 `.env`，写 `RUSTLINGS_API_KEY=sk-...`
    （也可用 `RUSTLINGS_ENDPOINT` / `RUSTLINGS_MODEL` 覆盖对应项，
    优先级高于 config.toml）；

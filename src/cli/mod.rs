@@ -32,7 +32,8 @@ pub(crate) fn make_client(cfg: &ModelConfig) -> Option<LlmClient> {
             .map(std::time::Duration::from_secs)
             .unwrap_or(crate::llm::default_timeout());
         Some(LlmClient::with_timeout(&cfg.endpoint, &cfg.api_key, &cfg.model, timeout)
-            .with_thinking(cfg.think_mode.to_thinking()))
+            .with_thinking(cfg.think_mode.to_thinking())
+            .with_reasoning_effort(cfg.reasoning_effort.clone()))
     }
 }
 

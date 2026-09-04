@@ -217,6 +217,30 @@ pub(crate) fn pad_display(s: &str, width: usize) -> String {
     format!("{s}{}", " ".repeat(width - w))
 }
 
+/// Truncate `s` to at most `max_cells` display cells, appending `…`
+/// when anything was cut (CJK-aware). Used by the spinner so a long
+/// status can never wrap and destroy the in-place redraw.
+pub(crate) fn truncate_display(s: &str, max_cells: usize) -> String {
+    if max_cells == 0 {
+        return String::new();
+    }
+    if s.width() <= max_cells {
+        return s.to_string();
+    }
+    let mut cells = 0usize;
+    let mut out = String::new();
+    for c in s.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if cells + w > max_cells.saturating_sub(1) {
+            break;
+        }
+        cells += w;
+        out.push(c);
+    }
+    out.push('…');
+    out
+}
+
 /// Nearest known command for a mistyped one (Damerau-ish Levenshtein
 /// without transposition is enough here), only when close enough.
 pub(crate) fn suggest_command(raw: &str, known: &[&str]) -> Option<String> {
@@ -263,6 +287,21 @@ mod tests {
     use crate::llm::ChatMessage;
 
     // --- wrap -----------------------------------------------------------
+
+    #[test]
+    fn truncate_display_is_cjk_aware() {
+        assert_eq!(truncate_display("hello", 10), "hello");
+        assert_eq!(truncate_display("hello", 4), "hel…");
+        // CJK chars are 2 cells: 3 chars = 6 cells.
+        assert_eq!(truncate_display("一二三四", 8), "一二三四");
+        assert_eq!(truncate_display("一二三四", 7), "一二三…");
+        assert_eq!(truncate_display("一二三四", 2), "…");
+        assert_eq!(truncate_display("abc", 0), "");
+        // The result always fits within the budget.
+        for budget in 1..12 {
+            assert!(truncate_display("生成练习：自由生成第1轮被拒", budget).width() <= budget);
+        }
+    }
 
     #[test]
     fn wraps_cjk_by_display_width() {

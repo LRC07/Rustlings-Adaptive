@@ -32,6 +32,11 @@ context_len = 128000
 #   "off"  = 强制关思考
 think_mode = "auto"
 
+# 推理强度（仅思考开启时有效；M4.12）：low / high / max（缺省=端点默认 high）。
+# 实测（复盘 §4.7）：off 快(~26s)但成功率 ~1/3；on+low 4/4 全过(71–204s)——
+# 平衡点 = think_mode = "on" + reasoning_effort = "low"。
+# reasoning_effort = "low"
+
 # 价格：每 1M token 的美元单价（R6 费用换算用）
 [prices]
 input = 0.15
