@@ -7,14 +7,15 @@ difficulty = "easy"
 constraints = ["no-clone", "max-lines=30"]
 confusion = "Python/JS 的 self.a, self.b = self.b, self.a 元组交换随手就来；初学者意识不到 &self 拿不到所有权，返回副本要么 T: Clone、要么改 &mut self 原地交换"
 anti_patterns = ["derive-clone-just-for-this", "clone-pair-copy"]
+hints = ["原地交换需要可变访问——改接收者。", "std::mem::swap(&mut a, &mut b) 完成交换。", "返回副本为什么不行？&self 拿不到所有权（E0507）。"]
 
 body = '''
 // Pair<T> 持有两个同类型的值。swapped 想返回"交换后的副本"：
 // 但 &self 只有共享引用，把字段 move 出来是 E0507；给 T 加 Clone
 // 又违反本题的 no-clone 约束。
 //
-// TODO: 把 swapped 改成原地交换的方法（签名：pub fn swap(&mut self)），
-//       用 std::mem::swap 完成，不许 clone。
+// TODO: 让调用方的 p.swap() 能工作：原地交换两个字段，
+//       不许 clone，不许复制数据。
 pub struct Pair<T> {
     pub first: T,
     pub second: T,

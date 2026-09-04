@@ -7,6 +7,7 @@ difficulty = "medium"
 constraints = ["no-clone", "max-lines=35"]
 confusion = "初学者把“读”当成瞬时完成、不持有任何东西（C++/Python 直觉）；Rust 的共享借用存活到最后一次使用，与“作用域结束才释放”的旧模型都对不上"
 anti_patterns = ["clone-log-before-mutate"]
+hints = ["共享借用到「最后一次使用」为止（NLL）。", "让 snapshot 在 record 之前结束它的活。", "用块 { } 把借用收紧在局部。"]
 
 body = '''
 struct Ledger {
@@ -17,7 +18,7 @@ struct Ledger {
 // snapshot 以共享借用借走了 log，在它还要使用期间调用 record
 // 需要 &mut Ledger —— E0502。
 //
-// TODO: 调整函数内的语句顺序（或用块收紧借用的作用域）修复冲突。
+// TODO: 修复 snapshot 与 record 的借用冲突。
 //       不许用 clone，不许改 struct 与 record 的定义。
 fn audit(led: &mut Ledger, note: &str) -> String {
     let snapshot: Vec<&String> = led.log.iter().collect();

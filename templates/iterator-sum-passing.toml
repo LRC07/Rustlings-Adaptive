@@ -7,16 +7,15 @@ difficulty = "easy"
 constraints = ["iterator-only", "no-clone", "max-lines=40"]
 confusion = "C/Java 的求和过滤就是 for + if 累加；Python 的 sum(gen) 语法形似但不同——初学者不知道 Rust 的适配器能逐段组合成一条链"
 anti_patterns = ["manual-loop"]
+hints = ["这一步可以用迭代器适配器表达，而不是手写循环。", "filter 的闭包拿到的是引用——解构一次（|&&s|）会更顺手。", "参考链：iter() → filter(...) → sum()。"]
 
 body = '''
 // 统计及格（>= pass）分数的总和。
+// 手写循环版本能用，但「过滤 + 聚合」在 Rust 里有一条更短、
+// 更不容易写错边界的表达方式——这就是本题要练的东西。
 //
-// TODO: 用迭代器一行完成：iter() → filter（闭包里比较及格线）→ sum()。
+// TODO: 用迭代器适配器表达「过滤出及格的分数，再求和」。
 //       禁止 for/while/loop（iterator-only），禁止 clone。
-//       提示：filter 的闭包拿到的是 &i32（用 |&&s| 或 |&s|）；
-//       sum() 会从返回类型推断出 i32，不必再标注。
-//       写完读一遍这条链：iter 产出 → filter 留下及格的 → sum 加总，
-//       和题面是同一句话。
 fn sum_passing(scores: &[i32], pass: i32) -> i32 {
     todo!()
 }

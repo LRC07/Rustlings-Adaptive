@@ -7,12 +7,13 @@ difficulty = "easy"
 constraints = ["no-clone", "max-lines=40"]
 confusion = "GC 语言里返回新建对象天经地义；初学者不知道 format! 的结果在函数结束时被 drop，返回 &g 是悬垂引用（E0515）——修法不是延命，而是把所有权交出去"
 anti_patterns = ["static-lifetime-escape", "leak-to-live"]
+hints = ["format! 的结果在函数结束时 drop——引用会悬垂。", "修法是把所有权交出去（改返回类型）。", "main_flow 期待 String——签名改后调用点不用动。"]
 
 body = '''
 // greeting 拼出问候语再返回 —— 但返回的是局部量的引用（E0515）。
 //
-// TODO: 修好悬垂：让函数返回 owned 的 String（调用方用法不变，
-//       main_flow 不用改）。
+// TODO: 修好悬垂（编译器说不能返回局部量的引用）。
+//       调用方的用法（main_flow）保持不变。
 fn greeting(name: &str) -> &str {
     let g = format!("Hello, {name}!");
     &g

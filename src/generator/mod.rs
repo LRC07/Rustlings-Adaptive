@@ -172,6 +172,8 @@ pub struct Outcome {
     pub difficulty: template::Difficulty,
     /// Slot values (tier 1 only; empty for tiers 2/3).
     pub slots: std::collections::BTreeMap<String, String>,
+    /// Tiered hints from the draft/template (M4.8; tiers 2/3 only).
+    pub hints: Vec<String>,
     pub attempts: u32,
     /// Whether any LLM call actually succeeded (selection/fill/draft).
     pub used_llm: bool,
@@ -446,6 +448,7 @@ fn generate_matched(
                 error_codes: t.error_codes.clone(),
                 difficulty: t.difficulty,
                 slots: values,
+                hints: t.hints.clone(),
                 attempts: attempt + 1,
                 used_llm,
             });
@@ -477,6 +480,8 @@ struct DraftWire {
     difficulty: template::Difficulty,
     #[serde(default)]
     constraints: Vec<String>,
+    #[serde(default)]
+    hints: Vec<String>,
     body: String,
     tests: String,
     reference: String,
@@ -485,6 +490,7 @@ struct DraftWire {
 struct DraftResult {
     draft: template::ExerciseDraft,
     module_name: String,
+    hints: Vec<String>,
     attempts: u32,
 }
 
@@ -498,7 +504,7 @@ fn generate_adapted(
     progress: &mut Option<&mut dyn FnMut(GenerateStage)>,
 ) -> Result<Outcome> {
     let base = nearest_template(templates, graph, topic)?;
-    let DraftResult { draft, module_name, attempts } = llm_draft_loop(
+    let DraftResult { draft, module_name, hints, attempts } = llm_draft_loop(
         &topic.prompt_text(),
         Some(base),
         graph,
@@ -507,7 +513,7 @@ fn generate_adapted(
         progress,
         "模板改编",
     )?;
-    finish_draft(paths, draft, Tier::Adapted { base: base.id.clone() }, module_name, attempts)
+    finish_draft(paths, draft, Tier::Adapted { base: base.id.clone() }, module_name, hints, attempts)
 }
 
 /// Tier 3: LLM produces an exercise from scratch.
@@ -518,9 +524,9 @@ fn generate_free(
     call: &mut dyn LlmCaller,
     progress: &mut Option<&mut dyn FnMut(GenerateStage)>,
 ) -> Result<Outcome> {
-    let DraftResult { draft, module_name, attempts } =
+    let DraftResult { draft, module_name, hints, attempts } =
         llm_draft_loop(&topic.prompt_text(), None, graph, paths, call, progress, "自由生成")?;
-    finish_draft(paths, draft, Tier::Free, module_name, attempts)
+    finish_draft(paths, draft, Tier::Free, module_name, hints, attempts)
 }
 
 /// Persist a gated draft: write + wire + outcome.
@@ -529,6 +535,7 @@ fn finish_draft(
     draft: template::ExerciseDraft,
     tier: Tier,
     module_name: String,
+    hints: Vec<String>,
     attempts: u32,
 ) -> Result<Outcome> {
     let name = write_exercise(paths, &draft, &module_name)?;
@@ -541,6 +548,7 @@ fn finish_draft(
         error_codes: draft.error_codes.clone(),
         difficulty: draft.difficulty,
         slots: Default::default(),
+        hints,
         attempts,
         used_llm: true,
     })
@@ -635,6 +643,7 @@ fn llm_draft_loop(
             continue;
         }
         let module_name = module_name_for(&wire, &concepts);
+        let draft_hints = wire.hints.clone();
 
         let draft = template::ExerciseDraft {
             title: wire.title,
@@ -654,7 +663,7 @@ fn llm_draft_loop(
         let _ = fs::remove_dir_all(&workdir);
         match gated {
             Ok(_report) => {
-                return Ok(DraftResult { draft, module_name, attempts: attempt });
+                return Ok(DraftResult { draft, module_name, hints: draft_hints, attempts: attempt });
             }
             Err(e) => {
                 last_fail = format!("{e:#}");

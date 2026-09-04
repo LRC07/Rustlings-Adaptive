@@ -7,13 +7,14 @@ difficulty = "medium"
 constraints = ["no-clone", "max-lines=40"]
 confusion = "多数函数不用写生命周期就编译过（省略规则），初学者因此以为它「不存在」；直到两个输入引用都可能被返回时编译器拒绝推断——这一刻才需要亲手标注"
 anti_patterns = ["lifetime-everywhere", "to-owned-escape"]
+hints = ["E0106：返回引用的寿命要绑定到输入。", "一个 'a 同时标在两个参数与返回值上。", "fn f<'a>(a: &'a str, b: &'a str) -> &'a str 的形状。"]
 
 body = '''
 // headline 返回 title 或 body —— 两个输入引用都可能被返回，
 // 省略规则推不出返回引用跟谁绑定（E0106）。
 //
-// TODO: 给 headline 补上生命周期标注（'a 串起两个输入与返回值）。
-//       report 已经写好，修好后原样工作。禁止 to_owned/clone。
+// TODO: 给 headline 补上生命周期标注（省略规则在两个输入引用时
+//       推不出来）。report 已经写好，修好后原样工作。禁止 to_owned/clone。
 fn headline(title: &str, body: &str) -> &str {
     if title.len() >= body.len() {
         title

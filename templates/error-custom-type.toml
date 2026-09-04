@@ -7,6 +7,7 @@ difficulty = "medium"
 constraints = ["no-unwrap"]
 confusion = "Python/Java 的异常是运行时继承体系（raise/throw 即可）；初学者不习惯“错误是一个普通类型”，必须手动实现 Display/Error 才能被打印、被 ? 传播"
 anti_patterns = ["unwrap-escape-hatch", "string-as-error"]
+hints = ["ok_or_else 把 None 变成你的错误变体。", "parse 的错误类型不同——map_err 在 ? 前转换。", "Display 的每个变体一句 write!。"]
 
 body = '''
 // 自定义错误类型：ConfigError 要能被打印（Display）、能当错误用
@@ -18,7 +19,7 @@ body = '''
 //   3. 补全 get_timeout：
 //        * 缺键       → ConfigError::Missing(键名)
 //        * 解析失败   → ConfigError::NotANumber(原始字符串)
-//      提示：ok_or_else + map_err；禁止 unwrap/expect。
+//      禁止 unwrap/expect。
 use std::collections::HashMap;
 use std::fmt;
 

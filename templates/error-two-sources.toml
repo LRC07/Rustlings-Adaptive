@@ -7,6 +7,7 @@ difficulty = "medium"
 constraints = ["no-unwrap", "max-lines=40"]
 confusion = "从异常语言过来的人会把「格式不对」和「值非法」抛成同一个泛型异常；Rust 里每条失败路径都要在错误枚举里有个名字，Display 还得自己写"
 anti_patterns = ["string-as-error", "unwrap-ladder"]
+hints = ["Display 的两个分支各写一句 write!。", "format! 配 {} 显示的前提是 Display 已实现。", "std::error::Error 的实现体可以为空。"]
 
 body = '''
 // 读取配置端口：字符串要解析成 u16（解析失败），且 0 是非法值。

@@ -7,6 +7,7 @@ difficulty = "medium"
 constraints = ["no-clone"]
 confusion = "Java/Python 没有关联类型概念；初学者分不清 type Key;（每个实现自己指定）与泛型参数（调用方指定）的分工，倾向用泛型 trait 参数硬凑"
 anti_patterns = ["generic-param-swap"]
+hints = ["impl 里写 type Key = ...;。", "HashMap 的 get 返回 Option。", "越界检查用 get(idx)，别直接下标。"]
 
 body = '''
 // Registry 用关联类型 Key 表示"查找键的类型"：每个实现自己选。

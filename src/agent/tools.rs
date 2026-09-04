@@ -275,6 +275,7 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
         outcome.tier.to_source(),
         env.session_id.as_deref(),
         Some(&trigger),
+        &outcome.hints,
     ) {
         progress(&format!("index 登记失败：{e:#}"));
     }

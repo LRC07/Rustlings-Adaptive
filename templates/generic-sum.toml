@@ -7,14 +7,14 @@ difficulty = "medium"
 constraints = ["iterator-only", "no-clone", "max-lines=26"]
 confusion = "Python 的 sum() 对任何数值序列直接工作（运行时鸭子类型）；初学者不知道泛型函数必须显式声明能力（T: Copy + Sum），以为泛型天然能参与运算"
 anti_patterns = ["hardcode-i32", "manual-loop"]
+hints = ["sum() 需要元素能复制进累加器——Copy。", "Sum 是求和结果的约束。", "参考链：iter().copied().sum()。"]
 
 body = '''
 // total 想对 &[T] 求和。直接在 for 循环里写 sum = sum + *x 会撞上
 // 类型问题（sum 的初始值是 i32，与 T 不一定相符，E0308/E0277）。
 //
-// TODO: 用迭代器一行完成求和（items.iter().copied().sum()），
-//       并给 T 加上所需的约束（Copy 与 Sum）。
-//       禁止 for / while / loop，禁止 clone。
+// TODO: 用迭代器完成求和（禁止 for / while / loop），
+//       并给 T 加上编译器要求的约束。禁止 clone。
 pub fn total<T>(items: &[T]) -> T {
     let mut sum = 0;
     for x in items {

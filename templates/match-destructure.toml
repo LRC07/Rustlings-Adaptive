@@ -7,13 +7,13 @@ difficulty = "medium"
 constraints = ["no-clone", "max-lines=40"]
 confusion = "初学者倾向先用 unwrap 拿出值再用字段访问，或嵌套 if let；忘了 match 的模式能在拆开变体的同时完成字段绑定"
 anti_patterns = ["unwrap-first-then-use", "nested-if-let"]
+hints = ["模式已把 x/y/c 绑定好，直接用。", "数字转 String 用 to_string()。", "char 的 to_uppercase() 返回迭代器，需要收尾成 String。"]
 
 body = '''
 // UI 事件：把点击坐标求和、把按键字符转大写。
 //
-// TODO: 在两个分支里补全逻辑（模式已解构出 x/y 与 c）：
-//         * Click { x, y } → (x + y).to_string()
-//         * Key(c)         → c.to_uppercase().to_string()
+// TODO: 在两个分支里补全逻辑：Click 返回坐标和的字符串，
+//         Key 返回字符的大写形式（返回类型都是 String）。
 #[derive(Debug)]
 pub enum Event {
     Click { x: i32, y: i32 },

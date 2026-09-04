@@ -7,14 +7,14 @@ difficulty = "medium"
 constraints = ["no-clone", "max-lines=40"]
 confusion = "有了「递归要 Box」的经验后，初学者常漏掉两件事：递归方法的基准情形（叶节点深度 0），以及 Box 字段在方法里会自动解引用、不用手动 *"
 anti_patterns = ["unwrap-children", "clone-tree"]
+hints = ["递归字段要装箱。", "depth 的递归式：1 + max(左, 右)。", "children 是 Option<(Box, Box)>——match 拆开即可。"]
 
 body = '''
 // 二叉树：先给递归字段装箱（E0072），再实现 depth。
 //
 // TODO:
-//   1. 修正 Tree 的递归字段（用 Box 包住递归部分）
-//   2. 实现 depth：叶节点（children 为 None）深度 0，
-//      否则 1 + 两棵子树深度的较大值。
+//   1. 修正 Tree 的递归字段（E0072）。
+//   2. 实现 depth：叶节点（children 为 None）深度为 0。
 pub struct Tree {
     pub value: i32,
     pub children: Option<(Tree, Tree)>,

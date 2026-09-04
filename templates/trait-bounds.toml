@@ -7,13 +7,14 @@ difficulty = "easy"
 constraints = ["no-clone", "max-lines=38"]
 confusion = "Python 鸭子类型运行时才检查“有没有这个方法”；初学者不理解 Rust 在编译期就要在签名上声明能力（T: Summary），以为泛型天然能调用任意方法"
 anti_patterns = ["hardcode-per-type", "downcast-dynamic"]
+hints = ["泛型参数默认什么都不会（E0599/E0277）。", "约束写 <> 里或 where 都行。", "需要的能力由 summarize 决定——Summary。"]
 
 body = '''
 // summaries 想对"任何能自我描述的类型"工作 —— 但泛型参数 T 没有声明
 // 实现 Summary，编译器拒绝调用 summarize（E0277）。
 //
-// TODO: 给 T 加上 trait 约束（两种写法任选：<T: Summary> 或
-//       where T: Summary）。不许用 clone。
+// TODO: 让 summaries 能对「任何能自我描述的类型」工作——给 T
+//       加上编译器要求的约束。不许用 clone。
 pub trait Summary {
     fn summarize(&self) -> String;
 }

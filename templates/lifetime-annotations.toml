@@ -7,13 +7,14 @@ difficulty = "easy"
 constraints = ["no-clone", "max-lines=28"]
 confusion = "GC 语言里返回引用隐形且永远安全；初学者不知道返回引用的寿命必须写进签名与某个输入绑定，两个输入都可能被返回时编译器无法独断"
 anti_patterns = ["to-owned-escape", "leak-static"]
+hints = ["两个输入引用都可能被返回——省略规则推不出。", "所有引用共用同一个 'a。", "标注在函数签名与返回类型上一致。"]
 
 body = '''
 // longest 返回两个 &str 中较长的那个。两个输入引用都可能被返回，
 // 编译器推不出返回引用能与谁绑定 —— E0106。
 //
-// TODO: 给 longest 与 pick 补上生命周期标注（让各自的所有引用
-//       共用一个即可），不需要改动函数体，也不许用 clone。
+// TODO: 给 longest 与 pick 补上生命周期标注，函数体不用改，
+//       也不许用 clone。
 fn longest(a: &str, b: &str) -> &str {
     if a.chars().count() >= b.chars().count() {
         a

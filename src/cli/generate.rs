@@ -142,6 +142,7 @@ pub(crate) fn cmd_generate(
                 out.tier.to_source(),
                 session.map(|(id, _)| id),
                 Some(&trigger),
+                &out.hints,
             ) {
                 Ok(_) => {}
                 Err(e) => println!("  （index 登记失败：{e:#}）"),

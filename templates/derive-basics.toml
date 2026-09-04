@@ -7,6 +7,7 @@ difficulty = "easy"
 constraints = ["no-clone", "max-lines=40"]
 confusion = "Java 有 toString/equals 但要手写或 Lombok；Python 有 __eq__/__repr__ 鸭子补；初学者在 Rust 第一次撞上「assert_eq! 需要 Debug + PartialEq」的 E0277，不知道 derive 一行就能补齐"
 anti_patterns = ["manual-impl-eq"]
+hints = ["两处报错分别指向两个缺失的 trait。", "assert_eq! 需要 PartialEq；{:?} 需要 Debug。", "一行 derive 可列多个：#[derive(A, B)]。"]
 
 body = '''
 // 测试里的 assert_eq! 与 {:?} 打印都在抱怨 Point（E0277）。

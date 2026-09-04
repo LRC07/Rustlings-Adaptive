@@ -7,6 +7,7 @@ difficulty = "medium"
 constraints = ["no-unwrap", "max-lines=32"]
 confusion = "Python 的 try/except 让任意异常沿调用栈自动冒泡；初学者不知道 ? 只做一次 From 转换，&str 与 ParseIntError 想共用一个返回类型时必须统一擦除成 Box<dyn Error>"
 anti_patterns = ["match-boilerplate", "unwrap-ladder"]
+hints = ["split_once(',') 拆出两半。", "? 能把 &str 与 ParseIntError 都收进 Box<dyn Error>。", "parse 的目标类型要标注（let a: i32 = ...?）。"]
 
 body = '''
 // 把 "3,5" 这样的输入解析成两个 i32 并求和，错误统一用
@@ -14,9 +15,8 @@ body = '''
 //   * 没有逗号   → Err（&str 可以直接 ? 进 Box<dyn Error>）
 //   * 解析失败   → ParseIntError 由 ? 自动转换
 //
-// TODO: 补全函数体：全部用 ? 传播错误（不要 match、不要 unwrap）。
-//       提示：先用 split_once 拆分；let a: i32 = ... ? 需要标注类型。
-//       提示：From<&str> 与 From<ParseIntError> for Box<dyn Error> 都已存在。
+// TODO: 补全函数体：把逗号两边的数字解析出来求和，错误统一用 ?
+//       传播（不要 match、不要 unwrap）。
 fn sum_pair(raw: &str) -> Result<i32, Box<dyn std::error::Error>> {
     todo!()
 }

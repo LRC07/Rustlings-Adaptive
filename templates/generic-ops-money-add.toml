@@ -7,6 +7,7 @@ difficulty = "medium"
 constraints = ["no-clone", "max-lines=40"]
 confusion = "Python 给 __add__ 就能用 +；初学者不知道 Rust 的 + 是 std::ops::Add 的语法糖，自定义类型要自己实现（并声明 Output 关联类型）"
 anti_patterns = ["add-method-named-plus", "clone-to-add"]
+hints = ["+ 是 std::ops::Add 的语法糖。", "Add 有关联类型 Output，决定加法结果的类型。", "Money(pub u64) 字段是 Copy 的，实现体直接相加。"]
 
 body = '''
 // 结账：把一组价格相加。现在 total + p 报 E0369——Money 还不会加法。

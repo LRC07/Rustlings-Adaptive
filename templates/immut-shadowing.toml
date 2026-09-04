@@ -7,6 +7,7 @@ difficulty = "easy"
 constraints = ["no-clone", "max-lines=40"]
 confusion = "Python/JS 的 let/const 也能重绑，但没人区分「改原值」与「换新值」；Rust 的默认不可变把这两件事拆开：改原值要 mut，换新值用 shadowing"
 anti_patterns = ["mut-everywhere"]
+hints = ["E0384：不可变绑定不能二次赋值。", "选一条路走到底：mut 或 shadowing，不要混用。"]
 
 body = '''
 // 计数器：count 要累加两次。编译器报 E0384（不可变绑定被二次赋值）。

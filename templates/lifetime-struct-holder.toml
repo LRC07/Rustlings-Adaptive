@@ -7,13 +7,14 @@ difficulty = "medium"
 constraints = ["no-clone", "max-lines=34"]
 confusion = "Java/Python 对象字段存引用天经地义、GC 保活；初学者不知道结构体持有 &str 要声明 'a，且实例不能活得比被借的数据更久"
 anti_patterns = ["clone-into-owned-fields"]
+hints = ["E0106 逐个指出缺标注的引用字段。", "每个引用字段带 'a；impl 块与 new 同步。", "new 的返回类型也要有 'a。"]
 
 body = '''
 // Excerpt（摘录）保存一段借来的文本与出处 —— 结构体持有引用时，
 // 每个引用字段都需要生命周期参数（E0106）。
 //
-// TODO: 给 struct Excerpt 与 impl 块补上生命周期参数（用 'a），
-//       并让 new / 返回类型也带上它。函数体不用改。
+// TODO: 给 struct Excerpt 与 impl 块补上缺失的生命周期参数，
+//       让 new / 返回类型一致。函数体不用改。
 pub struct Excerpt {
     text: &str,
     origin: &str,

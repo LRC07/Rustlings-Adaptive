@@ -7,13 +7,14 @@ difficulty = "easy"
 constraints = ["no-clone", "max-lines=40"]
 confusion = "Python/JS 解构对象后原对象完好如初；初学者不知道 Rust 解构走的是 move——String 字段被搬走后，整个结构体算「被拆过」，整体使用会 E0382"
 anti_patterns = ["clone-everywhere", "string-rebuild"]
+hints = ["E0382 的原因：name 被搬走后，c 作为整体已不完整。", "let Config { name, retries } = c; 一步取走全部。"]
 
 body = '''
 // 归档配置：name 要搬进归档，retries 留下统计。
 // 下面的实现先搬走 name，又把整个 c 传给 show —— E0382。
 //
-// TODO: 用解构一次拿走全部字段（let Config { name, retries } = c;），
-//       修好 split；show 与 stats 保持不变。
+// TODO: 修好 split：先把字段全部取出，再组装返回值；
+//       show 与 stats 保持不变。禁止 clone。
 pub struct Config {
     pub name: String,
     pub retries: u32,

@@ -7,15 +7,15 @@ difficulty = "medium"
 constraints = ["no-unwrap", "max-lines=40"]
 confusion = "初学者会 map 里嵌 unwrap「绕过」第二层失败——Option<Result<T, E>> 的双层结构要用 and_then 才能干净剥开"
 anti_patterns = ["unwrap-ladder", "nested-match"]
+hints = ["两步流水线：可能失败的解析 → 纯变换。", "and_then 的闭包返回 Option，map 的返回普通值。", "parse::<i32>().ok() 是 Result → Option 的桥。"]
 
 body = '''
 // 两步流水线：解析字符串成数字，再翻倍；任一步失败都返回 None。
+// 「可能失败的一步」与「必然成功的变换」要分开处理——
+// 用同一个组合子家族把它们串成一条链，中间没有 panic 的余地。
 //
-// TODO: 现在的实现 parse 失败会 panic（unwrap）。用 and_then（接住
-//       解析）+ map（做变换）改写成一行，禁止 unwrap 与 match。
-//       区别：and_then 的闭包返回 Option（继续可能失败的一步），
-//       map 的闭包返回普通值（纯变换）——一步之差，语义分明。
-//       提示：parse::<i32>().ok() 先把 Result 变成 Option。
+// TODO: 现在的实现 parse 失败会 panic（unwrap）。改写成一行：把
+//       可能失败的解析与纯变换分开，禁止 unwrap 与 match。
 fn doubled(input: Option<&str>) -> Option<i32> {
     input.map(|s| s.parse::<i32>().unwrap() * 2)
 }

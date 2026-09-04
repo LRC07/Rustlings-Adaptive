@@ -7,6 +7,7 @@ difficulty = "medium"
 constraints = ["no-unwrap", "max-lines=38"]
 confusion = "Java/Python 的异常沿继承树自动向上匹配；初学者不知道 Rust 的 ? 只做一次 From 转换——自定义错误不实现 From<ParseIntError> 就接不住"
 anti_patterns = ["map-err-everywhere", "unwrap-ladder"]
+hints = ["? 只会做一次 From 转换——错误 enum 要自己接住 ParseIntError。", "Display + Error 是自定义错误的最低配置。", "From<ParseIntError> 的实现体映射到 NotANumber 即可。"]
 
 body = '''
 // 解析 CSV 的第一列数字。想让 ? 直接把 ParseIntError 变成

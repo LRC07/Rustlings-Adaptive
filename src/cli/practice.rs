@@ -439,6 +439,7 @@ fn run_exercise(
     items: &[Item],
 ) -> Option<String> {
     let mut cur = idx;
+    let mut hint_idx = 0usize; // one more hint revealed per [h]
     loop {
         let item = &items[cur];
         let key = item.key.clone();
@@ -453,7 +454,7 @@ fn run_exercise(
                 println!("  练习 '{}' 完成 - 已标记。", item.ex.name);
             }
             println!();
-            println!("  [r] 重跑   [e] 编辑   [a] 问教练   [f] 反馈   [n] 下一题   [b] 返回");
+            println!("  [r] 重跑   [e] 编辑   [h] 提示   [a] 问教练   [f] 反馈   [n] 下一题   [b] 返回");
             let s = read_prompt("> ")?;
             match s.trim() {
                 "r" | "" => repaint_exercise(&item.ex, meta.as_ref(), Some(&res)),
@@ -467,6 +468,23 @@ fn run_exercise(
                     }
                     repaint_exercise(&item.ex, meta.as_ref(), Some(&res));
                 }
+                "h" => {
+                    let hints = index.get(&key).map(|m| m.hints.clone()).unwrap_or_default();
+                    if let Some(h) = hints.get(hint_idx) {
+                        println!();
+                        println!("  {} {}（再按 h 看更具体的提示）", render::cyan("提示"), h);
+                        hint_idx += 1;
+                    } else if hints.is_empty() && hint_idx == 0 {
+                        println!();
+                        println!("  这道题没有静态提示。按 [a] 问教练——描述你卡住的地方，");
+                        println!("  教练会给方向性提示（不会直接给答案）。");
+                    } else {
+                        println!();
+                        println!("  静态提示已用完。按 [a] 问教练——描述你卡住的地方，");
+                        println!("  教练会给方向性提示（不会直接给答案）。");
+                    }
+                    println!();
+                }
                 "f" => {
                     feedback_loop(index, &key);
                 }
@@ -474,6 +492,7 @@ fn run_exercise(
                     match next_pending(cur, items, index) {
                         Some(next) => {
                             cur = next;
+                            hint_idx = 0;
                             break;
                         }
                         None => println!("  所有练习已完成！"),
@@ -637,6 +656,7 @@ mod tests {
             created_at: None,
             attempts: 0,
             status,
+            hints: Vec::new(),
             feedback: None,
             last_error: None,
         }

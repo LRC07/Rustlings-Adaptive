@@ -7,15 +7,15 @@ difficulty = "medium"
 constraints = ["no-clone", "max-lines=40"]
 confusion = "Java 的 substring 返回新对象（看似免费）；初学者写 Rust 也随手 to_owned 分配，忘了「借一段出去」用切片就行——返回引用的寿命跟着输入走"
 anti_patterns = ["to-owned-escape"]
+hints = ["&str 是「指向原串的一段」——切片语法直接表达。", "s[start..end] 范围语法；len 已备好。", "&s[..len] 对空串同样合法。"]
 
 body = '''
 // 分析首词：返回它的长度与切片本身（零分配）。
+// 首词就在原串里，没有必要为它再分配一份内存——
+// 返回「指向原串的一段」即可，这正是切片存在的意义。
 //
-// TODO: 补全 analyze 的第二返回值：用切片语法 &s[..len] 从原串借用；
-//       空串时 len 为 0，切片 &s[..0] 也是合法的。禁止 to_owned/clone。
-//       对比：返回 &str 把「字符串内容」借出去，生命周期跟输入走，
-//       调用方零拷贝；返回 String 则总是多一次堆分配。
-//       注意返回类型 (usize, &str) 里的 &str 已经告诉你方向了。
+// TODO: 补全 analyze 的第二返回值：从原串借用首词的切片（零分配）。
+//       空串也要能工作。禁止 to_owned/clone。
 pub fn analyze(s: &str) -> (usize, &str) {
     let len = s.split_whitespace().next().map(|w| w.len()).unwrap_or(0);
     (len, todo!())

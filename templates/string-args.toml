@@ -7,13 +7,14 @@ difficulty = "easy"
 constraints = ["no-clone", "max-lines=40"]
 confusion = "Java/Python 只有一种字符串类型；初学者不懂 String（拥有所有权的堆字符串）与 &str（借用的切片）的分工，签名一律写 String，调用方传字面量就 E0308"
 anti_patterns = ["string-params", "clone-at-call-site"]
+hints = ["签名收更通用的借用类型，而不是 String。", "&String 会自动强转为 &str（deref coercion）。", "调用点只需要加一个 &。"]
 
 body = '''
 // shout 要同时能喊字面量和 String —— 现在的签名只收 String，
 // main_flow 的第一处调用报 E0308。
 //
-// TODO: 把 shout 的参数改成 &str，并把 main_flow 里传 owned 的
-//       调用改成 &owned（&String 会自动解引用强转成 &str）。
+// TODO: shout 应该对字面量与 String 都能用——改签名与必要的调用点。
+//       禁止 clone。
 pub fn shout(msg: String) -> String {
     format!("【{msg}】")
 }

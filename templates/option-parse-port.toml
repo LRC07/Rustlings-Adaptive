@@ -7,15 +7,15 @@ difficulty = "easy"
 constraints = ["no-unwrap", "max-lines=40"]
 confusion = "Python 的 dict.get(key, default) 一行给默认值；初学者在 Rust 里随手 unwrap，忘了「缺失」和「解析失败」两条路都要收敛"
 anti_patterns = ["unwrap-ladder"]
+hints = ["「缺失」和「解析失败」要收敛到同一个默认值。", "parse 返回 Result——想办法先变回 Option。", "参考：and_then 接住解析，unwrap_or 收敛默认值。"]
 
 body = '''
 // 从环境配置里解析端口号：缺失或不是合法 u16 时都用 8080。
+// 真实配置很少完美：键可能不存在，值可能不是数字，甚至
+// 超出端口范围——这些路都要收敛到同一个默认值才算稳健。
 //
-// TODO: 消灭两处 unwrap（no-unwrap 约束）：用 and_then 把 parse 的
-//       Result 折回 Option，再用 unwrap_or 收敛到默认值（一行即可）。
-//       提示：parse::<u16>() 返回 Result，.ok() 才能变 Option；
-//       and_then 的闭包返回 Option —— 链条上任何一环是 None，
-//       后面就整段跳过，这正是我们要的「任一步失败都用默认值」。
+// TODO: 消灭两处 unwrap（no-unwrap 约束）：让「缺失」与「解析失败」
+//       都收敛到默认值 8080（一行即可）。
 fn port(config: Option<&str>) -> u16 {
     config.unwrap().parse::<u16>().unwrap()
 }

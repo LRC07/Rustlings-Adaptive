@@ -7,13 +7,13 @@ difficulty = "medium"
 constraints = ["no-clone", "max-lines=40"]
 confusion = "「拿走一个字段、留下其余」在 GC 语言里是免费操作；Rust 里要么解构、要么 clone——no-clone 约束逼你用解构，而部分移动规则决定之后还能用哪些字段"
 anti_patterns = ["clone-everywhere"]
+hints = ["解构之后再组装新结构体。", "Archive { user, expires_at } 用字段简写即可。", "token 搬走后 session 就不能再整体使用。"]
 
 body = '''
 // 会话收尾：token 要返回给调用方，user / expires_at 进归档。
 //
-// TODO: 补全 finalize——先解构 session 一次性取走全部字段，
-//       再组装返回值。禁止 clone；任何对 session 的整体使用都会
-//       触发 E0382。
+// TODO: 补全 finalize：token 交给调用方，其余字段进 Archive。
+//       禁止 clone；任何对 session 的整体使用都会触发 E0382。
 pub struct Session {
     pub token: String,
     pub user: String,

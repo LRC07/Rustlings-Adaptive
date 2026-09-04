@@ -7,12 +7,12 @@ difficulty = "medium"
 constraints = ["no-clone", "max-lines=35"]
 confusion = "Java/Python 边遍历边修改集合（list.append）是惯用法甚至默认；初学者意识不到 iter_mut() 已借走整个 Vec 的独占借用并存活到循环结束"
 anti_patterns = ["clone-then-append"]
+hints = ["迭代器的借用贯穿整个 for——循环体内不能再动 scores。", "下标访问是「用完即还」的短借用。", "先记下初始长度，再 for i in 0..len。"]
 
 body = '''
 // 给所有低于 pass 的分数加 10 分，返回被加分的人数。
 //
-// TODO: iter_mut() 借走了整个 Vec 的可变借用，在它还活着时又调用
-//       push —— E0499。请修复（比如先记下长度再按下标遍历）。
+// TODO: 修复这个循环——编译器说 scores 在遍历期间被再次可变借用。
 //       不许用 clone，不许改函数签名。
 fn curve(scores: &mut Vec<i32>, pass: i32) -> usize {
     let mut bumped = 0;

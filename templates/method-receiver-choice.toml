@@ -7,6 +7,7 @@ difficulty = "medium"
 constraints = ["no-clone", "max-lines=40"]
 confusion = "三种接收者（self / &self / &mut self）各有归属：改状态、只读、消费；从 GC 语言过来的人没有「方法会消费调用者」的概念，倾向全用 self 或全用 &self"
 anti_patterns = ["always-take-self", "clone-self-inside"]
+hints = ["push 改状态、len 只读、into_items 消费——一一对应。", "item.to_string() 是转换不是 clone。", "into_items(self) 直接返回 self.items 即可。"]
 
 body = '''
 // 购物车：push 放入商品、len 查询数量、into_items 消费购物车

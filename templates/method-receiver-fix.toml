@@ -7,13 +7,14 @@ difficulty = "easy"
 constraints = ["no-clone", "max-lines=40"]
 confusion = "Python/Java 的方法第一个参数总是对象引用（self/this 可读可写）；初学者想不到 Rust 的 self 会把值整个 move 进方法，也不知道改状态要 &mut self"
 anti_patterns = ["clone-self-inside", "return-self-rebuild"]
+hints = ["改状态与只读分别对应两种接收者。", "c.bump() 自动取 &mut——前提是 c 声明为 mut。", "bump(&mut self)，total(&self)。"]
 
 body = '''
 // Counter：bump 计数、total 读数。下面两个方法的接收者写错了，
 // main_flow 里的连续调用会触发 E0382（值被 move 走）。
 //
-// TODO: 只改两个方法的接收者（self → &mut self / &self），
-//       函数体与 main_flow 都不动。
+// TODO: 只改两个方法的接收者，函数体与 main_flow 都不动。
+//       想想：bump 要改状态，total 只读。
 pub struct Counter {
     total: i32,
 }

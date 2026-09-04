@@ -137,6 +137,10 @@ pub struct ExerciseMeta {
     /// Last compile error code seen while solving ("E0382"); cleared on pass.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// Tiered static hints revealed one per `[h]` (M4.8); empty for
+    /// free-form exercises without hints.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hints: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback: Option<Feedback>,
 }
@@ -259,7 +263,7 @@ impl ExerciseIndex {
             if self.entries.contains_key(&key) {
                 continue;
             }
-            let (source, concepts, error_codes, difficulty) = provenance_of(ex, templates);
+            let (source, concepts, error_codes, difficulty, hints) = provenance_of(ex, templates);
             self.entries.insert(
                 key.clone(),
                 ExerciseMeta {
@@ -275,6 +279,7 @@ impl ExerciseIndex {
                     attempts: 0,
                     status: Status::Pending,
                     last_error: None,
+                    hints,
                     feedback: None,
                 },
             );
@@ -367,9 +372,9 @@ fn strip_counter_suffix(stem: &str) -> &str {
 fn provenance_of(
     ex: &Exercise,
     templates: &[Template],
-) -> (Source, Vec<String>, Vec<String>, Option<String>) {
+) -> (Source, Vec<String>, Vec<String>, Option<String>, Vec<String>) {
     if ex.is_fixture {
-        return (Source::Seed, Vec::new(), Vec::new(), None);
+        return (Source::Seed, Vec::new(), Vec::new(), None, Vec::new());
     }
     let stem = ex.name.as_str();
     let base = strip_counter_suffix(stem);
@@ -381,10 +386,11 @@ fn provenance_of(
                 t.concepts.clone(),
                 t.error_codes.clone(),
                 Some(t.difficulty.as_str().to_string()),
+                t.hints.clone(),
             );
         }
     }
-    (Source::Unknown, Vec::new(), Vec::new(), None)
+    (Source::Unknown, Vec::new(), Vec::new(), None, Vec::new())
 }
 
 /// One-shot migration of the legacy `.progress` file (M0): newline
@@ -448,6 +454,7 @@ pub fn register_generated(
     source: Source,
     session_id: Option<&str>,
     trigger: Option<&str>,
+    hints: &[String],
 ) -> anyhow::Result<String> {
     let key = key_for(exercises_dir, gen_path)
         .context("无法定位生成的练习文件（路径解析失败）")?;
@@ -465,6 +472,7 @@ pub fn register_generated(
         attempts: 0,
         status: Status::Pending,
         last_error: None,
+        hints: hints.to_vec(),
         feedback: None,
     });
     Ok(key)
@@ -524,6 +532,7 @@ mod tests {
             attempts: 0,
             status: Status::Pending,
             last_error: None,
+            hints: Vec::new(),
             feedback: None,
         });
 
@@ -563,6 +572,7 @@ mod tests {
             attempts: 0,
             status: Status::Pending,
             last_error: None,
+            hints: Vec::new(),
             feedback: None,
         });
         assert!(idx.set_feedback("generated/a.rs", Feedback::TooHard));
@@ -589,6 +599,7 @@ mod tests {
                 attempts: 3,
                 status: Status::Failed { times: 2 },
                 last_error: Some("E0382".into()),
+                hints: Vec::new(),
                 feedback: Some(Feedback::JustRight),
             });
         }
@@ -649,6 +660,7 @@ mod tests {
             attempts: 0,
             status,
             last_error: None,
+            hints: Vec::new(),
             feedback: None,
         };
         idx.entries.insert("generated/1.rs".into(), mk("generated/1.rs", "题一", &["ownership.move"], Status::Passed, false));
@@ -688,6 +700,7 @@ mod tests {
                 attempts: 0,
                 status: Status::Passed,
                 last_error: None,
+                hints: Vec::new(),
                 feedback: None,
             },
         );

@@ -7,11 +7,12 @@ difficulty = "easy"
 constraints = ["no-clone", "max-lines=40"]
 confusion = "C/Java 的 switch 漏分支只是被 default 静默兜底的逻辑 bug；Rust 把「漏变体」变成编译错误 E0004，初学者第一次见到会以为是自己语法写错了"
 anti_patterns = ["wildcard-catch-all"]
+hints = ["E0004 会指出漏掉的变体。", "Yellow 的等待秒数看测试的期望值。", "不要用 _ 兜底——穷尽才是本题的意义。"]
 
 body = '''
 // 红绿灯各方向的等待秒数。编译器说 match 不完整（E0004）。
 //
-// TODO: 补上缺失的分支（Yellow：3 秒）。不要用 _ 兜底——
+// TODO: 补上缺失的分支。不要用 _ 兜底——
 //       以后新增变体时，穷尽 match 会逼你处理它。
 #[derive(Debug, PartialEq)]
 pub enum Light {

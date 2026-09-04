@@ -7,12 +7,13 @@ difficulty = "easy"
 constraints = ["no-clone", "max-lines=40"]
 confusion = "Python 的泛型比较在运行时才查鸭子；Java 用 Comparable 接口。Rust 的泛型参数默认「什么都不会」——用 > 之前必须声明 PartialOrd，这是 E0369 的第一课"
 anti_patterns = ["hardcode-types", "clone-to-compare"]
+hints = ["E0369：> 需要类型实现比较 trait。", "标准库里是 std::cmp::PartialOrd。", "T: PartialOrd 或 where 子句都行。"]
 
 body = '''
 // bigger 想对「能比较的」类型都工作 —— 对泛型 T 直接用 > 会
 // E0369（binary operation `>` cannot be applied）。
 //
-// TODO: 给 T 加上让 > 可用的约束（std::cmp::PartialOrd）。
+// TODO: 给 T 加上让 > 可用的约束。
 //       只改签名一行，函数体不动。
 pub fn bigger<T>(a: T, b: T) -> T {
     if a > b {

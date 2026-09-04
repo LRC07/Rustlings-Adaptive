@@ -139,6 +139,12 @@ pub struct Template {
     #[allow(dead_code)] // consumed by the M5 review gate
     #[serde(default)]
     pub anti_patterns: Vec<String>,
+    /// Tiered static hints (M4.8): hints[0] is directional, later ones
+    /// more specific. Revealed one per `[h]` press on the exercise
+    /// page; the body's TODO must NOT leak them (the decisions stay
+    /// with the learner).
+    #[serde(default)]
+    pub hints: Vec<String>,
     #[allow(dead_code)] // consumed by the M5 review gate
     #[serde(default)]
     pub review_hints: Option<ReviewHints>,
@@ -254,6 +260,9 @@ pub fn load_file(path: &Path) -> Result<Template> {
         toml::from_str(&text).with_context(|| format!("TOML 解析失败（{}）", path.display()))?;
     if t.confusion.trim().is_empty() {
         bail!("模板 '{}' 缺少 confusion 字段（规格 C3：注明源语言直觉 → 掉坑路径）", t.id);
+    }
+    if t.hints.len() > 3 {
+        bail!("模板 '{}' 的 hints 超过 3 条（分级提示：方向→具体→接近签名）", t.id);
     }
     let violations = rule_filter(&t);
     if !violations.is_empty() {

@@ -7,6 +7,7 @@ difficulty = "medium"
 constraints = ["no-clone"]
 confusion = "JS/Python 的闭包捕获由 GC 保活、随外层环境存活；初学者不知道 Rust 闭包默认只借用捕获变量，被返回的闭包会带着对局部变量的借用悬垂（E0373）"
 anti_patterns = ["clone-into-closure"]
+hints = ["E0373：被返回的闭包借用了局部变量。", "闭包默认借用捕获；拥有环境的写法只有一个关键字。", "move 之后 prefix 进闭包，返回后仍有效。"]
 
 body = '''
 // 闭包默认只"借用"捕获的变量；但被返回的闭包可能活得比函数更久，
@@ -14,7 +15,7 @@ body = '''
 //
 // 对比：只在函数体内立即调用的闭包不需要 move。
 //
-// TODO: 给闭包加上 move 关键字，让它拥有 prefix 的所有权。
+// TODO: 让 make_greeter 编译通过——被返回的闭包与函数活得一样久。
 //       （函数签名已定，请勿改动；也不许用 clone。）
 fn make_greeter(prefix: String) -> impl Fn(&str) -> String {
     |name| format!("{prefix}, {name}")

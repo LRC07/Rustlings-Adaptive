@@ -7,12 +7,13 @@ difficulty = "medium"
 constraints = ["no-clone", "no-unwrap", "max-lines=40"]
 confusion = "初学者要么到处加 mut，要么给每个中间值起新名字（raw/trimmed/parsed/doubled…）；shadowing 让流水线每步同名、类型在遮蔽中自然切换"
 anti_patterns = ["mut-everywhere", "unwrap-ladder"]
+hints = ["每步 let x = ... 遮蔽上一步，类型可以变。", "解析失败要收敛成 0——想想 unwrap_or。", "trim 返回 &str，parse 恰好吃 &str。"]
 
 body = '''
 // 数据清洗：trim → 解析（失败按 0）→ 翻倍。
 //
-// TODO: 用遮蔽改写：三步都用 `let x = ...`，类型从 &str 变 i32；
-//       禁止 mut、禁止 unwrap（坏输入用 unwrap_or）。
+// TODO: 用遮蔽改写流水线：三步都用 `let x = ...`；
+//       禁止 mut、禁止 unwrap。
 //       现在的实现坏输入会 panic（测试里有 "abc"）。
 pub fn pipeline(raw: &str) -> i32 {
     let x = raw.trim();

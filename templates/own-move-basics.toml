@@ -7,13 +7,14 @@ difficulty = "easy"
 constraints = ["no-clone", "max-lines=30"]
 confusion = "Python/Java/Go 传参是对象引用语义，从不“交出”原变量；初学者不会预期 String 按值传参即被移动，以为 shout(title) 之后 title 还能用"
 anti_patterns = ["clone-everywhere"]
+hints = ["函数按值收参数会把所有权拿走。", "读一个 String 不需要拥有它。", "&str 参数能同时接字面量与 &String。"]
 
 body = '''
 // `shout` 和 `measure` 都按值接收 String —— 一旦调用，`title` 就
 // 被移动走了，后面的代码会触发 E0382。
 //
-// TODO: 修改 `shout` / `measure` 的参数为借用（&str），让 main_flow
-// 能按测试要求完成三步操作（禁止使用 clone）。
+// TODO: 修改 `shout` / `measure` 的参数类型，让 main_flow 能按测试
+// 要求完成三步操作（禁止使用 clone）。
 fn shout(msg: String) -> String {
     format!("【{msg}】")
 }

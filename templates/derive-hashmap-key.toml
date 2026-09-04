@@ -7,6 +7,7 @@ difficulty = "medium"
 constraints = ["no-clone", "max-lines=40"]
 confusion = "Python 的任意可哈希对象都能当 dict 键；Java 要求 equals/hashCode 成对实现。Rust 把要求摆在明面上：键要 Eq + Hash，打印要 Debug——少一个都编译不过"
 anti_patterns = ["stringly-typed-key", "manual-hash"]
+hints = ["HashMap 的键要求 Eq + Hash（见 entry 的 bound 报错）。", "打印要 Debug，比较要 PartialEq。", "全部能 derive，一行列全。"]
 
 body = '''
 // 把标签当 HashMap 的键来计数 —— 编译器会逐个指出缺的 trait。
