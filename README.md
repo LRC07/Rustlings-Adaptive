@@ -13,6 +13,8 @@ Agent 解释并锚定知识点（细分概念图谱 + rustc 错误码双轨）�
 ## 当前开发状态
 
 > 设计阶段已收敛，进入实现。**每完成一个里程碑更新此表。**
+> M0–M8 全部完成（2026-09-05 凌晨，M5–M8 由 AI session 自主推进，
+> 决策点清单见 `docs/复盘_M5.md` / `docs/复盘_M6.md`）。
 
 | 里程碑 | 内容 | 对应硬要求 | 状态 |
 |---|---|---|---|
@@ -45,7 +47,7 @@ Agent 解释并锚定知识点（细分概念图谱 + rustc 错误码双轨）�
 > token，详见复盘 §4.5）——分步生成的价值需重新评估。
 | M6 | 双轨画像（错误码 + 概念 SM-2）+ 错题本（/stats 页 + 主动提示 + learner_profile 工具） | R5 | ✅ 完成 |
 | M7 | 借用检查器假设实验室（`borrowlab` 工具：假设改动双向 rustc 取证 + 错误码 diff，教练解读） | — | ✅ 完成 |
-| M8 | 收尾：README 定稿、集成测试、演示脚本、文档对齐、开销表 | — | ⬜ **下一个** |
+| M8 | 收尾：README 定稿、集成 smoke 测试、演示脚本、文档对齐、开销表 | — | ✅ 完成 |
 
 关键时间节点：**9.6 公开展示**（设计文档摘要 + 项目链接，需基本功能）、
 9.8 前试用 3 位同学作品、**9.10 课堂展示**（5 分钟演示 + 提问）。
@@ -194,7 +196,7 @@ docs/                  设计文档（v3 为当前基线，v1/v2 为历史）；
 exercises/             练习仓 + IDE-only 子 crate（rust-analyzer 分析用，cargo 不编译）；
                        种子题在 fixtures/（开发期样例，默认不进做题列表）
 src/main.rs            薄入口
-src/cli/               交互 CLI：对话 REPL（默认首屏）、渲染/MD/输入层基建、做题子模式（三层分区+题卡）、出题入口
+src/cli/               交互 CLI：对话 REPL（默认首屏）、渲染/MD/输入层基建、做题子模式（三层分区+题卡）、出题入口、评审门+复盘交互（debrief，M5）
 src/agent/             Agent 环：工具注册/调度、会话轨迹落盘与回看（M4）
 src/exercise/          练习发现（fixtures 过滤）、标题解析、rustc --test 运行器、题目索引 index.json（元数据+状态，M4.5a）
 src/config/            模型配置加载（config.toml + .env 覆盖，R3）
@@ -205,6 +207,9 @@ src/constraints/       抽象约束静态检查：no-clone 等（M2）
 src/taxonomy/          概念图谱加载、校验（无环）、错误码反查索引（M3）
 src/template/          模板库加载（TOML）、规则过滤、{{slot}} 填充渲染（M3）
 src/generator/         三层出题（模板直配/改编/自由生成，M4.5）+ 单一质量门 + 修复环
+src/review/            解答评审门逻辑：静态层（todo!/约束/clippy）+ LLM JSON 评审 + probe（M5）
+src/profile/           双轨画像：错误码计数 + 概念 SM-2 + 错题本蒸馏（M6）
+src/borrowlab/         假设实验室：双向 rustc 取证 + 错误码 diff（M7）
 config.example.toml    配置样例（复制为 config.toml 使用；后者已 gitignore）
 templates/             手写题目模板 ×36（M3+M3.1 首批 12；M4.5d 批次一扩容 24：迭代器/Option/错误转换/模式匹配/方法接收者/Box/部分移动/遮蔽/String&str/derive/泛型运算/生命周期）
 taxonomy/              概念图谱 concepts.toml（52 节点，M3+M3.1 首批 37；M4.5d 扩容迭代器/模式匹配/智能指针/闭包/集合/模块等分支）
@@ -218,7 +223,7 @@ taxonomy/              概念图谱 concepts.toml（52 节点，M3+M3.1 首批 3
 
 ## 换一个 session 继续开发
 
-1. **读本文件的状态表**，确定下一个里程碑（当前：M7 借用实验室（可砍）；其后 M8）。
+1. **读本文件的状态表**，确定下一个里程碑（当前：M0–M8 全部完成；余量为试用反馈修复与新 session 决策点拍板）。
 2. 读 `docs/设计文档_v3.md`，尤其 §8 的对应里程碑（目标/产出/验收/
    提示要点）与 §8.2 交接纪律。
 3. 硬要求对照：`agent/requirements.md` §三（R1–R6）。
