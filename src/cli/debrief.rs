@@ -307,6 +307,11 @@ fn render_gate(o: &review::GateOutcome) {
         println!("  · LLM 评审跳过：{e}");
     }
     if let Some(r) = &o.llm {
+        // One-line summary even when there are no findings — otherwise
+        // a clean verdict looks like the LLM layer never ran.
+        if !r.summary.is_empty() && r.findings.is_empty() {
+            println!("    · {0}", r.summary);
+        }
         for f in &r.findings {
             println!("    · [{}] {}", severity_kind_cn(f), f.message);
             if let Some(w) = &f.better_way {
@@ -601,11 +606,12 @@ fn render_comparison(m: &review::MachineComparison, llm: Option<&review::LlmComp
     let dim_w = 10usize;
 
     let row = |dim: &str, user: String, reference: String| {
+        let clip = |s: &str| render::truncate_display(s, 24);
         println!(
             "    {}  {}  {}",
             render::pad_display(dim, dim_w),
-            render::pad_display(&user, 26),
-            render::pad_display(&reference, 26)
+            render::pad_display(&clip(&user), 26),
+            render::pad_display(&clip(&reference), 26)
         );
     };
 
@@ -629,22 +635,17 @@ fn render_comparison(m: &review::MachineComparison, llm: Option<&review::LlmComp
 
     match llm {
         Some(c) if !c.rows.is_empty() => {
+            // List blocks instead of table cells: the notes carry the
+            // substance (短评 + 具体改法) and must not be squeezed.
             for r in &c.rows {
-                let u = format!(
-                    "{}/5 {}",
-                    r.user_score.map(|s| s.to_string()).unwrap_or_else(|| "?".into()),
-                    r.user_note
-                );
-                let rf = if has_ref {
-                    format!(
-                        "{}/5 {}",
-                        r.ref_score.map(|s| s.to_string()).unwrap_or_else(|| "?".into()),
-                        r.ref_note
-                    )
-                } else {
-                    "—".to_string()
-                };
-                row(dim_cn(&r.dim), u, rf);
+                let score = |s: Option<u8>| s.map(|n| format!("{n}/5")).unwrap_or_else(|| "?".into());
+                println!("    {}（用户 {} ｜ 参考 {}）", render::bold(dim_cn(&r.dim)), score(r.user_score), score(r.ref_score));
+                if !r.user_note.is_empty() {
+                    println!("      用户：{}", r.user_note);
+                }
+                if has_ref && !r.ref_note.is_empty() {
+                    println!("      参考：{}", r.ref_note);
+                }
             }
             if !c.takeaway.is_empty() {
                 println!("    点评：{}", c.takeaway);

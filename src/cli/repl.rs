@@ -442,47 +442,63 @@ fn print_help() {
 /// the verification. Injected as a per-turn note so the coach asks
 /// about pending verification instead of silently dropping it.
 fn open_loop_note(messages: &[ChatMessage]) -> Option<String> {
-    let has_fence = |m: &ChatMessage| {
-        m.role == "user" && m.content.as_deref().map(|c| c.contains("```")).unwrap_or(false)
+    // User code messages: pasted code arrives AGGREGATED without fence
+    // markers (M4.9), so fall back to a code-shape heuristic; typed
+    // ``` fences still count. Coach rewrites keep their fences (the
+    // history stores the raw markdown).
+    let user_code = |m: &ChatMessage| {
+        m.role == "user"
+            && m.content.as_deref().map(|c| {
+                c.contains("```")
+                    || (c.lines().count() >= 3
+                        && (c.contains("fn ") || c.contains("let ") || c.contains(';')))
+            })
+            .unwrap_or(false)
     };
     let user_code_turns: Vec<usize> =
-        messages.iter().enumerate().filter(|(_, m)| has_fence(m)).map(|(i, _)| i).collect();
+        messages.iter().enumerate().filter(|(_, m)| user_code(m)).map(|(i, _)| i).collect();
 
-    let mut parts: Vec<String> = Vec::new();
-    for &ui in user_code_turns.iter().rev().take(2).rev() {
-        let rest = &messages[ui + 1..];
-        let coach_rewrite = rest
-            .iter()
-            .take_while(|m| m.role != "user")
-            .any(|m| m.role == "assistant" && m.content.as_deref().map(|c| c.contains("```")).unwrap_or(false));
-        if !coach_rewrite {
+    // Report the most recent unresolved thread (the salient one);
+    // older threads stay in history anyway. The coach's fenced rewrite
+    // may come several turns after the paste (思路 → 追问 → 方案), so
+    // the window is "any later assistant code block, with no further
+    // user code paste after it".
+    let mut last: Option<(usize, String)> = None;
+    for &ui in user_code_turns.iter().rev().take(2) {
+        let Some(aj) = (ui + 1..messages.len()).rfind(|&i| {
+            messages[i].role == "assistant"
+                && messages[i].content.as_deref().map(|c| c.contains("```")).unwrap_or(false)
+        }) else {
             continue;
-        }
+        };
         // Resolved when the user later pasted new code (likely the
         // rewritten version brought back for verification).
-        let resolved = rest.iter().any(&has_fence);
-        if resolved {
+        if (aj + 1..messages.len()).any(|i| user_code(&messages[i])) {
             continue;
         }
-        let snippet: String = messages[ui]
-            .content
-            .as_deref()
-            .and_then(|c| c.split("```").nth(1))
-            .and_then(|block| block.lines().find(|l| !l.trim().starts_with("```")))
-            .map(|l| l.trim().chars().take(40).collect())
-            .unwrap_or_default();
-        parts.push(format!("turn {ui}: “{snippet}”"));
+        let content = messages[ui].content.as_deref().unwrap_or_default();
+        let snippet: String = if content.contains("```") {
+            content
+                .split("```")
+                .nth(1)
+                .and_then(|block| {
+                    block.lines().find(|l| !l.trim().is_empty() && !l.trim().starts_with("```"))
+                })
+                .map(|l| l.trim().chars().take(40).collect())
+                .unwrap_or_default()
+        } else {
+            content.lines().map(str::trim).find(|l| !l.is_empty()).map(|l| l.chars().take(40).collect()).unwrap_or_default()
+        };
+        last = Some((ui, snippet));
+        break;
     }
 
-    if parts.is_empty() {
-        return None;
-    }
+    let (ui, snippet) = last?;
     Some(format!(
-        "[Open code threads] {} \
-         — you proposed code changes for these pastes but they were never re-verified. \
-         Before moving on to other topics, proactively offer to verify them \
-         (suggest running the change through check_code); do not drop them silently.",
-        parts.join("; ")
+        "[Open code threads — follow-up rule] turn {ui}: the learner pasted code（“{snippet}…”）, \
+         you proposed a fix, and it was NEVER re-verified. In THIS reply you must also explicitly \
+         offer to verify that fix together (e.g. 「先把之前那段改好的代码用 check_code 跑一遍验证？」), \
+         unless the learner's current message is already about that verification. Do not drop the thread silently."
     ))
 }
 
@@ -509,6 +525,7 @@ fn agent_turn(
     let practice_note = practice::PracticeCtx::load_index(practice_ctx).practice_note(&session.exercises);
     // M5 (retro §6.3): pending code threads the coach should follow up.
     let open_loop_note = open_loop_note(&session.messages);
+    let has_open_loop = open_loop_note.is_some();
     let env = AgentEnv {
         caller: Arc::new(cl.clone()),
         tracker: tracker.clone(),
@@ -520,6 +537,7 @@ fn agent_turn(
     };
     let history = session.messages.clone();
     let input = input.to_string();
+    let input_had_code = input.contains("```");
 
     let (spinner, status_slot) = Spinner::start("思考中…");
     let (tx, rx) = std::sync::mpsc::channel();
@@ -585,6 +603,17 @@ fn agent_turn(
             match cfg.budget_usd() {
                 Some(b) => println!("  ｜ 累计 ${:.4} / 预算 ${:.2}", total.cost_usd, b),
                 None => println!("  ｜ 累计 ${:.4}", total.cost_usd),
+            }
+            // M5 deterministic open-thread reminder (retro §6.3): the
+            // model-side note is best-effort (adherence varies by
+            // model), so the CLI guarantees the thread is never lost.
+            // Hidden when this turn itself pasted code (likely the
+            // verification paste).
+            if has_open_loop && !input_had_code {
+                println!(
+                    "  {} 之前贴的代码改动还没验证过——把改好的代码贴回来我帮你跑 check_code。",
+                    render::dim("↻")
+                );
             }
             if let Err(e) = session.save() {
                 println!("  会话保存失败：{e:#}");
@@ -954,6 +983,61 @@ fn read_paste() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::ChatMessage;
+
+    fn user(text: &str) -> ChatMessage {
+        ChatMessage::user(text.to_string())
+    }
+    fn assistant(text: &str) -> ChatMessage {
+        ChatMessage::assistant(text.to_string())
+    }
+
+    #[test]
+    fn open_loop_detects_unverified_rewrite() {
+        // Pasted code arrives WITHOUT fence markers (M4.9 aggregation).
+        let msgs = vec![
+            user("什么是所有权"),
+            assistant("解释…"),
+            user("fn main() {\n    let s = String::from(\"a\");\n    let t = s;\n    println!(\"{}\", s);\n}"),
+            assistant("本地编译报 E0382…"),
+            assistant("方案：\n```rust\nlet t = s.clone();\n```"),
+            user("顺便问，String 和 &str 有什么区别"),
+        ];
+        let note = open_loop_note(&msgs).expect("should detect the open thread");
+        assert!(note.contains("[Open code threads"), "{note}");
+        assert!(note.contains("NEVER re-verified"), "{note}");
+        assert!(note.contains("fn main()"), "snippet preview present: {note}");
+    }
+
+    #[test]
+    fn open_loop_detects_rewrite_after_followup_questions() {
+        // 贴码 → 教练思路（无码）→ 用户追问（无码）→ 教练方案（有码）→ 用户转话题
+        let msgs = vec![
+            user("fn main() {\n    let s = String::from(\"a\");\n    let t = s;\n    println!(\"{}\", s);\n}"),
+            assistant("本地编译报 E0382；修复思路有三种……"),
+            user("直接给我最小改动"),
+            assistant("最小改动：\n```rust\nlet t = s.clone();\n```"),
+            user("顺便问，String 和 &str 有什么区别"),
+        ];
+        let note = open_loop_note(&msgs).expect("rewrite two turns later still counts");
+        assert!(note.contains("NEVER re-verified"), "{note}");
+    }
+
+    #[test]
+    fn open_loop_resolved_when_user_pastes_again() {
+        let msgs = vec![
+            user("```\nfn f() {}\n```怎么改"),
+            assistant("方案：\n```rust\nfn f() {}\n```"),
+            user("```\nfn f() { let x = 1; }\n```这样对吗"),
+        ];
+        assert!(open_loop_note(&msgs).is_none());
+    }
+
+    #[test]
+    fn open_loop_none_without_code_exchange() {
+        let msgs = vec![user("你好"), assistant("你好！")];
+        assert!(open_loop_note(&msgs).is_none());
+    }
 
     #[test]
     fn command_parsing() {
