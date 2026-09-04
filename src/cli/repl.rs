@@ -23,7 +23,7 @@ use crate::llm::LlmClient;
 use crate::usage::UsageTracker;
 
 use super::render::{self, chat_header, chat_tail, clear_all, clear_viewport};
-use super::{generate, make_client, practice, read_line_trimmed, spinner::Spinner};
+use super::{generate, make_client, practice, read_line, read_line_or_leave, spinner::Spinner, Line};
 
 pub(crate) fn run() {
     let root = PathBuf::from(".");
@@ -73,9 +73,16 @@ pub(crate) fn run() {
             agent::reset_interrupt();
             println!("  ^C（任务执行中按 Ctrl-C 打断；输入 /exit 退出）");
         }
-        let Some(line) = read_line_trimmed("你> ") else {
-            println!();
-            break;
+        let line = match read_line("你> ") {
+            Line::Text(s) => s,
+            Line::Interrupted => {
+                println!("  ^C 已取消本行输入");
+                continue;
+            }
+            Line::Eof => {
+                println!();
+                break;
+            }
         };
         let line = line.trim();
         if line.is_empty() {
@@ -126,7 +133,7 @@ pub(crate) fn run() {
                 practice_ctx.editor = cfg.editor.clone();
                 repaint_chat(&session, &cfg, &tracker);
             }
-            Cmd::Sessions(arg) => sessions_page(arg.as_deref()),
+            Cmd::Sessions(arg) => handle_sessions(arg.as_deref(), &mut session, &cfg, &tracker),
             Cmd::Unknown(raw) => {
                 let hint = render::suggest_command(&raw, KNOWN_COMMANDS)
                     .map(|s| format!("你是不是想用 {s}？"))
@@ -168,7 +175,7 @@ fn repaint_chat(session: &Session, cfg: &ModelConfig, tracker: &Arc<Mutex<UsageT
 }
 
 fn current_spent(tracker: &Arc<Mutex<UsageTracker>>) -> f64 {
-    tracker.lock().expect("usage lock").all_totals().cost_usd
+    tracker.lock().unwrap_or_else(|p| p.into_inner()).all_totals().cost_usd
 }
 
 fn short_id(id: &str) -> String {
@@ -329,7 +336,12 @@ fn agent_turn(
                     break;
                 }
             }
-            Err(RecvTimeoutError::Disconnected) => break,
+            // Worker died without sending (panic): surface it instead
+            // of masquerading as an interruption.
+            Err(RecvTimeoutError::Disconnected) => {
+                outcome = Some(Err(anyhow::anyhow!("后台任务异常结束（工作线程崩溃，已恢复）")));
+                break;
+            }
         }
     }
     spinner.stop();
@@ -340,13 +352,15 @@ fn agent_turn(
             session.messages = turn.history;
             println!();
             if let Some(text) = &turn.reply {
-                print!("{}", render::wrap_text(text, render::term_width(), 0));
+                // M4.3: markdown → ANSI (fenced code kept verbatim),
+                // width-aware wrapping; raw source on pipes.
+                print!("{}", super::md::render(text, render::term_width(), render::ansi_enabled()));
             }
             for note in &turn.tool_notes {
                 println!("  · {note}");
             }
             // R6: per-turn usage footer.
-            let total = tracker.lock().expect("usage lock").all_totals();
+            let total = tracker.lock().unwrap_or_else(|p| p.into_inner()).all_totals();
             print!(
                 "  ─ 本回合: {} 次调用 ｜ 输入 {} tok ｜ 输出 {} tok ｜ ${:.6}",
                 turn.calls, turn.input_tokens, turn.output_tokens, turn.cost_usd
@@ -363,7 +377,7 @@ fn agent_turn(
             if let Some(offer) = turn.practice {
                 println!();
                 println!("  题目已就绪：《{}》（{}）", offer.title, offer.difficulty);
-                match read_line_trimmed("  回车开始做题，输入 n 留在对话> ") {
+                match read_line_or_leave("  回车开始做题，输入 n 留在对话> ") {
                     None => {}
                     Some(ans) => {
                         let a = ans.trim().to_ascii_lowercase();
@@ -390,7 +404,7 @@ fn agent_turn(
 
 /// `/usage` — cost report (R6). Prints inline, never clears the screen.
 fn print_usage(cfg: &ModelConfig, tracker: &Arc<Mutex<UsageTracker>>) {
-    let t = tracker.lock().expect("usage lock");
+    let t = tracker.lock().unwrap_or_else(|p| p.into_inner());
     let s = t.session_totals();
     let a = t.all_totals();
     println!();
@@ -466,30 +480,30 @@ fn cmd_config(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
             "  · 界面      : {}（/ui view｜scroll 可切换）",
             if cfg.ui.mode_view() { "视口重绘" } else { "滚动" }
         );
-        let Some(line) = read_line_trimmed("配置> ") else { return };
+        let Some(line) = read_line_or_leave("配置> ") else { return };
         match line.as_str() {
             "" => return,
             "1" => {
-                if let Some(v) = read_line_trimmed("新 endpoint: ") {
+                if let Some(v) = read_line_or_leave("新 endpoint: ") {
                     cfg.endpoint = v;
                     save_and_rebuild(cfg, client);
                 }
             }
             "2" => {
-                if let Some(v) = read_line_trimmed("新 model: ") {
+                if let Some(v) = read_line_or_leave("新 model: ") {
                     cfg.model = v;
                     save_and_rebuild(cfg, client);
                 }
             }
             "3" => {
-                if let Some(v) = read_line_trimmed("新 api_key（输入明文，回车确认）: ") {
+                if let Some(v) = read_line_or_leave("新 api_key（输入明文，回车确认）: ") {
                     cfg.api_key = v;
                     cfg.key_source = crate::config::KeySource::ConfigFile;
                     save_and_rebuild(cfg, client);
                 }
             }
             "4" => {
-                if let Some(v) = read_line_trimmed("新预算（数字=USD；'无' 取消预算）: ") {
+                if let Some(v) = read_line_or_leave("新预算（数字=USD；'无' 取消预算）: ") {
                     if v == "无" || v == "off" || v == "none" {
                         cfg.budget = None;
                     } else if let Ok(n) = v.parse::<f64>() {
@@ -506,7 +520,7 @@ fn cmd_config(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
                 }
             }
             "5" => {
-                if let Some(v) = read_line_trimmed("新编辑器命令（如 'code --wait'；'无' 恢复自动）: ") {
+                if let Some(v) = read_line_or_leave("新编辑器命令（如 'code --wait'；'无' 恢复自动）: ") {
                     if v == "无" || v == "none" {
                         cfg.editor = None;
                     } else {
@@ -528,41 +542,90 @@ fn save_and_rebuild(cfg: &ModelConfig, client: &mut Option<LlmClient>) {
     *client = make_client(cfg);
 }
 
-/// `/sessions` — list saved sessions or print one session's trajectory
-/// (R5: the agent's actual workflow, inspectable).
-fn sessions_page(arg: Option<&str>) {
+/// `/sessions` — list, view one trajectory, switch into a past
+/// session, or export it as markdown (R5).
+fn handle_sessions(arg: Option<&str>, session: &mut Session, cfg: &ModelConfig, tracker: &Arc<Mutex<UsageTracker>>) {
     let infos = Session::list();
     if infos.is_empty() {
         println!("  还没有会话记录（对话后自动保存在 ~/.rustlings_adaptive/sessions/）。");
         return;
     }
-    if let Some(arg) = arg {
-        match arg.parse::<usize>() {
-            Ok(n) if n >= 1 && n <= infos.len() => {
-                let info = &infos[n - 1];
-                match Session::load(&info.path) {
+    let Some(arg) = arg else {
+        sessions_list(&infos);
+        return;
+    };
+    let mut words = arg.split_whitespace();
+    match words.next().unwrap_or("") {
+        "load" => {
+            match parse_index(words.next(), infos.len()) {
+                Some(n) => match Session::load(&infos[n - 1].path) {
+                    Ok(loaded) => {
+                        let _ = session.save();
+                        *session = loaded;
+                        println!(
+                            "  已切换到会话 {}（{} 条消息；继续对话即可延续该上下文）",
+                            render::cyan(&session.id),
+                            session.messages.len()
+                        );
+                        repaint_chat(session, cfg, tracker);
+                    }
+                    Err(e) => println!("  读取会话失败：{e:#}"),
+                },
+                None => println!("  用法：/sessions load <序号>（1..={}）", infos.len()),
+            }
+        }
+        "export" => {
+            match parse_index(words.next(), infos.len()) {
+                Some(n) => match Session::load(&infos[n - 1].path) {
+                    Ok(s) => match s.export_markdown() {
+                        Ok(path) => println!("  已导出：{}", path.display()),
+                        Err(e) => println!("  导出失败：{e:#}"),
+                    },
+                    Err(e) => println!("  读取会话失败：{e:#}"),
+                },
+                None => println!("  用法：/sessions export <序号>（1..={}）", infos.len()),
+            }
+        }
+        _ => {
+            // Bare number = view the trajectory read-only.
+            match arg.parse::<usize>() {
+                Ok(n) if n >= 1 && n <= infos.len() => match Session::load(&infos[n - 1].path) {
                     Ok(s) => {
                         println!();
-                        println!("── 会话 {}（{} 条消息，开始于 {}）──", render::cyan(&s.id), s.messages.len(),
-                            s.started_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S"));
+                        println!(
+                            "── 会话 {}（{} 条消息，开始于 {}；/sessions load {} 可切换）──",
+                            render::cyan(&s.id),
+                            s.messages.len(),
+                            s.started_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S"),
+                            n
+                        );
                         print!("{}", agent::session::trajectory_text(&s.messages, 500));
                         println!();
                     }
                     Err(e) => println!("  读取会话失败：{e:#}"),
-                }
+                },
+                _ => println!("  用法：/sessions ｜ /sessions <序号> ｜ /sessions load <序号> ｜ /sessions export <序号>"),
             }
-            _ => println!("  序号需在 1..={} 内（/sessions 不带参数查看列表）", infos.len()),
         }
-        return;
     }
+}
+
+fn parse_index(word: Option<&str>, len: usize) -> Option<usize> {
+    let n = word?.parse::<usize>().ok()?;
+    (n >= 1 && n <= len).then_some(n)
+}
+
+fn sessions_list(infos: &[agent::session::SessionInfo]) {
     println!();
-    println!("{}", render::cyan("── 会话列表（/sessions <序号> 查看轨迹）──"));
+    println!("{}", render::cyan("── 会话列表（load 切换 / export 导出 / 序号 回看）──"));
     for (i, info) in infos.iter().enumerate() {
+        let title = info.title.clone().unwrap_or_else(|| "—".to_string());
         println!(
-            "  {:>2}. {} ｜ {} 条消息 ｜ 开始 {}",
+            "  {:>2}. {} ｜ {} 条消息 ｜ 「{}」 ｜ 开始 {}",
             i + 1,
             info.id,
             info.messages,
+            title,
             info.started_at.with_timezone(&chrono::Local).format("%m-%d %H:%M")
         );
     }
@@ -622,7 +685,7 @@ fn read_paste() -> Option<String> {
     println!("  ─ 粘贴模式：继续粘贴代码，单独一行 ``` 结束 ─");
     let mut buf = String::new();
     loop {
-        let l = read_line_trimmed("")?;
+        let l = read_line_or_leave("")?;
         if l.trim() == "```" {
             return Some(buf);
         }
@@ -658,5 +721,14 @@ mod tests {
         assert!(matches!(parse_command("/helo"), Cmd::Unknown(_)));
         // A lone slash command word with no meaning is unknown.
         assert!(matches!(parse_command("/ "), Cmd::Unknown(_)));
+    }
+
+    #[test]
+    fn sessions_index_parsing() {
+        assert_eq!(parse_index(Some("2"), 5), Some(2));
+        assert_eq!(parse_index(Some("0"), 5), None);
+        assert_eq!(parse_index(Some("6"), 5), None);
+        assert_eq!(parse_index(Some("x"), 5), None);
+        assert_eq!(parse_index(None, 5), None);
     }
 }

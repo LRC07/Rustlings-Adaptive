@@ -137,8 +137,9 @@ pub struct TurnOutcome {
 
 /// How many model⇄tool round trips per user turn before bailing out.
 pub const MAX_TOOL_ROUNDS: u32 = 5;
-/// Messages sent to the model: system + this many latest messages.
-pub const WINDOW_MESSAGES: usize = 24;
+/// Hard cap on sent messages regardless of the token budget (keeps
+/// the request bounded even with a huge configured context).
+pub const WINDOW_MESSAGES: usize = 40;
 /// Tool results are trimmed to this length before entering history.
 const TOOL_RESULT_CHARS: usize = 1500;
 
@@ -168,7 +169,7 @@ pub fn run_turn(
 
         // R6: budget gate before every direct model call.
         if let Err(e) = usage::check_budget(
-            env.tracker.lock().expect("usage lock").all_totals().cost_usd,
+            env.tracker.lock().unwrap_or_else(|p| p.into_inner()).all_totals().cost_usd,
             env.cfg.budget_usd(),
         ) {
             reply = Some(format!("（模型调用被拦截：{e}。可在 /config 调整预算或查看 /usage。）"));
@@ -188,7 +189,7 @@ pub fn run_turn(
         progress("思考中…");
         let out = env
             .caller
-            .chat_turn(&window(&msgs), &tools::tool_schemas())
+            .chat_turn(&window(&msgs, env.cfg.context_len), &tools::tool_schemas())
             .map_err(|e| {
                 if is_interrupted() {
                     anyhow!("已打断")
@@ -304,10 +305,30 @@ fn record(env: &AgentEnv, u: crate::llm::Usage, phase: &str, totals: &mut tools:
 // Context window & text protocol
 // ---------------------------------------------------------------------------
 
-/// Outgoing message window: system prompt + the latest messages, with
-/// oversized contents trimmed. Leading orphan tool results (cut loose
-/// by the window) are dropped so the wire format stays valid.
-pub fn window(msgs: &[ChatMessage]) -> Vec<ChatMessage> {
+/// Rough token estimate for mixed CJK/ASCII text: ASCII ≈ 4 chars per
+/// token, CJK ≈ 1 char per token. Deterministic and documented — good
+/// enough for windowing (R3: the configured `context_len` finally
+/// drives the conversation window).
+pub fn estimate_tokens(s: &str) -> u64 {
+    let mut ascii = 0u64;
+    let mut wide = 0u64;
+    for c in s.chars() {
+        if (c as u32) < 0x80 {
+            ascii += 1;
+        } else {
+            wide += 1;
+        }
+    }
+    ascii / 4 + wide
+}
+
+/// Outgoing message window (R3): system prompt + as many of the latest
+/// messages as fit ~¾ of the configured context (the rest is headroom
+/// for the reply), capped at `WINDOW_MESSAGES` total. Oversized
+/// contents are trimmed; leading orphan tool results (cut loose by the
+/// window) are dropped so the wire format stays valid.
+pub fn window(msgs: &[ChatMessage], context_len: u32) -> Vec<ChatMessage> {
+    let budget = (context_len.max(1024) as u64) * 3 / 4;
     let mut out: Vec<ChatMessage> = if msgs.len() <= WINDOW_MESSAGES + 1 {
         msgs.to_vec()
     } else {
@@ -315,6 +336,15 @@ pub fn window(msgs: &[ChatMessage]) -> Vec<ChatMessage> {
         v.extend(msgs[msgs.len() - WINDOW_MESSAGES..].iter().cloned());
         v
     };
+    // Drop from the front (after the system prompt) until the estimate
+    // fits — but always keep at least the latest message.
+    while out.len() > 2 {
+        let total: u64 = out.iter().map(message_tokens).sum();
+        if total <= budget {
+            break;
+        }
+        out.remove(1);
+    }
     // Drop tool results whose assistant tool_calls message was cut off.
     while out.len() > 1 && out[1].role == "tool" {
         out.remove(1);
@@ -325,6 +355,12 @@ pub fn window(msgs: &[ChatMessage]) -> Vec<ChatMessage> {
         }
     }
     out
+}
+
+fn message_tokens(m: &ChatMessage) -> u64 {
+    let content = m.content.as_deref().unwrap_or("");
+    let args: u64 = m.tool_calls.iter().map(|c| estimate_tokens(&c.arguments) + 4).sum();
+    estimate_tokens(content) + args + 4
 }
 
 /// Detect the text-protocol directive `{"tool": ..., "arguments": ...}`
@@ -471,13 +507,48 @@ mod tests {
     #[test]
     fn window_keeps_system_and_latest() {
         let msgs: Vec<ChatMessage> = std::iter::once(ChatMessage::system("sys"))
-            .chain((0..40).map(|i| ChatMessage::user(format!("m{i}"))))
+            .chain((0..50).map(|i| ChatMessage::user(format!("m{i}"))))
             .collect();
-        let w = window(&msgs);
+        let w = window(&msgs, 128_000);
         assert_eq!(w.len(), WINDOW_MESSAGES + 1);
         assert_eq!(w[0].content.as_deref(), Some("sys"));
-        assert_eq!(w[1].content.as_deref(), Some("m16"));
-        assert_eq!(w.last().unwrap().content.as_deref(), Some("m39"));
+        assert_eq!(w[1].content.as_deref(), Some("m10"));
+        assert_eq!(w.last().unwrap().content.as_deref(), Some("m49"));
+    }
+
+    #[test]
+    fn estimate_tokens_mixed_cjk_ascii() {
+        assert_eq!(estimate_tokens("hello"), 1); // 5 ascii / 4
+        assert_eq!(estimate_tokens("你好"), 2); // wide chars ≈ 1 tok each
+        assert_eq!(estimate_tokens("a你b"), 1); // ascii 2/4=0, CJK 1
+    }
+
+    #[test]
+    fn window_trims_to_configured_context() {
+        // A tiny configured context forces the window down to
+        // system + the latest message (always kept).
+        let msgs = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("短"),
+            ChatMessage::assistant("回"),
+            ChatMessage::user("又一条"),
+        ];
+        let w = window(&msgs, 1024); // budget 768 tokens; messages are tiny
+        assert_eq!(w.len(), 4); // tiny history fits easily
+        // Now flood with huge messages: must trim aggressively.
+        let big = "x".repeat(10_000); // ≈2500 tokens
+        let msgs = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user(&big),
+            ChatMessage::assistant(&big),
+            ChatMessage::user(&big),
+            ChatMessage::assistant(&big),
+            ChatMessage::user("latest"),
+        ];
+        let w = window(&msgs, 4096); // budget 3072 < 4×2500
+        assert!(w.len() < msgs.len(), "must trim, got {}", w.len());
+        assert_eq!(w.last().unwrap().content.as_deref(), Some("latest"));
+        assert_eq!(w[0].role, "system");
     }
 
     #[test]
@@ -490,7 +561,7 @@ mod tests {
             ChatMessage::tool_result("c1", "r"),
             ChatMessage::user("later"),
         ];
-        let w = window(&msgs);
+        let w = window(&msgs, 128_000);
         assert!(w.iter().all(|m| m.role != "tool"), "orphan tool result must be dropped");
         assert_eq!(w.len(), 2);
         assert_eq!(w[0].role, "system");
@@ -505,7 +576,7 @@ mod tests {
             ChatMessage::assistant_with_calls(vec![call("c1", "t", "{}")]),
             ChatMessage::tool_result("c1", big),
         ];
-        let w = window(&msgs);
+        let w = window(&msgs, 128_000);
         let tool_msg = w.iter().find(|m| m.role == "tool").unwrap();
         assert!(tool_msg.content.as_deref().unwrap().chars().count() <= TOOL_RESULT_CHARS + 2);
     }

@@ -105,36 +105,6 @@ fn term_width_ioctl() -> usize {
 // Width-aware wrapping
 // ---------------------------------------------------------------------------
 
-/// Wrap `text` to `width` display columns (CJK/emoji aware). Fenced
-/// code blocks (``` … ```) pass through unwrapped so code keeps its
-/// shape; everything else wraps with continuation lines indented by
-/// `indent` spaces.
-pub(crate) fn wrap_text(text: &str, width: usize, indent: usize) -> String {
-    let mut out = String::new();
-    let mut in_fence = false;
-    for line in text.lines() {
-        if line.trim_start().starts_with("```") {
-            in_fence = !in_fence;
-            out.push_str(line);
-            out.push('\n');
-            continue;
-        }
-        if in_fence {
-            out.push_str(line);
-            out.push('\n');
-            continue;
-        }
-        for (i, piece) in wrap_line(line, width).into_iter().enumerate() {
-            if i > 0 {
-                out.push_str(&" ".repeat(indent));
-            }
-            out.push_str(&piece);
-            out.push('\n');
-        }
-    }
-    out
-}
-
 /// Wrap one line (no fence semantics). Greedy fill by display width;
 /// break at the last space inside the window when the overflow char
 /// is not itself a space, else hard-break. Unbreakable ASCII runs
@@ -314,25 +284,6 @@ mod tests {
     #[test]
     fn short_line_passes_through() {
         assert_eq!(wrap_line("你好", 10), vec!["你好".to_string()]);
-    }
-
-    #[test]
-    fn fence_content_is_not_wrapped() {
-        let text = "前言\n```rust\nfn very_long_function_name(a: u32, b: u32) -> u32 { a + b }\n```\n后记";
-        let wrapped = wrap_text(text, 10, 2);
-        assert!(wrapped.contains("fn very_long_function_name(a: u32, b: u32) -> u32 { a + b }"));
-        assert!(wrapped.contains("前言"));
-        assert!(wrapped.contains("后记"));
-    }
-
-    #[test]
-    fn wrap_text_indents_continuations() {
-        let wrapped = wrap_text("一二三四五六七八九十", 6, 2);
-        let lines: Vec<&str> = wrapped.lines().collect();
-        assert!(lines.len() >= 2);
-        for l in &lines[1..] {
-            assert!(l.starts_with("  "), "continuation lacks indent: {l}");
-        }
     }
 
     #[test]

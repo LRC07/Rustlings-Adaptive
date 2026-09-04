@@ -12,7 +12,7 @@ use crate::generator;
 use crate::llm::LlmClient;
 use crate::usage::UsageTracker;
 
-use super::{practice, read_line_trimmed};
+use super::{practice, read_line_or_leave};
 
 /// `g` / `/generate` — generate an exercise from a topic. `arg` may
 /// carry the topic directly (`/g E0382`); otherwise it is prompted.
@@ -29,7 +29,7 @@ pub(crate) fn cmd_generate(
         Some(t) => t.to_string(),
         None => {
             println!("  输入主题：概念（如 trait 关联类型）、错误码（如 E0382）或关键词；直接回车返回。");
-            match read_line_trimmed("主题> ") {
+            match read_line_or_leave("主题> ") {
                 None => return,
                 Some(t) if t.is_empty() => return,
                 Some(t) => t,
@@ -37,7 +37,7 @@ pub(crate) fn cmd_generate(
         }
     };
 
-    let totals = tracker.lock().expect("usage lock").all_totals().cost_usd;
+    let totals = tracker.lock().unwrap_or_else(|p| p.into_inner()).all_totals().cost_usd;
     // R6: budget gate before any LLM usage.
     if let Err(e) = crate::usage::check_budget(totals, cfg.budget_usd()) {
         println!();
@@ -51,7 +51,7 @@ pub(crate) fn cmd_generate(
     // no key is configured the generator runs fully offline.
     let tracker2 = tracker.clone();
     let mut call = move |prompt: &str| -> anyhow::Result<crate::llm::LlmReply> {
-        let totals = tracker2.lock().expect("usage lock").all_totals().cost_usd;
+        let totals = tracker2.lock().unwrap_or_else(|p| p.into_inner()).all_totals().cost_usd;
         crate::usage::check_budget(totals, cfg.budget_usd())?;
         let cl = client
             .as_ref()
@@ -63,7 +63,7 @@ pub(crate) fn cmd_generate(
             cfg.prices.input,
             cfg.prices.output,
         );
-        tracker2.lock().expect("usage lock").record(
+        tracker2.lock().unwrap_or_else(|p| p.into_inner()).record(
             &cfg.model,
             reply.usage.prompt_tokens,
             reply.usage.completion_tokens,
@@ -120,7 +120,7 @@ pub(crate) fn cmd_generate(
             }
             println!("    文件 {}（练习名 {}）", out.path.display(), out.name);
             println!();
-            let go = read_line_trimmed("  现在开始做这道题？[Y/n] ").unwrap_or_default();
+            let go = read_line_or_leave("  现在开始做这道题？[Y/n] ").unwrap_or_default();
             let go = go.to_ascii_lowercase();
             if go == "n" || go == "no" {
                 return;

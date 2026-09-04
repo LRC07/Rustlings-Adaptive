@@ -31,6 +31,10 @@ pub struct Session {
     pub id: String,
     pub started_at: DateTime<Utc>,
     pub model: String,
+    /// Short label for the `/sessions` list (first user message),
+    /// derived lazily on save; old files without it load as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub messages: Vec<ChatMessage>,
     /// Where this session is persisted (not serialized).
     #[serde(skip)]
@@ -43,6 +47,7 @@ pub struct SessionInfo {
     pub id: String,
     pub started_at: DateTime<Utc>,
     pub messages: usize,
+    pub title: Option<String>,
 }
 
 impl Session {
@@ -55,6 +60,7 @@ impl Session {
             id,
             started_at: started,
             model: model.to_string(),
+            title: None,
             messages: Vec::new(),
             path,
         }
@@ -76,13 +82,39 @@ impl Session {
     }
 
     /// Persist to the session file (called after every turn; save
-    /// failures degrade to a printed warning but never crash the REPL).
-    pub fn save(&self) -> Result<()> {
+    /// failures degrade to a printed warning but never crash the
+    /// REPL). Also derives the list title on first save.
+    pub fn save(&mut self) -> Result<()> {
+        if self.title.is_none() {
+            self.title = self.messages.iter().find(|m| m.role == "user").and_then(|m| m.content.as_ref())
+                .map(|c| {
+                    let t: String = c.chars().take(30).collect();
+                    let count = c.chars().count();
+                    if count > 30 { format!("{t}…") } else { t }
+                });
+        }
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("创建 {}", parent.display()))?;
         }
         let json = serde_json::to_string_pretty(self).context("会话序列化失败")?;
         fs::write(&self.path, json).with_context(|| format!("写入 {}", self.path.display()))
+    }
+
+    /// Export the full trajectory as readable markdown next to the
+    /// session file (`<id>.md`); returns the written path. Used by
+    /// `/sessions export <n>` (also handy for the assignment's "AI
+    /// conversation history" deliverable).
+    pub fn export_markdown(&self) -> Result<PathBuf> {
+        let path = self.path.with_extension("md");
+        let started = self.started_at.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S");
+        let head = format!(
+            "# 会话轨迹 {}\n\n- 开始：{started}\n- 模型：{}\n- 消息数：{}\n\n```\n",
+            self.id, self.model, self.messages.len()
+        );
+        let body = trajectory_text(&self.messages, 100_000);
+        fs::write(&path, format!("{head}{body}```\n"))
+            .with_context(|| format!("写入 {}", path.display()))?;
+        Ok(path)
     }
 
     /// List saved sessions ordered by file name (= start time).
@@ -99,7 +131,13 @@ impl Session {
             }
             let Ok(text) = fs::read_to_string(&p) else { continue };
             let Ok(s) = serde_json::from_str::<Session>(&text) else { continue };
-            out.push(SessionInfo { path: p, id: s.id, started_at: s.started_at, messages: s.messages.len() });
+            out.push(SessionInfo {
+                path: p,
+                id: s.id,
+                started_at: s.started_at,
+                messages: s.messages.len(),
+                title: s.title,
+            });
         }
         out.sort_by(|a, b| a.id.cmp(&b.id));
         out
@@ -185,10 +223,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rs_sessions_{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("session_test1.json");
-        let s = Session {
+        let mut s = Session {
             id: "session_test1".into(),
             started_at: Utc::now(),
             model: "m".into(),
+            title: None,
             messages: sample_messages(),
             path: path.clone(),
         };
@@ -201,11 +240,58 @@ mod tests {
     }
 
     #[test]
+    fn save_derives_title_from_first_user_message() {
+        let dir = std::env::temp_dir().join(format!("rs_sessions_title_{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("session_title.json");
+        let mut s = Session {
+            id: "session_title".into(),
+            started_at: Utc::now(),
+            model: "m".into(),
+            title: None,
+            messages: sample_messages(),
+            path,
+        };
+        s.save().unwrap();
+        let t = s.title.as_deref().unwrap();
+        assert_eq!(t, "为什么报 E0382？");
+        // Long first messages are truncated with an ellipsis marker.
+        s.messages[1] = ChatMessage::user("长".repeat(50));
+        s.title = None;
+        s.save().unwrap();
+        let t = s.title.as_deref().unwrap();
+        assert!(t.chars().count() == 31 && t.ends_with('…'), "{t}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_writes_markdown_file() {
+        let dir = std::env::temp_dir().join(format!("rs_sessions_export_{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let mut s = Session {
+            id: "session_export".into(),
+            started_at: Utc::now(),
+            model: "m".into(),
+            title: Some("导出".into()),
+            messages: sample_messages(),
+            path: dir.join("session_export.json"),
+        };
+        s.save().unwrap();
+        let md = s.export_markdown().unwrap();
+        let text = fs::read_to_string(&md).unwrap();
+        assert!(text.contains("# 会话轨迹 session_export"), "{text}");
+        assert!(text.contains("工具调用 check_code"), "{text}");
+        assert!(md.extension().and_then(|e| e.to_str()) == Some("md"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn list_finds_saved_sessions_sorted() {
         let dir = std::env::temp_dir().join(format!("rs_sessions_list_{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         for id in ["session_a", "session_b"] {
-            let s = Session { id: id.into(), started_at: Utc::now(), model: "m".into(), messages: vec![], path: dir.join(format!("{id}.json")) };
+            let mut s = Session { id: id.into(), started_at: Utc::now(), model: "m".into(), title: None, messages: vec![], path: dir.join(format!("{id}.json")) };
+            s.title = Some(id.into());
             s.save().unwrap();
         }
         // Note: list() reads the default dir, not the temp one; here we

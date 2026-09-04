@@ -4,7 +4,6 @@
 //!
 //! No screen clearing: the list prints once per entry, outputs scroll.
 
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::exercise::{self, Exercise};
@@ -97,14 +96,17 @@ fn first_pending(exercises: &[Exercise], progress: &[String]) -> Option<usize> {
     exercises.iter().position(|e| !e.is_done(progress))
 }
 
+/// Practice prompts: Ctrl-C cancels the line (loop continues), EOF
+/// leaves the page back to the chat.
 fn read_prompt(prompt: &str) -> Option<String> {
-    print!("{prompt}");
-    io::stdout().flush().ok();
-    let mut s = String::new();
-    if io::stdin().read_line(&mut s).unwrap_or(0) == 0 {
-        return None;
+    match super::read_line(prompt) {
+        super::Line::Text(s) => Some(s),
+        super::Line::Interrupted => {
+            println!("  ^C 已取消本行输入");
+            None
+        }
+        super::Line::Eof => None,
     }
-    Some(s)
 }
 
 fn show_menu(exercises: &[Exercise], progress: &[String]) {
