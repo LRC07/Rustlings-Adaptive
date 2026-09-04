@@ -215,6 +215,7 @@ fn make_caller(deps: &DebriefDeps) -> Option<Box<dyn ReviewCaller + Send>> {
 /// persist it on the index entry, then walk the debrief steps (§4.3).
 /// Returns a follow-up coach message when the debrief decided to hand
 /// back to the conversation (M5.4).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn after_pass(
     deps: &DebriefDeps,
     index: &mut ExerciseIndex,
@@ -223,6 +224,7 @@ pub(crate) fn after_pass(
     ex: &Exercise,
     repo_root: &Path,
     last_fail: Option<&str>,
+    used_hints: bool,
 ) -> Option<String> {
     let Ok(content) = std::fs::read_to_string(&ex.path) else {
         println!("  （无法读取练习文件，跳过评审门）");
@@ -243,10 +245,9 @@ pub(crate) fn after_pass(
     index.set_review_verdict(key, outcome.verdict.key());
 
     // ── Debrief (§4.3) ──
-    let _ = last_fail;
 
     // Step 1: explanation check (understanding quiz).
-    let hit = step1_explanation_check(deps, &input, last_fail);
+    let explanation_hit = step1_explanation_check(deps, &input, last_fail);
 
     // Step 2: better-solution challenge (triggered when not clean).
     let mut outcome = outcome;
@@ -256,11 +257,19 @@ pub(crate) fn after_pass(
         outcome = updated;
         input.user_code = code;
     }
-    let _ = hit; // feeds the follow-up decision (M5.4) and the M6 profile
-    let _ = &outcome; // consumed by the comparison/follow-up steps (M5.4)
 
-    // Step 3/4 hook in here (M5.4).
-    None
+    // Step 3: two-dimensional comparison (machine + LLM).
+    step3_comparison(deps, &input);
+
+    // Step 4: follow-up decision (deterministic) + optional handback.
+    let follow_up = review::decide_follow_up(&review::FollowUpInput {
+        attempts_before,
+        used_hints,
+        explanation_hit,
+        verdict: outcome.verdict,
+        had_violations: outcome.statics.has_constraint_violations(),
+    });
+    step4_follow_up(deps, meta, &outcome, explanation_hit, last_fail, follow_up)
 }
 
 /// Render the gate outcome (静态逐项 → LLM 评审 → probe → 最终判定).
@@ -370,12 +379,16 @@ fn ask(prompt: &str) -> Option<String> {
 
 /// Step 1: understanding quiz (LLM-generated options anchored on the
 /// template's root-cause/misconception seeds; free text judged by the
-/// model). Returns true when the explanation hit or was skipped.
-fn step1_explanation_check(deps: &DebriefDeps, input: &review::ReviewInput, last_fail: Option<&str>) -> bool {
+/// model). Returns Some(hit/miss); None = skipped.
+fn step1_explanation_check(
+    deps: &DebriefDeps,
+    input: &review::ReviewInput,
+    last_fail: Option<&str>,
+) -> Option<bool> {
     let Some(mut caller) = make_caller(deps) else {
         println!();
         println!("  复盘（离线）：跳过理解校核。");
-        return true;
+        return None;
     };
     println!();
     println!("{}", render::cyan("── 复盘 · 理解校核 ──"));
@@ -390,7 +403,7 @@ fn step1_explanation_check(deps: &DebriefDeps, input: &review::ReviewInput, last
         Some(Ok(q)) => q,
         Some(Err(_)) | None => {
             println!("  （未能生成校核题，跳过本步）");
-            return true;
+            return None;
         }
     };
 
@@ -410,10 +423,10 @@ fn step1_explanation_check(deps: &DebriefDeps, input: &review::ReviewInput, last
     println!("  输入数字选择；或直接输入你的理解；回车跳过。");
 
     loop {
-        let Some(ans) = ask("复盘> ") else { return true };
+        let ans = ask("复盘> ")?;
         let t = ans.trim();
         if t.is_empty() {
-            return true;
+            return None;
         }
         if let Ok(n) = t.parse::<usize>()
             && n >= 1
@@ -422,12 +435,12 @@ fn step1_explanation_check(deps: &DebriefDeps, input: &review::ReviewInput, last
             let picked = &options[n - 1];
             if picked.correct {
                 println!("  {} 解释命中：{}", render::green("✓"), picked.explain);
-                return true;
+                return Some(true);
             }
-            let Some(correct) = options.iter().find(|o| o.correct) else { return true };
+            let correct = options.iter().find(|o| o.correct)?;
             println!("  {} 未命中。正确理解是：{}", render::red("✗"), correct.text);
             println!("    {}", correct.explain);
-            return false;
+            return Some(false);
         }
         // Free text → LLM judging (§4.3).
         let Some(mut judge) = make_caller(deps) else {
@@ -437,7 +450,7 @@ fn step1_explanation_check(deps: &DebriefDeps, input: &review::ReviewInput, last
         let answer = t.to_string();
         let quiz2 = quiz.clone();
         let judged = run_with_spinner("复盘：判定你的回答…", move |progress| {
-            let _ = progress;
+            progress("判定回答…");
             review::judge_free_input(&mut *judge, &quiz2, &answer)
         });
         match judged {
@@ -450,12 +463,12 @@ fn step1_explanation_check(deps: &DebriefDeps, input: &review::ReviewInput, last
                         println!("    正确理解：{expl}");
                     }
                 }
-                return j.hit;
+                return Some(j.hit);
             }
             Some(Err(e)) => {
                 println!("  （判定失败：{e:#}；可输入数字选项重试）");
             }
-            None => return true, // interrupted
+            None => return None, // interrupted
         }
     }
 }
@@ -543,6 +556,180 @@ fn step2_challenge(
             }
             other => println!("  未知输入: {other}"),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Debrief Step 3: comparison table (machine + LLM, §4.3 定稿)
+// ---------------------------------------------------------------------------
+
+/// Step 3: measure both sides with the real toolchain, then ask the
+/// model for the four judged dimensions. Offline → machine-only table.
+fn step3_comparison(deps: &DebriefDeps, input: &review::ReviewInput) {
+    println!();
+    println!("{}", render::cyan("── 复盘 · 对比总结 ──"));
+
+    let machine = {
+        let input2 = input.clone();
+        run_with_spinner("对比：本地实测（编译/测试/clippy）…", move |progress| {
+            progress("本地实测…");
+            review::machine_metrics(
+                &input2.user_code,
+                input2.reference.as_deref(),
+                &input2.constraint_specs,
+            )
+        })
+    };
+    let Some(machine) = machine else { return };
+
+    let llm_cmp: Option<review::LlmComparison> = make_caller(deps).and_then(|mut caller| {
+        let input2 = input.clone();
+        let m = machine.clone();
+        run_with_spinner("对比：LLM 四维评审…", move |progress| {
+            progress("四维评审…");
+            review::llm_comparison(&mut *caller, &input2, &m)
+        })
+        .and_then(|r| r.ok())
+    });
+
+    render_comparison(&machine, llm_cmp.as_ref(), input.reference.is_some());
+}
+
+fn render_comparison(m: &review::MachineComparison, llm: Option<&review::LlmComparison>, has_ref: bool) {
+    let ref_cell = |v: String| if has_ref { v } else { "—".to_string() };
+    let ok = |b: bool| if b { render::green("✓").to_string() } else { render::red("✗").to_string() };
+    let dim_w = 10usize;
+
+    let row = |dim: &str, user: String, reference: String| {
+        println!(
+            "    {}  {}  {}",
+            render::pad_display(dim, dim_w),
+            render::pad_display(&user, 26),
+            render::pad_display(&reference, 26)
+        );
+    };
+
+    println!("    {}  {}  {}", render::pad_display("维度", dim_w), render::pad_display("用户解", 26), render::pad_display("参考解", 26));
+    row("有效行数", m.user.effective_lines.to_string(), ref_cell(m.reference.as_ref().map(|r| r.effective_lines.to_string()).unwrap_or_default()));
+    let kinds = if m.user_clippy_kinds.is_empty() {
+        "0 条".to_string()
+    } else {
+        let list: Vec<String> = m
+            .user_clippy_kinds
+            .iter()
+            .take(3)
+            .map(|(k, n)| format!("{} ×{}", k.trim_start_matches("clippy::"), n))
+            .collect();
+        format!("{}（{}）", m.user.clippy_count, list.join("、"))
+    };
+    row("clippy", kinds, ref_cell(m.reference.as_ref().map(|r| format!("{} 条", r.clippy_count)).unwrap_or_default()));
+    row("编译耗时", format!("{}ms", m.user.compile_ms), ref_cell(m.reference.as_ref().map(|r| format!("{}ms", r.compile_ms)).unwrap_or_default()));
+    row("测试耗时", format!("{}ms", m.user.test_ms), ref_cell(m.reference.as_ref().map(|r| format!("{}ms", r.test_ms)).unwrap_or_default()));
+    row("约束满足", ok(m.user.constraints_ok), ref_cell(m.reference.as_ref().map(|r| ok(r.constraints_ok)).unwrap_or_default()));
+
+    match llm {
+        Some(c) if !c.rows.is_empty() => {
+            for r in &c.rows {
+                let u = format!(
+                    "{}/5 {}",
+                    r.user_score.map(|s| s.to_string()).unwrap_or_else(|| "?".into()),
+                    r.user_note
+                );
+                let rf = if has_ref {
+                    format!(
+                        "{}/5 {}",
+                        r.ref_score.map(|s| s.to_string()).unwrap_or_else(|| "?".into()),
+                        r.ref_note
+                    )
+                } else {
+                    "—".to_string()
+                };
+                row(dim_cn(&r.dim), u, rf);
+            }
+            if !c.takeaway.is_empty() {
+                println!("    点评：{}", c.takeaway);
+            }
+        }
+        _ => println!("    （LLM 维度评审不可用——未配置 Key 或输出解析失败）"),
+    }
+}
+
+fn dim_cn(dim: &str) -> &str {
+    match dim {
+        "idiom" => "惯用性",
+        "readability" => "可读性",
+        "maintenance" => "可维护性",
+        "design" => "设计习惯",
+        other => other,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Debrief Step 4: follow-up decision + handback (§4.3)
+// ---------------------------------------------------------------------------
+
+/// Step 4: deterministic follow-up decision, then offer to hand the
+/// result back to the conversation (the coach then arranges the next
+/// exercise through the history-aware generator). Some(msg) = handback.
+fn step4_follow_up(
+    deps: &DebriefDeps,
+    meta: &ExerciseMeta,
+    outcome: &review::GateOutcome,
+    explanation_hit: Option<bool>,
+    last_fail: Option<&str>,
+    follow_up: review::FollowUp,
+) -> Option<String> {
+    println!();
+    println!("{}", render::cyan("── 复盘 · 下一步 ──"));
+    println!("  {}", follow_up.label_cn());
+    println!("  [Enter] 回到对话让教练安排下一题   [n] 留在做题页   [q] 退出做题");
+
+    let ans = match read_line("复盘> ") {
+        Line::Text(s) => s.trim().to_ascii_lowercase(),
+        Line::Interrupted | Line::Eof => "n".to_string(),
+    };
+    match ans.as_str() {
+        "" | "y" | "yes" => {
+            let verdict_cn = outcome.verdict.label_cn();
+            let check = match explanation_hit {
+                Some(true) => "解释校核：命中",
+                Some(false) => "解释校核：未命中（已给出正确理解）",
+                None => "解释校核：跳过",
+            };
+            let hint_note = if deps.client.is_some() {
+                String::new()
+            } else {
+                "（离线复盘：无 LLM 评审）".to_string()
+            };
+            let fail_note = last_fail
+                .map(|c| format!("\n我之前失败时的报错：{c}"))
+                .unwrap_or_default();
+            let ask = match &follow_up {
+                review::FollowUp::NextConcept => {
+                    "请结合我的错误画像，推荐并生成下一个概念的新练习（调用 generate_exercise）。".to_string()
+                }
+                review::FollowUp::Variant { extra_constraint: true } => format!(
+                    "请为概念「{}」生成一道变式练习，并附加一个更严的约束（调用 generate_exercise，\
+                     这是系统根据评审判定给出的建议）。",
+                    meta.concepts.join("、")
+                ),
+                review::FollowUp::Variant { extra_constraint: false } => format!(
+                    "请为概念「{}」生成一道变式练习（同概念换场景/换值，调用 generate_exercise）。",
+                    meta.concepts.join("、")
+                ),
+                review::FollowUp::EasierVariant => format!(
+                    "请为概念「{}」生成一道更简单的变式练习（调用 generate_exercise），\
+                     并帮我回看之前的报错理解薄弱点。",
+                    meta.concepts.join("、")
+                ),
+            };
+            Some(format!(
+                "我刚完成练习《{}》的复盘。\n· 评审判定：{verdict_cn}\n· {check}{hint_note}{fail_note}\n· 系统建议：{}\n\n{ask}",
+                meta.title,
+                follow_up.label_cn(),
+            ))
+        }
+        _ => None,
     }
 }
 

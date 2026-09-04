@@ -21,7 +21,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::agent::{self, session::Session, AgentEnv};
 use crate::config::ModelConfig;
-use crate::llm::LlmClient;
+use crate::llm::{ChatMessage, LlmClient};
 use crate::usage::UsageTracker;
 
 use super::render::{self, chat_header, chat_tail, clear_all, clear_viewport};
@@ -436,6 +436,56 @@ fn print_help() {
 // Agent turn (worker thread + spinner + interrupt, R4)
 // ---------------------------------------------------------------------------
 
+/// Detect unresolved code threads (M5, retro §6.3): a user message with
+/// a fenced code block, followed by a coach reply proposing changes
+/// (also fenced), and no later user code paste that could have carried
+/// the verification. Injected as a per-turn note so the coach asks
+/// about pending verification instead of silently dropping it.
+fn open_loop_note(messages: &[ChatMessage]) -> Option<String> {
+    let has_fence = |m: &ChatMessage| {
+        m.role == "user" && m.content.as_deref().map(|c| c.contains("```")).unwrap_or(false)
+    };
+    let user_code_turns: Vec<usize> =
+        messages.iter().enumerate().filter(|(_, m)| has_fence(m)).map(|(i, _)| i).collect();
+
+    let mut parts: Vec<String> = Vec::new();
+    for &ui in user_code_turns.iter().rev().take(2).rev() {
+        let rest = &messages[ui + 1..];
+        let coach_rewrite = rest
+            .iter()
+            .take_while(|m| m.role != "user")
+            .any(|m| m.role == "assistant" && m.content.as_deref().map(|c| c.contains("```")).unwrap_or(false));
+        if !coach_rewrite {
+            continue;
+        }
+        // Resolved when the user later pasted new code (likely the
+        // rewritten version brought back for verification).
+        let resolved = rest.iter().any(&has_fence);
+        if resolved {
+            continue;
+        }
+        let snippet: String = messages[ui]
+            .content
+            .as_deref()
+            .and_then(|c| c.split("```").nth(1))
+            .and_then(|block| block.lines().find(|l| !l.trim().starts_with("```")))
+            .map(|l| l.trim().chars().take(40).collect())
+            .unwrap_or_default();
+        parts.push(format!("turn {ui}: “{snippet}”"));
+    }
+
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "[Open code threads] {} \
+         — you proposed code changes for these pastes but they were never re-verified. \
+         Before moving on to other topics, proactively offer to verify them \
+         (suggest running the change through check_code); do not drop them silently.",
+        parts.join("; ")
+    ))
+}
+
 fn agent_turn(
     session: &mut Session,
     input: &str,
@@ -457,6 +507,8 @@ fn agent_turn(
     // M4.5a state back-flow: append the practice-state summary to the
     // system prompt for this turn (recomputed each turn).
     let practice_note = practice::PracticeCtx::load_index(practice_ctx).practice_note(&session.exercises);
+    // M5 (retro §6.3): pending code threads the coach should follow up.
+    let open_loop_note = open_loop_note(&session.messages);
     let env = AgentEnv {
         caller: Arc::new(cl.clone()),
         tracker: tracker.clone(),
@@ -464,6 +516,7 @@ fn agent_turn(
         root: PathBuf::from("."),
         session_id: Some(session.id.clone()),
         practice_note,
+        open_loop_note,
     };
     let history = session.messages.clone();
     let input = input.to_string();

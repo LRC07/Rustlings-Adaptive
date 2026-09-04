@@ -146,6 +146,10 @@ pub struct AgentEnv {
     /// Practice-state summary (M4.5a state back-flow), appended to the
     /// system prompt for every turn. Computed per turn by the CLI.
     pub practice_note: Option<String>,
+    /// Open code threads (M5, retro §6.3): recently pasted code the
+    /// coach proposed changes for but which were never re-verified.
+    /// Computed per turn by the CLI; drives the follow-up principle.
+    pub open_loop_note: Option<String>,
 }
 
 /// Offer to jump into the practice sub-mode after an exercise was
@@ -198,12 +202,17 @@ pub fn run_turn(
 ) -> Result<TurnOutcome> {
     let mut msgs: Vec<ChatMessage> = history.to_vec();
     // The system prompt is rebuilt from the canonical constant on every
-    // turn, so the per-turn practice note (M4.5a state back-flow) never
-    // accumulates across a persisted history.
-    let sys = match &env.practice_note {
-        Some(note) => format!("{SYSTEM_PROMPT}\n\n{note}"),
-        None => SYSTEM_PROMPT.to_string(),
-    };
+    // turn, so the per-turn notes (practice state, M4.5a; open code
+    // threads, M5) never accumulate across a persisted history.
+    let mut sys = SYSTEM_PROMPT.to_string();
+    if let Some(note) = &env.practice_note {
+        sys.push_str("\n\n");
+        sys.push_str(note);
+    }
+    if let Some(note) = &env.open_loop_note {
+        sys.push_str("\n\n");
+        sys.push_str(note);
+    }
     if msgs.first().map(|m| m.role.as_str()) == Some("system") {
         msgs[0] = ChatMessage::system(sys);
     } else {
@@ -514,6 +523,7 @@ mod tests {
             root: PathBuf::from("."),
             session_id: None,
             practice_note: None,
+            open_loop_note: None,
         }
     }
 

@@ -501,6 +501,7 @@ mod tests {
             root: root.to_path_buf(),
             session_id: Some("session_test".to_string()),
             practice_note: None,
+            open_loop_note: None,
         }
     }
 

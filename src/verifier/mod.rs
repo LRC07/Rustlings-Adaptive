@@ -368,6 +368,16 @@ fn timeout_diag(what: &str) -> Diagnostic {
 /// success, run the test binary (both under hard timeouts). Files are
 /// written into `workdir` (created by the caller).
 pub fn run_test_flow(source: &str, workdir: &Path, name: &str) -> Result<CompileRun> {
+    run_test_flow_timed(source, workdir, name).map(|(run, _, _)| run)
+}
+
+/// Same flow with wall-clock timings (M5 debrief comparison table):
+/// returns `(run, compile_ms, test_ms)`.
+pub fn run_test_flow_timed(
+    source: &str,
+    workdir: &Path,
+    name: &str,
+) -> Result<(CompileRun, u64, u64)> {
     run_test_flow_with_timeouts(source, workdir, name, RUSTC_TIMEOUT, TEST_TIMEOUT)
 }
 
@@ -377,7 +387,7 @@ fn run_test_flow_with_timeouts(
     name: &str,
     rustc_timeout: Duration,
     test_timeout: Duration,
-) -> Result<CompileRun> {
+) -> Result<(CompileRun, u64, u64)> {
     let src_path: PathBuf = workdir.join(format!("{name}.rs"));
     let bin_path = workdir.join(format!("{name}.bin"));
     fs::write(&src_path, source).with_context(|| format!("写入 {} 失败", src_path.display()))?;
@@ -387,31 +397,34 @@ fn run_test_flow_with_timeouts(
         .arg(&src_path)
         .arg("-o")
         .arg(&bin_path);
+    let t0 = std::time::Instant::now();
     let out = match run_with_timeout(cmd, rustc_timeout)? {
         RunOutcome::Done(o) => o,
         RunOutcome::TimedOut => {
             let _ = fs::remove_file(&bin_path);
-            return Ok(CompileRun {
-                compiled: false,
-                diagnostics: vec![timeout_diag(&format!(
-                    "编译超过 {}s",
-                    rustc_timeout.as_secs()
-                ))],
-                test: None,
-            });
+            return Ok((
+                CompileRun {
+                    compiled: false,
+                    diagnostics: vec![timeout_diag(&format!(
+                        "编译超过 {}s",
+                        rustc_timeout.as_secs()
+                    ))],
+                    test: None,
+                },
+                0,
+                0,
+            ));
         }
     };
+    let compile_ms = t0.elapsed().as_millis() as u64;
     let stderr = String::from_utf8_lossy(&out.stderr);
     let diagnostics = parse_diagnostics(&stderr);
     if !out.status.success() {
         let _ = fs::remove_file(&bin_path);
-        return Ok(CompileRun {
-            compiled: false,
-            diagnostics,
-            test: None,
-        });
+        return Ok((CompileRun { compiled: false, diagnostics, test: None }, compile_ms, 0));
     }
 
+    let t1 = std::time::Instant::now();
     let test = match run_with_timeout(Command::new(&bin_path), test_timeout)? {
         RunOutcome::Done(run) => {
             let stdout = String::from_utf8_lossy(&run.stdout);
@@ -432,12 +445,9 @@ fn run_test_flow_with_timeouts(
             }],
         },
     };
+    let test_ms = t1.elapsed().as_millis() as u64;
     let _ = fs::remove_file(&bin_path);
-    Ok(CompileRun {
-        compiled: true,
-        diagnostics,
-        test: Some(test),
-    })
+    Ok((CompileRun { compiled: true, diagnostics, test: Some(test) }, compile_ms, test_ms))
 }
 
 /// Triple verification of a template (with todo) against a reference
@@ -544,7 +554,7 @@ mod tests {
         // M4.5c hardening: a `loop {}` test must be killed, not hang.
         let wd = temp_dir("timeout");
         let src = "#[test]\nfn spins() { loop {} }\n";
-        let run = run_test_flow_with_timeouts(
+        let (run, _, _) = run_test_flow_with_timeouts(
             src,
             &wd,
             "spin",

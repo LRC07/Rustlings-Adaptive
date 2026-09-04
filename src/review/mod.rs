@@ -631,6 +631,246 @@ pub fn judge_free_input(
 }
 
 // ---------------------------------------------------------------------------
+// Debrief Step 3: two-dimensional comparison (machine + LLM, §4.3)
+// ---------------------------------------------------------------------------
+
+/// Machine-measured side of the comparison (deterministic, no LLM).
+#[derive(Debug, Clone, Default)]
+pub struct SideMetrics {
+    pub effective_lines: usize,
+    pub clippy_count: usize,
+    pub compile_ms: u64,
+    pub test_ms: u64,
+    /// Sanity signal of the measurement itself (asserted in tests; the
+    /// comparison table omits it because both sides passed to get here).
+    #[allow(dead_code)]
+    pub passes: bool,
+    /// Declared abstract constraints satisfied (no-clone etc.); true
+    /// when the exercise declares none.
+    pub constraints_ok: bool,
+}
+
+/// Full machine layer: user solution vs reference.
+#[derive(Debug, Clone, Default)]
+pub struct MachineComparison {
+    pub user: SideMetrics,
+    pub reference: Option<SideMetrics>,
+    /// Clippy kinds of the user solution ("clippy::x" → count).
+    pub user_clippy_kinds: Vec<(String, usize)>,
+}
+
+/// Measure both sides with the real toolchain (rustc --test + clippy).
+/// Reference side is None when no reference is persisted.
+pub fn machine_metrics(
+    user_code: &str,
+    reference: Option<&str>,
+    constraint_specs: &[String],
+) -> MachineComparison {
+    let parsed: Vec<Constraint> =
+        constraint_specs.iter().filter_map(|s| Constraint::from_spec(s)).collect();
+    let measure = |code: &str, tag: &str| -> (SideMetrics, Vec<ClippyLint>) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let workdir = std::env::temp_dir().join(format!("rustlings_cmp_{tag}_{nanos}"));
+        let _ = std::fs::create_dir_all(&workdir);
+        let timed = verifier::run_test_flow_timed(code, &workdir, tag);
+        let _ = std::fs::remove_dir_all(&workdir);
+        let (compile_ms, test_ms, passes) = match &timed {
+            Ok((run, c, t)) => (*c, *t, run.test.as_ref().map(|t| t.ok).unwrap_or(false)),
+            Err(_) => (0, 0, false),
+        };
+        let lints = run_clippy(code).unwrap_or_default();
+        let stripped = constraints::strip_line_comments(code);
+        let metrics = SideMetrics {
+            effective_lines: stripped.lines().filter(|l| !l.trim().is_empty()).count(),
+            clippy_count: lints.len(),
+            compile_ms,
+            test_ms,
+            passes,
+            constraints_ok: constraints::check(code, &parsed).is_empty(),
+        };
+        (metrics, lints)
+    };
+
+    let (user, user_lints) = measure(user_code, "user");
+    let mut kinds: std::collections::BTreeMap<String, usize> = Default::default();
+    for l in &user_lints {
+        *kinds.entry(l.lint.clone()).or_default() += 1;
+    }
+    let reference = reference.map(|r| measure(r, "ref").0);
+    MachineComparison { user, reference, user_clippy_kinds: kinds.into_iter().collect() }
+}
+
+/// One LLM-judged dimension row of the comparison table (§4.3 LLM
+/// 评审维度: 惯用性/可读性/可维护性/设计习惯，1–5 分 + 短评/改法).
+#[derive(Debug, Clone)]
+pub struct CompareRow {
+    pub dim: String,
+    pub user_score: Option<u8>,
+    pub ref_score: Option<u8>,
+    pub user_note: String,
+    pub ref_note: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LlmComparison {
+    pub rows: Vec<CompareRow>,
+    pub takeaway: String,
+}
+
+pub fn parse_comparison(text: &str) -> Option<LlmComparison> {
+    let json = crate::llm::extract_json(text)?;
+    let v: Value = serde_json::from_str(json).ok()?;
+    let rows = v
+        .get("rows")?
+        .as_array()?
+        .iter()
+        .filter_map(|r| {
+            Some(CompareRow {
+                dim: r.get("dim")?.as_str()?.trim().to_string(),
+                user_score: r.get("user_score").and_then(Value::as_u64).map(|n| n.min(5) as u8),
+                ref_score: r.get("ref_score").and_then(Value::as_u64).map(|n| n.min(5) as u8),
+                user_note: r.get("user_note").and_then(Value::as_str).unwrap_or_default().to_string(),
+                ref_note: r.get("ref_note").and_then(Value::as_str).unwrap_or_default().to_string(),
+            })
+        })
+        .filter(|r| !r.dim.is_empty())
+        .collect();
+    let takeaway = v
+        .get("takeaway")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    Some(LlmComparison { rows, takeaway })
+}
+
+const CMP_MAX_TOKENS: u32 = 1200;
+
+const CMP_SYSTEM: &str = "\
+你是 Rust 教练的对比评审器。学习者刚通过练习，现在把学习者的解与参考解放在一起评四个维度：\
+idiom=惯用性（是否用了语言的标准手法）、readability=可读性（命名与控制流清晰度）、\
+maintenance=可维护性与扩展成本（加一种类型要改几处）、design=设计习惯（权限最小化、\
+无多余 clone、边界与 panic 风险）。每维给 1-5 分（5 最好），并给「短评 + 具体改法」——\
+机器测不出来的判断才值得你给，不要复述已知数据；分差要能被 note 里的理由支撑。\
+严格只输出 JSON（不要多余文字、不要代码围栏）：
+{\"rows\":[{\"dim\":\"idiom|readability|maintenance|design\",\"user_score\":1,\"ref_score\":5,\"user_note\":\"学习者的短评与具体改法（中文）\",\"ref_note\":\"参考解短评（中文）\"}],\"takeaway\":\"一句话点评取舍：什么时候学习者的写法也可以接受\"}
+评分只评代码本身；题目约束（如禁止 clone）下的写法不算缺点。";
+
+fn cmp_user_prompt(input: &ReviewInput, machine: &MachineComparison) -> String {
+    let mut p = String::new();
+    p.push_str(&format!("题目：《{}》\n", input.title));
+    if !input.concepts.is_empty() {
+        p.push_str(&format!("概念：{}\n", input.concepts.join("、")));
+    }
+    p.push_str(&format!("\n【题面】\n{}\n", input.body.trim()));
+    p.push_str("\n【学习者的解】\n```rust\n");
+    p.push_str(input.user_code.trim());
+    p.push_str("\n```\n");
+    if let Some(r) = &input.reference {
+        p.push_str("\n【参考解】\n```rust\n");
+        p.push_str(r.trim());
+        p.push_str("\n```\n");
+    }
+    if !input.anti_patterns.is_empty() {
+        p.push_str("\n【本题预期迫使学习者避开的写法】\n");
+        for a in &input.anti_patterns {
+            p.push_str(&format!("- {a}\n"));
+        }
+    }
+    p.push_str("\n【机器实测（仅供参考，评分要自己给理由）】\n");
+    p.push_str(&format!(
+        "- 学习者解：有效行数 {} ｜ clippy {} 条 ｜ 编译 {}ms ｜ 测试 {}ms\n",
+        machine.user.effective_lines, machine.user.clippy_count, machine.user.compile_ms, machine.user.test_ms
+    ));
+    if let Some(r) = &machine.reference {
+        p.push_str(&format!(
+            "- 参考解：有效行数 {} ｜ clippy {} 条 ｜ 编译 {}ms ｜ 测试 {}ms\n",
+            r.effective_lines, r.clippy_count, r.compile_ms, r.test_ms
+        ));
+    }
+    p.push_str("\n请输出对比 JSON。");
+    p
+}
+
+/// Ask the model for the four-dimension comparison.
+pub fn llm_comparison(
+    call: &mut dyn ReviewCaller,
+    input: &ReviewInput,
+    machine: &MachineComparison,
+) -> Result<LlmComparison> {
+    let reply = call.call("debrief", CMP_SYSTEM, &cmp_user_prompt(input, machine), CMP_MAX_TOKENS)?;
+    if reply.finish_reason.as_deref() == Some("length") {
+        bail!("对比评审输出被截断");
+    }
+    parse_comparison(&reply.content).ok_or_else(|| anyhow!("对比 JSON 无法解析"))
+}
+
+// ---------------------------------------------------------------------------
+// Debrief Step 4: follow-up decision (§4.3 decide_follow_up)
+// ---------------------------------------------------------------------------
+
+/// Inputs of the follow-up decision (all observed, no LLM).
+#[derive(Debug, Clone)]
+pub struct FollowUpInput {
+    /// Attempts before the passing run (failures this solve).
+    pub attempts_before: u32,
+    /// Any static hint was revealed during solving.
+    pub used_hints: bool,
+    /// Explanation check result; None = skipped.
+    pub explanation_hit: Option<bool>,
+    /// Final gate verdict.
+    pub verdict: Verdict,
+    /// The user's solution violated declared constraints.
+    pub had_violations: bool,
+}
+
+/// What to do after the debrief (§4.3):
+/// - 一次通过 + 解释命中 + clean → NextConcept
+/// - 通过但解释 miss 或用了提示 → Variant（同概念换槽位变式，M4.10 机制）
+/// - 通过但约束未满足 / suggestions / 存疑 → Variant + 附加约束
+/// - ≥3 次失败 → 降难度 Variant + 引导看旧错
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FollowUp {
+    NextConcept,
+    Variant { extra_constraint: bool },
+    EasierVariant,
+}
+
+pub fn decide_follow_up(i: &FollowUpInput) -> FollowUp {
+    if i.attempts_before >= 3 {
+        return FollowUp::EasierVariant;
+    }
+    if i.had_violations || i.verdict != Verdict::Clean {
+        return FollowUp::Variant { extra_constraint: true };
+    }
+    if i.explanation_hit == Some(false) || i.used_hints {
+        return FollowUp::Variant { extra_constraint: false };
+    }
+    FollowUp::NextConcept
+}
+
+impl FollowUp {
+    /// Human decision line (中文) for the debrief footer.
+    pub fn label_cn(&self) -> String {
+        match self {
+            FollowUp::NextConcept => "状态很好：建议进入下一个概念".to_string(),
+            FollowUp::Variant { extra_constraint: false } => {
+                "建议来一道同概念的变式题（换槽位/换场景）巩固".to_string()
+            }
+            FollowUp::Variant { extra_constraint: true } => {
+                "建议变式 + 附加约束（把地道的写法练成本能）".to_string()
+            }
+            FollowUp::EasierVariant => {
+                "失败次数较多：建议来一道降难度的变式，并回看之前的报错".to_string()
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Probe test (§4.2 suspicious path)
 // ---------------------------------------------------------------------------
 
@@ -917,6 +1157,71 @@ mod tests {
         assert!(p.contains("E0382") && p.contains("正确根因素材") && p.contains("常见误解素材"));
         let p2 = quiz_user_prompt(&input, None);
         assert!(p2.contains("一次通过"));
+    }
+
+    #[test]
+    fn parse_comparison_rows_and_takeaway() {
+        let text = r#"{"rows":[
+            {"dim":"idiom","user_score":3,"ref_score":5,"user_note":"手写循环","ref_note":"迭代器链"},
+            {"dim":"readability","user_score":4,"ref_score":4,"user_note":"","ref_note":"清晰"}
+        ],"takeaway":"学习者写法在小规模下也可接受"}"#;
+        let c = parse_comparison(text).unwrap();
+        assert_eq!(c.rows.len(), 2);
+        assert_eq!(c.rows[0].user_score, Some(3));
+        assert_eq!(c.takeaway, "学习者写法在小规模下也可接受");
+        // Score above 5 clamped.
+        let c2 = parse_comparison(r#"{"rows":[{"dim":"idiom","user_score":9,"ref_score":5,"user_note":"n","ref_note":"r"}],"takeaway":""}"#).unwrap();
+        assert_eq!(c2.rows[0].user_score, Some(5));
+        assert!(parse_comparison("garbage").is_none());
+    }
+
+    #[test]
+    fn machine_metrics_measures_both_sides() {
+        let user = "fn f(v: &[u32]) -> u32 {\n    let mut s = 0u32;\n    for x in v {\n        s += x;\n    }\n    s\n}\n\n#[cfg(test)]\nmod t {\n    #[test]\n    fn it() {\n        assert_eq!(super::f(&[1, 2, 3]), 6);\n    }\n}\n";
+        let reference = "fn f(v: &[u32]) -> u32 {\n    v.iter().sum()\n}\n\n#[cfg(test)]\nmod t {\n    #[test]\n    fn it() {\n        assert_eq!(super::f(&[1, 2, 3]), 6);\n    }\n}\n";
+        let m = machine_metrics(user, Some(reference), &["iterator-only".to_string()]);
+        assert!(m.user.passes, "user side must pass its tests");
+        assert!(m.reference.as_ref().map(|r| r.passes).unwrap_or(false));
+        assert!(m.user.effective_lines > m.reference.as_ref().unwrap().effective_lines);
+        assert!(!m.user.constraints_ok, "for-loop violates iterator-only");
+        assert!(m.reference.as_ref().unwrap().constraints_ok);
+        assert!(m.user.compile_ms > 0);
+    }
+
+    #[test]
+    fn decide_follow_up_covers_all_branches() {
+        let base = FollowUpInput {
+            attempts_before: 0,
+            used_hints: false,
+            explanation_hit: Some(true),
+            verdict: Verdict::Clean,
+            had_violations: false,
+        };
+        assert_eq!(decide_follow_up(&base), FollowUp::NextConcept);
+
+        // Miss on the explanation → plain variant.
+        let miss = FollowUpInput { explanation_hit: Some(false), ..base.clone() };
+        assert_eq!(decide_follow_up(&miss), FollowUp::Variant { extra_constraint: false });
+
+        // Hints used → plain variant.
+        let hints = FollowUpInput { used_hints: true, ..base.clone() };
+        assert_eq!(decide_follow_up(&hints), FollowUp::Variant { extra_constraint: false });
+
+        // Suggestions / violations / suspicious → variant + constraint.
+        let sugg = FollowUpInput { verdict: Verdict::Suggestions, ..base.clone() };
+        assert_eq!(decide_follow_up(&sugg), FollowUp::Variant { extra_constraint: true });
+        let viol = FollowUpInput { had_violations: true, ..base.clone() };
+        assert_eq!(decide_follow_up(&viol), FollowUp::Variant { extra_constraint: true });
+        let sus = FollowUpInput { verdict: Verdict::Suspicious, ..base.clone() };
+        assert_eq!(decide_follow_up(&sus), FollowUp::Variant { extra_constraint: true });
+
+        // ≥3 failures wins over everything.
+        let hard = FollowUpInput { attempts_before: 3, ..sugg };
+        assert_eq!(decide_follow_up(&hard), FollowUp::EasierVariant);
+
+        // Skipped explanation (None) does not count as a miss.
+        let skipped = FollowUpInput { explanation_hit: None, ..base };
+        assert_eq!(decide_follow_up(&skipped), FollowUp::NextConcept);
     }
 
     #[test]

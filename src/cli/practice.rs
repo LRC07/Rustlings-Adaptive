@@ -473,8 +473,16 @@ fn run_exercise(
                 if !was_passed_before
                     && let (Some(deps), Some(m)) = (debrief, meta.as_ref())
                     && !matches!(m.source, crate::exercise::index::Source::Seed)
-                    && let Some(msg) =
-                        debrief::after_pass(deps, index, &key, m, &item.ex, &ctx.repo_root, last_fail.as_deref())
+                    && let Some(msg) = debrief::after_pass(
+                        deps,
+                        index,
+                        &key,
+                        m,
+                        &item.ex,
+                        &ctx.repo_root,
+                        last_fail.as_deref(),
+                        hint_idx > 0,
+                    )
                 {
                     return Some(msg);
                 }
