@@ -54,10 +54,18 @@ impl Spinner {
 fn render(stop: Arc<AtomicBool>, status: StatusSlot) {
     let start = Instant::now();
     let mut i = 0;
+    let mut first = true;
     while !stop.load(Ordering::SeqCst) && !agent::is_interrupted() {
         let secs = start.elapsed().as_secs();
         let text = status.lock().map(|s| s.clone()).unwrap_or_default();
-        print!("\r  {} {text} {secs:>3}s", FRAMES[i % FRAMES.len()]);
+        // First frame moves to a fresh line so the spinner never eats
+        // the just-echoed input line ("你> …"); ESC[0K wipes the rest
+        // of the line so a shorter status leaves no residue.
+        if first {
+            println!();
+            first = false;
+        }
+        print!("\r  {} {text} {secs:>3}s\x1B[0K", FRAMES[i % FRAMES.len()]);
         let _ = std::io::stdout().flush();
         i += 1;
         std::thread::sleep(TICK);
