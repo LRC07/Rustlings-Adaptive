@@ -81,6 +81,28 @@ impl UiConfig {
     }
 }
 
+/// A named switchable model profile (M4.6): the `[[models]]` array in
+/// config.toml. `/model <name>` applies one onto the active config and
+/// rebuilds the client — the fast way to hop between endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModelProfile {
+    /// Switch target: `/model fast`.
+    pub name: String,
+    #[serde(default = "default_endpoint")]
+    pub endpoint: String,
+    /// Empty → the active config's key is kept (shared-key setups).
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default = "default_model")]
+    pub model: String,
+    /// Empty → the active timeout is kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_timeout_secs: Option<u64>,
+    /// Empty → the active [prices] is kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prices: Option<Prices>,
+}
+
 /// Model configuration — R3: endpoint / key / model / context length /
 /// thinking mode / prices / budget. `think_mode` and `context_len` are
 /// stored now and consumed by later milestones.
@@ -111,6 +133,10 @@ pub struct ModelConfig {
     /// it). Missing in old configs → default 240.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_timeout_secs: Option<u64>,
+    /// Named model profiles (M4.6): `/model <name>` switches among
+    /// them. Missing in old configs → empty list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<ModelProfile>,
     #[serde(skip, default)]
     pub key_source: KeySource,
 }
@@ -128,6 +154,7 @@ impl Default for ModelConfig {
             editor: None,
             ui: UiConfig::default(),
             llm_timeout_secs: None,
+            models: Vec::new(),
             key_source: KeySource::None,
         }
     }
@@ -197,6 +224,38 @@ impl ModelConfig {
 
     pub fn budget_usd(&self) -> Option<f64> {
         self.budget.as_ref().map(|b| b.usd)
+    }
+
+    /// Switch the active config onto profile `name` (M4.6): endpoint /
+    /// model / timeout are always applied; an empty profile api_key
+    /// keeps the current key; missing prices keep the current ones.
+    pub fn apply_profile(&mut self, name: &str) -> Result<()> {
+        let p = self
+            .models
+            .iter()
+            .find(|m| m.name == name)
+            .with_context(|| format!("没有名为「{name}」的模型档案"))?
+            .clone();
+        self.endpoint = p.endpoint;
+        self.model = p.model;
+        if !p.api_key.trim().is_empty() {
+            self.api_key = p.api_key;
+            self.key_source = KeySource::ConfigFile;
+        }
+        if let Some(t) = p.llm_timeout_secs {
+            self.llm_timeout_secs = Some(t);
+        }
+        if let Some(pr) = p.prices {
+            self.prices = pr;
+        }
+        Ok(())
+    }
+
+    /// Whether profile `p` is (field-wise) the active configuration —
+    /// used for the (当前) marker in /model listing.
+    pub fn is_active_profile(&self, p: &ModelProfile) -> bool {
+        let key_matches = p.api_key.trim().is_empty() || p.api_key == self.api_key;
+        p.endpoint == self.endpoint && p.model == self.model && key_matches
     }
 }
 
@@ -285,5 +344,72 @@ usd = 2.5
         // Unknown values fall back to view.
         let cfg: ModelConfig = toml::from_str("[ui]\nmode = \"fancy\"\n").unwrap();
         assert!(cfg.ui.mode_view());
+    }
+
+    #[test]
+    fn profiles_parse_apply_and_roundtrip() {
+        let text = r#"
+endpoint = "https://slow.example.com/v1"
+api_key = "sk-active"
+model = "slow-model"
+
+[[models]]
+name = "fast"
+endpoint = "https://fast.example.com/v1"
+api_key = "sk-fast"
+model = "fast-model"
+llm_timeout_secs = 90
+
+[models.prices]
+input = 0.5
+output = 1.5
+
+[[models]]
+name = "local"
+endpoint = "http://localhost:11434/v1"
+model = "qwen2.5:7b"
+"#;
+        let mut cfg: ModelConfig = toml::from_str(text).unwrap();
+        assert_eq!(cfg.models.len(), 2);
+        assert_eq!(cfg.models[0].name, "fast");
+        assert_eq!(cfg.models[0].prices.as_ref().unwrap().input, 0.5);
+        assert!(cfg.models[1].api_key.is_empty());
+
+        // Switch onto "local": empty api_key keeps the active key;
+        // prices/timeout stay as they were.
+        cfg.apply_profile("local").unwrap();
+        assert_eq!(cfg.endpoint, "http://localhost:11434/v1");
+        assert_eq!(cfg.model, "qwen2.5:7b");
+        assert_eq!(cfg.api_key, "sk-active");
+        assert_eq!(cfg.llm_timeout_secs, None);
+        assert_eq!(cfg.prices.input, 0.15); // untouched default
+
+        // Switch onto "fast": everything overridden.
+        cfg.apply_profile("fast").unwrap();
+        assert_eq!(cfg.endpoint, "https://fast.example.com/v1");
+        assert_eq!(cfg.model, "fast-model");
+        assert_eq!(cfg.api_key, "sk-fast");
+        assert_eq!(cfg.key_source, KeySource::ConfigFile);
+        assert_eq!(cfg.llm_timeout_secs, Some(90));
+        assert_eq!(cfg.prices.output, 1.5);
+
+        // Unknown name → clear error.
+        let err = cfg.apply_profile("nope").unwrap_err().to_string();
+        assert!(err.contains("nope"), "{err}");
+
+        // Roundtrip keeps profiles.
+        let text2 = toml::to_string_pretty(&cfg).unwrap();
+        let cfg2: ModelConfig = toml::from_str(&text2).unwrap();
+        assert_eq!(cfg2.models.len(), 2);
+        assert_eq!(cfg2.models[0].name, "fast");
+        // Active markers.
+        assert!(cfg2.is_active_profile(&cfg2.models[0]));
+        assert!(!cfg2.is_active_profile(&cfg2.models[1]));
+    }
+
+    #[test]
+    fn old_configs_load_without_profiles() {
+        let cfg: ModelConfig = toml::from_str("model = \"m\"").unwrap();
+        assert!(cfg.models.is_empty());
     }
 }

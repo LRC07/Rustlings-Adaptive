@@ -159,6 +159,11 @@ pub(crate) fn run() {
                 repaint_chat(&session, &cfg, &tracker);
             }
             Cmd::Usage => print_usage(&cfg, &tracker),
+            Cmd::Model(arg) => {
+                handle_model(arg, &mut cfg, &mut client);
+                practice_ctx.editor = cfg.editor.clone();
+                repaint_chat(&session, &cfg, &tracker);
+            }
             Cmd::Config => {
                 cmd_config(&mut cfg, &mut client);
                 practice_ctx.editor = cfg.editor.clone();
@@ -207,6 +212,62 @@ fn repaint_chat(session: &Session, cfg: &ModelConfig, tracker: &Arc<Mutex<UsageT
 
 fn current_spent(tracker: &Arc<Mutex<UsageTracker>>) -> f64 {
     tracker.lock().unwrap_or_else(|p| p.into_inner()).all_totals().cost_usd
+}
+
+/// `/model` — list or switch named model profiles (M4.6). Switching
+/// applies the profile onto the active config, writes it back and
+/// rebuilds the client so the next turn uses the new endpoint.
+fn handle_model(arg: Option<&str>, cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
+    if cfg.models.is_empty() {
+        println!("  尚未配置模型档案：在 config.toml 里加 [[models]]（name/endpoint/api_key/model），");
+        println!("  示例见 config.example.toml；配好后 `/model <名>` 一键切换。");
+        return;
+    }
+    let Some(name) = arg else {
+        println!();
+        println!("{}", render::cyan("── 模型档案 ──"));
+        for m in &cfg.models {
+            let mark = if cfg.is_active_profile(m) { render::green("*") } else { " ".to_string() };
+            println!(
+                "  {mark} {:<10} {} ｜ {}",
+                m.name,
+                m.model,
+                host_of(&m.endpoint)
+            );
+        }
+        println!("  用 /model <名字> 切换（* = 当前）");
+        println!();
+        return;
+    };
+    match cfg.apply_profile(name) {
+        Ok(()) => {
+            match cfg.save_to_default_file() {
+                Ok(()) => println!(
+                    "  已切换到「{name}」：{} @ {}（超时 {}s｜价格 输入 ${:.2}/输出 ${:.2} 每 1M tok）",
+                    cfg.model,
+                    host_of(&cfg.endpoint),
+                    cfg.llm_timeout_secs.unwrap_or(480),
+                    cfg.prices.input,
+                    cfg.prices.output
+                ),
+                Err(e) => println!("  已切换但写回 config.toml 失败：{e:#}"),
+            }
+            *client = make_client(cfg);
+        }
+        Err(e) => {
+            println!("  切换失败：{e:#}");
+            println!("  输入 /model 查看可用档案。");
+        }
+    }
+}
+
+/// `https://api.x.com/v1` → `api.x.com`（显示用，不泄露路径细节）。
+fn host_of(endpoint: &str) -> String {
+    let rest = endpoint
+        .strip_prefix("https://")
+        .or_else(|| endpoint.strip_prefix("http://"))
+        .unwrap_or(endpoint);
+    rest.split('/').next().unwrap_or(rest).to_string()
 }
 
 /// Append a generated exercise to the session's exercise list (M4.5a):
@@ -267,6 +328,7 @@ enum Cmd<'a> {
     Topics,
     Practice(Option<&'a str>),
     Generate(Option<&'a str>),
+    Model(Option<&'a str>),
     Usage,
     Config,
     Sessions(Option<String>),
@@ -276,7 +338,7 @@ enum Cmd<'a> {
 
 /// Full command words offered for near-miss suggestions (M4.2).
 const KNOWN_COMMANDS: &[&str] =
-    &["new", "clear", "practice", "generate", "usage", "config", "sessions", "topics", "help", "exit"];
+    &["new", "clear", "practice", "generate", "model", "usage", "config", "sessions", "topics", "help", "exit"];
 
 fn parse_command(line: &str) -> Cmd<'_> {
     if !line.starts_with('/') {
@@ -296,6 +358,7 @@ fn parse_command(line: &str) -> Cmd<'_> {
         ("topics", _) => Cmd::Topics,
         ("practice", a) | ("p", a) => Cmd::Practice(a),
         ("generate", a) | ("g", a) => Cmd::Generate(a),
+        ("model", a) | ("m", a) => Cmd::Model(a),
         ("usage", _) | ("u", _) => Cmd::Usage,
         ("config", _) | ("c", _) => Cmd::Config,
         ("sessions", a) | ("s", a) => Cmd::Sessions(a.map(str::to_string)),
@@ -316,6 +379,7 @@ fn print_help() {
     println!("    /practice   做题模式（本会话/按主题/全库分区，/practice all 含种子题；");
     println!("                题目页可 [a] 问教练、[f] 反馈难度）");
     println!("    /generate   直接生成练习（可带主题：/g E0382；离线也可用）");
+    println!("    /model      模型档案：/model 列表，/model <名> 一键切换");
     println!("    /usage      用量与花费（本次会话 / 累计 / 预算余量）");
     println!("    /config     模型配置页（endpoint / model / api_key / 预算 / 编辑器）");
     println!("    /sessions   会话列表；/sessions <序号> 查看该会话的完整轨迹");
@@ -550,6 +614,10 @@ fn cmd_config(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
             "  · 界面      : {}（/ui view｜scroll 可切换）",
             if cfg.ui.mode_view() { "视口重绘" } else { "滚动" }
         );
+        if !cfg.models.is_empty() {
+            let names: Vec<&str> = cfg.models.iter().map(|m| m.name.as_str()).collect();
+            println!("  · 模型档案  : {}（/model <名> 一键切换）", names.join(" / "));
+        }
         let Some(line) = read_line_or_leave("配置> ") else { return };
         match line.as_str() {
             "" => return,
@@ -789,6 +857,9 @@ mod tests {
         assert!(matches!(parse_command("/sessions 3"), Cmd::Sessions(Some(_))));
         assert!(matches!(parse_command("/g"), Cmd::Generate(None)));
         assert!(matches!(parse_command("/g E0382"), Cmd::Generate(Some("E0382"))));
+        assert!(matches!(parse_command("/model"), Cmd::Model(None)));
+        assert!(matches!(parse_command("/model fast"), Cmd::Model(Some("fast"))));
+        assert!(matches!(parse_command("/m"), Cmd::Model(None)));
         assert!(matches!(parse_command("/helo"), Cmd::Unknown(_)));
         // A lone slash command word with no meaning is unknown.
         assert!(matches!(parse_command("/ "), Cmd::Unknown(_)));

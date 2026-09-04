@@ -27,6 +27,7 @@ Agent 解释并锚定知识点（细分概念图谱 + rustc 错误码双轨）�
 | M4.5b | 题目规格七条约束 + 质量门升级（首错误码匹配）+ 模板 schema v2 | — | ✅ 完成 |
 | M4.5c | 分层出题：模板改编 + 自由生成（同一质量门收口，§7.5） | — | ✅ 完成 |
 | M4.5d | 模板扩容批次一（12 主题 × 2 档 = 24 个，全轮转过三重校验）+ taxonomy 扩容 | — | ✅ 完成 |
+| M4.6 | 多模型档案：config `[[models]]` + `/model <名>` 一键切换（R3 增强） | R3 | ✅ 完成 |
 | M5 | 解答评审门 + 交互式复盘（解释/更优解挑战/对比表/再练决策） | — | ⬜ **下一个** |
 | M6 | 双轨画像（错误码 + 概念 SM-2）+ 错题本 | R5 | ⬜ |
 | M7 | 借用检查器假设实验室（招牌，可砍） | — | ⬜ |
@@ -50,6 +51,7 @@ cargo build          # 或 cargo build --release
 
 1. **配置文件（推荐）**：`cp config.example.toml config.toml`，然后编辑
    `endpoint` / `api_key` / `model`，按需修改价格表 `[prices]` 与预算 `[budget]`；
+   可配置多组 `[[models]]` 档案，运行中 `/model <名>` 一键切换（M4.6）；
 2. **环境变量**：在项目根目录建 `.env`，写 `RUSTLINGS_API_KEY=sk-...`
    （也可用 `RUSTLINGS_ENDPOINT` / `RUSTLINGS_MODEL` 覆盖对应项，
    优先级高于 config.toml）；
@@ -88,7 +90,8 @@ REPL 命令（斜杠命令，输错有就近提示）：
 
 ```
   /new 新会话  /clear 清屏  /ui 界面模式  /topics 概念图谱  /practice 做题
-  /generate 出题  /usage 用量  /config 配置  /sessions 会话轨迹  /help /exit
+  /generate 出题  /model 模型档案切换  /usage 用量  /config 配置
+  /sessions 会话轨迹  /help /exit
 ```
 
 - **做题子模式**（`/practice` 或对话出题后进入；`/practice all` 连种子
@@ -135,8 +138,9 @@ REPL 命令（斜杠命令，输错有就近提示）：
    耗时 → Ctrl-C 打断回合，立即回到输入提示；
 6. **预算中断（R6）**：把 config.toml 的 `[budget].usd` 改成一个比累计
    花费小的数（或 `/config` 改）→ 再发消息 → 提示"调用被拦截"；
-7. **配置切换（R3）**：`/config` → 选 `2` 换一个 model（如换成
-   `deepseek-chat`）→ 再发消息，新模型立即生效；
+7. **配置切换（R3/M4.6）**：在 config.toml 里配几组 `[[models]]` 档案 →
+   `/model` 列出 → `/model fast` 一键切换（endpoint/key/model/超时/价格
+   一起生效，写回 config.toml）；或 `/config` 逐项修改；
 8. **离线出题（M3）**：未配置 Key 时 `/generate Box<dyn Error>` →
    默认填槽 → 三重校验 → 可立即开练。
 

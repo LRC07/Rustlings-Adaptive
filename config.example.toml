@@ -36,3 +36,25 @@ output = 0.60
 # 删除 [budget] 整段 = 不设预算。
 [budget]
 usd = 5.0
+
+# 多模型档案（M4.6）：配置多组 endpoint/key/model，运行中用
+# `/model <名>` 一键切换（写回顶层配置，立即生效）。
+#   * api_key 留空 = 沿用当前 Key；
+#   * llm_timeout_secs / [models.prices] 留空 = 沿用当前值；
+#   * /model 无参数 = 列出全部档案（* 标记当前）。
+#
+# [[models]]
+# name = "fast"
+# endpoint = "https://api.deepseek.com/v1"
+# api_key = "sk-..."
+# model = "deepseek-chat"
+# llm_timeout_secs = 120
+#
+# [models.prices]
+# input = 0.27
+# output = 1.09
+#
+# [[models]]
+# name = "local"
+# endpoint = "http://localhost:11434/v1"
+# model = "qwen2.5:7b"
