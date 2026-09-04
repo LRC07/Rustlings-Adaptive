@@ -269,6 +269,22 @@ pub(crate) fn after_pass(
         verdict: outcome.verdict,
         had_violations: outcome.statics.has_constraint_violations(),
     });
+
+    // M6.2: the debrief is complete — update the concept profile (SM-2
+    // + M5 signal counters) and persist.
+    let quality = crate::profile::debrief_quality(
+        attempts_before,
+        used_hints,
+        explanation_hit,
+        outcome.verdict == review::Verdict::Clean,
+    );
+    crate::profile::ProfileStore::load_or_create().record_debrief(
+        &meta.concepts,
+        used_hints,
+        explanation_hit,
+        quality,
+    );
+
     step4_follow_up(deps, meta, &outcome, explanation_hit, last_fail, follow_up)
 }
 

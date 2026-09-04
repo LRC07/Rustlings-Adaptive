@@ -72,6 +72,10 @@ strong signal to offer it). It is written to the exercise directory; \
 the user can start at once.
 - `check_code` {\"code\": string} — compile a Rust snippet with local \
 rustc and return real diagnostics (codes, messages, lines).
+- `learner_profile` {} — the learner's local stats: weakest concepts, \
+SM-2 due reviews, top error codes, most-failed exercises. Call it when \
+the user asks what they are weak at or what to review, or before \
+picking a topic when history could steer the choice.
 
 If your runtime cannot emit native tool calls, output a single JSON \
 object on its own line instead: {\"tool\": \"<name>\", \"arguments\": \

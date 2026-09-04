@@ -60,6 +60,10 @@ pub(crate) fn red(text: &str) -> String {
     paint("31", text)
 }
 
+pub(crate) fn yellow(text: &str) -> String {
+    paint("33", text)
+}
+
 /// Clear the viewport but keep scrollback (`2J` + home, never `3J`).
 /// No-op off-tty.
 pub(crate) fn clear_viewport() {

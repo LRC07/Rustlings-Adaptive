@@ -82,9 +82,11 @@ pub(crate) fn enter(ctx: &PracticeCtx, opts: EnterOpts, debrief: Option<&Debrief
     let mut index = ctx.load_index();
     let items = load_items(ctx);
     let graph = load_graph(ctx);
+    // M6.4: SM-2 due concepts shown once on the home panel.
+    let due = crate::profile::ProfileStore::load_or_create().profile.due_concepts(chrono::Utc::now());
     let mut mode = Mode::Home;
     loop {
-        let board = Board::build(&items, &index, &graph, opts.session_paths, opts.include_fixtures);
+        let board = Board::build(&items, &index, &graph, opts.session_paths, opts.include_fixtures, due.clone());
         let visible = render_board(&board, &mode);
         let line = read_prompt("> ")?;
         let line = line.trim().to_string();
@@ -190,15 +192,19 @@ struct Board<'a> {
     /// Seed fixture positions.
     fixtures: Vec<usize>,
     include_fixtures: bool,
+    /// SM-2 due concepts (M6.4, computed by the caller; empty offline).
+    due: Vec<String>,
 }
 
 impl<'a> Board<'a> {
+    #[allow(clippy::too_many_arguments)]
     fn build(
         items: &'a [Item],
         index: &'a ExerciseIndex,
         graph: &'a Option<ConceptGraph>,
         session_paths: &[String],
         include_fixtures: bool,
+        due: Vec<String>,
     ) -> Self {
         let pos_of: std::collections::HashMap<&str, usize> = items
             .iter()
@@ -233,7 +239,7 @@ impl<'a> Board<'a> {
         groups.sort_by(|a, b| a.0.cmp(&b.0));
         let topics = groups;
 
-        Self { items, index, session, topics, fixtures, include_fixtures }
+        Self { items, index, session, topics, fixtures, include_fixtures, due }
     }
 }
 
@@ -280,6 +286,14 @@ fn render_board(board: &Board, mode: &Mode) -> Vec<usize> {
     match mode {
         Mode::Home => {
             let mut visible = Vec::new();
+            if !board.due.is_empty() {
+                println!(
+                    "  {} {} 个概念到期复习（对话中说「来一道 XX 的变式题」巩固）",
+                    render::cyan("⏰"),
+                    board.due.len()
+                );
+                println!();
+            }
             if !board.session.is_empty() {
                 println!("  {}（{}）", render::cyan("本会话"), board.session.len());
                 for &i in &board.session {
@@ -461,8 +475,30 @@ fn run_exercise(
                 .unwrap_or(false);
             let res = exercise::compile_and_run(&item.ex);
             index.record_attempt(&key, res.passed, res.first_error.as_deref());
+            // M6.2: feed the learner profile (both tracks) + persist.
+            let tap_concepts: Vec<String> =
+                index.get(&key).map(|m| m.concepts.clone()).unwrap_or_default();
+            crate::profile::ProfileStore::load_or_create().record_attempt(
+                &tap_concepts,
+                res.first_error.as_deref(),
+                res.passed,
+            );
             if !res.passed && let Some(code) = &res.first_error {
                 last_fail = Some(code.clone());
+                // M6.4: after two accumulated failures on this concept,
+                // proactively point at the debrief / variant path.
+                if let Some(m) = index.get(&key)
+                    && let crate::exercise::index::Status::Failed { times } = m.status
+                    && times >= 2
+                    && let Some(c) = m.concepts.first()
+                {
+                    println!();
+                    println!(
+                        "  {} 概念「{c}」已累计失败 {times} 次——建议 [a] 问教练弄懂，\
+                         或结束后让教练出一道同概念变式题。",
+                        render::yellow("⚠")
+                    );
+                }
             }
             let meta = index.get(&key).cloned();
             if res.passed {
@@ -656,6 +692,13 @@ fn verify_all(items: &[Item], index: &mut ExerciseIndex, include_fixtures: bool)
         println!("[{}/{}] {} - {}", k + 1, total, it.ex.name, it.ex.title);
         let res = exercise::compile_and_run(&it.ex);
         index.record_attempt(&it.key, res.passed, res.first_error.as_deref());
+        let tap_concepts: Vec<String> =
+            index.get(&it.key).map(|m| m.concepts.clone()).unwrap_or_default();
+        crate::profile::ProfileStore::load_or_create().record_attempt(
+            &tap_concepts,
+            res.first_error.as_deref(),
+            res.passed,
+        );
         if res.passed {
             pass += 1;
             println!("  {}", render::green("✓ 通过"));
@@ -729,7 +772,7 @@ mod tests {
         index.upsert(meta("fixtures/s.rs", &[], Status::Pending, true));
 
         let graph = None::<ConceptGraph>;
-        let board = Board::build(&items, &index, &graph, &["generated/b.rs".into()], false);
+        let board = Board::build(&items, &index, &graph, &["generated/b.rs".into()], false, Vec::new());
         // Session order first, fixtures excluded from topics.
         assert_eq!(board.session, vec![1]);
         assert_eq!(board.fixtures, vec![3]);

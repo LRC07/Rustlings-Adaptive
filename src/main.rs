@@ -1,6 +1,6 @@
 //! Thin binary entry point. All behavior lives in the `cli`, `agent`,
-//! `exercise`, `config`, `constraints`, `llm`, `review`, `usage`,
-//! `verifier`, `template`, `taxonomy`, and `generator` modules.
+//! `exercise`, `config`, `constraints`, `llm`, `profile`, `review`,
+//! `usage`, `verifier`, `template`, `taxonomy`, and `generator` modules.
 
 mod agent;
 mod cli;
@@ -9,6 +9,7 @@ mod constraints;
 mod exercise;
 mod generator;
 mod llm;
+mod profile;
 mod review;
 mod taxonomy;
 mod template;

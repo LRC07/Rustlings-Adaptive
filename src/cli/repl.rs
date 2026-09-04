@@ -177,6 +177,7 @@ pub(crate) fn run() {
                 repaint_chat(&session, &cfg, &tracker);
             }
             Cmd::Usage => print_usage(&cfg, &tracker),
+            Cmd::Stats(arg) => print_stats(&practice_ctx, arg),
             Cmd::Model(arg) => {
                 // Result page (M4.2 convention): prints inline and must
                 // NOT be wiped by a viewport repaint right after.
@@ -373,6 +374,7 @@ enum Cmd<'a> {
     Generate(Option<&'a str>),
     Model(Option<&'a str>),
     Usage,
+    Stats(Option<&'a str>),
     Config,
     Sessions(Option<String>),
     Unknown(String),
@@ -381,7 +383,7 @@ enum Cmd<'a> {
 
 /// Full command words offered for near-miss suggestions (M4.2).
 const KNOWN_COMMANDS: &[&str] =
-    &["new", "clear", "practice", "generate", "model", "usage", "config", "sessions", "topics", "help", "exit"];
+    &["new", "clear", "practice", "generate", "model", "usage", "stats", "config", "sessions", "topics", "help", "exit"];
 
 fn parse_command(line: &str) -> Cmd<'_> {
     if !line.starts_with('/') {
@@ -403,6 +405,7 @@ fn parse_command(line: &str) -> Cmd<'_> {
         ("generate", a) | ("g", a) => Cmd::Generate(a),
         ("model", a) | ("m", a) => Cmd::Model(a),
         ("usage", _) | ("u", _) => Cmd::Usage,
+        ("stats", a) => Cmd::Stats(a),
         ("config", _) | ("c", _) => Cmd::Config,
         ("sessions", a) | ("s", a) => Cmd::Sessions(a.map(str::to_string)),
         (raw, _) => Cmd::Unknown(raw.to_string()),
@@ -425,6 +428,8 @@ fn print_help() {
     println!("    /generate   直接生成练习（可带主题：/g E0382；离线也可用）");
     println!("    /model      模型档案：/model 列表，/model <名> 一键切换");
     println!("    /usage      用量与花费（本次会话 / 累计 / 预算余量）");
+    println!("    /stats      学习画像：SM-2 到期复习、概念弱项、高频错误码、错题本");
+    println!("                （/stats wrong <概念|错误码> 过滤错题本）");
     println!("    /config     模型配置页（endpoint / model / api_key / 预算 / 编辑器）");
     println!("    /sessions   会话列表；/sessions <序号> 查看该会话的完整轨迹");
     println!("    /exit       退出");
@@ -502,6 +507,63 @@ fn open_loop_note(messages: &[ChatMessage]) -> Option<String> {
     ))
 }
 
+/// Compose the per-turn system-prompt note: exercise index state
+/// (M4.5a) + learner profile weak/due concepts and the top wrong-book
+/// entries (M6). None when there is nothing to report. Pure for
+/// testability.
+fn build_practice_note(
+    index_note: Option<String>,
+    profile: &crate::profile::Profile,
+    notebook: &[crate::profile::NotebookEntry],
+) -> Option<String> {
+    let mut profile_bits: Vec<String> = Vec::new();
+    let weak: Vec<String> = profile
+        .weakest(3)
+        .into_iter()
+        .map(|(c, f, _)| format!("{c} ({f} fails)"))
+        .collect();
+    if !weak.is_empty() {
+        profile_bits.push(format!(
+            "[Profile] Weakest concepts (cite them when the learner asks about weaknesses): {}.",
+            weak.join(", ")
+        ));
+    }
+    let due = profile.due_concepts(chrono::Utc::now());
+    if !due.is_empty() {
+        profile_bits.push(format!(
+            "[Profile] SM-2 reviews due now: {} — offering a variant for one of these is a good default.",
+            due.join(", ")
+        ));
+    }
+    if !notebook.is_empty() {
+        let lines: Vec<String> = notebook
+            .iter()
+            .take(3)
+            .map(|e| {
+                format!(
+                    "- \"{}\" ({} attempts{}, concepts: {})",
+                    e.title,
+                    e.attempts,
+                    e.last_error
+                        .as_deref()
+                        .map(|c| format!(", last {c}"))
+                        .unwrap_or_default(),
+                    e.concepts.join(", ")
+                )
+            })
+            .collect();
+        profile_bits.push(format!("[Profile] Most-failed exercises:\n{}", lines.join("\n")));
+    }
+    if profile_bits.is_empty() {
+        return index_note;
+    }
+    Some(
+        format!("{}\n{}", index_note.unwrap_or_default(), profile_bits.join("\n"))
+            .trim()
+            .to_string(),
+    )
+}
+
 fn agent_turn(
     session: &mut Session,
     input: &str,
@@ -521,8 +583,19 @@ fn agent_turn(
 
     agent::reset_interrupt();
     // M4.5a state back-flow: append the practice-state summary to the
-    // system prompt for this turn (recomputed each turn).
-    let practice_note = practice::PracticeCtx::load_index(practice_ctx).practice_note(&session.exercises);
+    // system prompt for this turn (recomputed each turn). M6: add the
+    // learner profile's weak/due concepts so the coach steers towards
+    // them when picking topics.
+    let practice_note = {
+        let practice_ctx_index = practice::PracticeCtx::load_index(practice_ctx);
+        let index_note = practice_ctx_index.practice_note(&session.exercises);
+        let notebook = crate::profile::notebook_from_index(&practice_ctx_index, None);
+        build_practice_note(
+            index_note,
+            &crate::profile::ProfileStore::load_or_create().profile,
+            &notebook,
+        )
+    };
     // M5 (retro §6.3): pending code threads the coach should follow up.
     let open_loop_note = open_loop_note(&session.messages);
     let has_open_loop = open_loop_note.is_some();
@@ -701,6 +774,117 @@ fn print_usage(cfg: &ModelConfig, tracker: &Arc<Mutex<UsageTracker>>) {
         }
         None => println!("  预算: 未设置（/config 中可设置；达到上限后自动拦截调用）"),
     }
+}
+
+/// `/stats` — learner profile page (M6): SM-2 due overview, weakest
+/// concepts, top error codes and the wrong-answer notebook (filterable
+/// via `/stats wrong <概念|错误码>`). Result-page convention: inline
+/// print, never clears the screen.
+fn print_stats(practice_ctx: &practice::PracticeCtx, arg: Option<&str>) {
+    println!();
+    println!("{}", render::cyan("── 学习画像 ──"));
+    let store = crate::profile::ProfileStore::load_or_create();
+    let profile = &store.profile;
+
+    if profile.concepts.is_empty() && profile.error_codes.is_empty() {
+        println!("  还没有学习信号：做题（/practice）或对话出题后，这里会出现");
+        println!("  概念掌握度（SM-2）、高频错误码与错题本。");
+        return;
+    }
+
+    // Wrongbook-only view.
+    if let Some(rest) = arg.and_then(|a| a.strip_prefix("wrong").map(str::trim)) {
+        let index = crate::exercise::index::ExerciseIndex::load(&practice_ctx.root);
+        let nb = crate::profile::notebook_from_index(&index, Some(rest));
+        println!("  错题本（{} 题，过滤「{rest}」）：", nb.len());
+        if nb.is_empty() {
+            println!("    （没有匹配的错题）");
+        }
+        for e in &nb {
+            print_notebook_row(e);
+        }
+        return;
+    }
+
+    let graph =
+        crate::taxonomy::ConceptGraph::load(&practice_ctx.repo_root.join("taxonomy").join("concepts.toml")).ok();
+    let cname = |id: &str| -> String {
+        match graph.as_ref().and_then(|g| g.get(id)) {
+            Some(n) => format!("{}（{id}）", n.name),
+            None => id.to_string(),
+        }
+    };
+
+    // SM-2 due overview.
+    let due = profile.due_concepts(chrono::Utc::now());
+    if due.is_empty() {
+        println!("  到期复习：暂无（SM-2 会为已学概念安排变式巩固节奏）");
+    } else {
+        println!("  {} 到期复习：", render::bold(&due.len().to_string()));
+        for c in &due {
+            println!("    · {}", cname(c));
+        }
+        println!("    （对话中说「来一道 XX 的变式题」即可巩固）");
+    }
+
+    // Weakest concepts.
+    println!("  概念弱项（按失败次数）：");
+    let weak = profile.weakest(5);
+    if weak.is_empty() {
+        println!("    （还没有失败记录，状态不错）");
+    }
+    for (c, fails, attempts) in &weak {
+        let s = profile.concepts.get(c);
+        let ef = s.map(|s| format!("EF {:.1}", s.sm2.ef)).unwrap_or_default();
+        let due_str =
+            s.and_then(|s| s.sm2.due.as_deref()).map(due_cn).unwrap_or_else(|| "—".into());
+        println!("    {} ｜ 失败 {fails}/{attempts} ｜ {ef} ｜ 复习 {due_str}", cname(c));
+    }
+
+    // Top error codes (coarse track).
+    let codes = profile.top_error_codes(5);
+    if !codes.is_empty() {
+        let list: Vec<String> = codes.iter().map(|(c, n)| format!("{c} ×{n}")).collect();
+        println!("  高频错误码：{}", list.join(" · "));
+    }
+
+    // Wrong-answer notebook.
+    let index = crate::exercise::index::ExerciseIndex::load(&practice_ctx.root);
+    let nb = crate::profile::notebook_from_index(&index, None);
+    println!("  错题本（{} 题有过失败；/stats wrong <概念|错误码> 过滤）：", nb.len());
+    for e in nb.iter().take(8) {
+        print_notebook_row(e);
+    }
+    if nb.len() > 8 {
+        println!("    …共 {} 题（用 /stats wrong 过滤）", nb.len());
+    }
+}
+
+fn due_cn(due: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(due) {
+        Ok(d) => {
+            let days = (d.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_days();
+            match days {
+                ..=0 => render::red("已到期").to_string(),
+                1 => "明天".to_string(),
+                n => format!("{n} 天后"),
+            }
+        }
+        Err(_) => "—".to_string(),
+    }
+}
+
+fn print_notebook_row(e: &crate::profile::NotebookEntry) {
+    let mark = if e.passed {
+        render::green("✓").to_string()
+    } else {
+        render::red(&format!("✗{}", e.attempts))
+    };
+    let mut meta = e.concepts.join("、");
+    if let Some(code) = &e.last_error {
+        meta.push_str(&format!(" ｜ {code}"));
+    }
+    println!("    {} 《{}》  {}", mark, e.title, meta);
 }
 
 /// `/config` — interactive model config page (R3). Page-framed: the
@@ -1037,6 +1221,56 @@ mod tests {
     fn open_loop_none_without_code_exchange() {
         let msgs = vec![user("你好"), assistant("你好！")];
         assert!(open_loop_note(&msgs).is_none());
+    }
+
+    #[test]
+    fn practice_note_combines_index_and_profile() {
+        use crate::exercise::index::{ExerciseIndex, ExerciseMeta, Source, Status};
+        use crate::profile::{Profile, ProfileStore};
+        let empty = Profile::default();
+        // No index note, no profile signals → None.
+        assert!(build_practice_note(None, &empty, &[]).is_none());
+        // Index note passes through untouched.
+        assert_eq!(
+            build_practice_note(Some("[Practice status] x".into()), &empty, &[]).as_deref(),
+            Some("[Practice status] x")
+        );
+        // Profile signals appended (weak + due + notebook).
+        let mut p = Profile::default();
+        p.record_attempt(&["c.weak".into()], Some("E0382"), false);
+        p.record_debrief(&["c.due".into()], false, Some(true), 4);
+        p.record_debrief(&["c.due".into()], false, Some(true), 4);
+        p.concepts.get_mut("c.due").unwrap().sm2.due =
+            Some((chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339());
+        let mut idx = ExerciseIndex::load_from(std::env::temp_dir().join("rs_note_notebook"));
+        idx.upsert(ExerciseMeta {
+            path: "generated/x.rs".into(),
+            title: "难倒我的题".into(),
+            concepts: vec!["c.weak".into()],
+            error_codes: vec![],
+            difficulty: None,
+            source: Source::TemplateFill { template_id: "t".into() },
+            session_id: None,
+            trigger: None,
+            created_at: None,
+            attempts: 3,
+            status: Status::Failed { times: 2 },
+            last_error: Some("E0382".into()),
+            hints: Vec::new(),
+            feedback: None,
+            slots: Default::default(),
+            reference: None,
+            constraints: Vec::new(),
+            review_verdict: None,
+        });
+        let nb = crate::profile::notebook_from_index(&idx, None);
+        let note = build_practice_note(None, &p, &nb).unwrap();
+        assert!(note.contains("Weakest concepts") && note.contains("c.weak (1 fails)"), "{note}");
+        assert!(note.contains("SM-2 reviews due now: c.due"), "{note}");
+        assert!(note.contains("Most-failed exercises"), "{note}");
+        assert!(note.contains("难倒我的题") && note.contains("E0382"), "{note}");
+        // Smoke: the store roundtrip used by the real turn.
+        let _ = ProfileStore::load_or_create();
     }
 
     #[test]

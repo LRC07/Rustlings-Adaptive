@@ -40,6 +40,7 @@ const MAX_DIAG_CHARS: usize = 300;
 pub const TOOL_LIST_CONCEPTS: &str = "list_concepts";
 pub const TOOL_GENERATE_EXERCISE: &str = "generate_exercise";
 pub const TOOL_CHECK_CODE: &str = "check_code";
+pub const TOOL_LEARNER_PROFILE: &str = "learner_profile";
 
 /// Schemas offered to the model (OpenAI function format).
 pub fn tool_schemas() -> Vec<Tool> {
@@ -89,6 +90,14 @@ pub fn tool_schemas() -> Vec<Tool> {
                 },
                 "required": ["code"]
             }),
+        },
+        Tool {
+            name: TOOL_LEARNER_PROFILE.into(),
+            description: "查询学习者的本地学习画像：最薄弱概念（按失败次数）、SM-2 到期复习的概念、\
+                          高频错误码、错题本中最常失败的练习。当用户问「我哪里薄弱/该复习什么」或你想\
+                          根据历史选题时调用它"
+                .into(),
+            parameters: json!({"type": "object", "properties": {}}),
         },
     ]
 }
@@ -140,7 +149,8 @@ pub fn execute(name: &str, arguments: &str, env: &AgentEnv, progress: &dyn Fn(&s
         TOOL_LIST_CONCEPTS => list_concepts(env),
         TOOL_GENERATE_EXERCISE => generate_exercise(&args, env, progress),
         TOOL_CHECK_CODE => check_code(&args, progress),
-        other => Err(anyhow!("未知工具「{other}」；可用工具：{TOOL_LIST_CONCEPTS} / {TOOL_GENERATE_EXERCISE} / {TOOL_CHECK_CODE}")),
+        TOOL_LEARNER_PROFILE => learner_profile(env),
+        other => Err(anyhow!("未知工具「{other}」；可用工具：{TOOL_LIST_CONCEPTS} / {TOOL_GENERATE_EXERCISE} / {TOOL_CHECK_CODE} / {TOOL_LEARNER_PROFILE}")),
     }
 }
 
@@ -165,6 +175,85 @@ fn list_concepts(env: &AgentEnv) -> Result<ToolOutcome> {
 
 fn taxonomy_path(env: &AgentEnv) -> PathBuf {
     env.root.join("taxonomy").join("concepts.toml")
+}
+
+// ---------------------------------------------------------------------------
+// learner_profile (M6)
+// ---------------------------------------------------------------------------
+
+/// Read-only view of the learner profile: weakest concepts, SM-2 due
+/// reviews, top error codes and the most-failed notebook exercises.
+/// Deterministic local data — no LLM involved.
+fn learner_profile(env: &AgentEnv) -> Result<ToolOutcome> {
+    let store = crate::profile::ProfileStore::load_or_create();
+    let profile = &store.profile;
+
+    if profile.concepts.is_empty() && profile.error_codes.is_empty() {
+        return Ok(ToolOutcome {
+            value: json!({
+                "empty": true,
+                "note": "学习者画像还是空的（没有做题信号）；建议直接出题或请用户贴代码",
+            }),
+            note: Some("学习画像为空".to_string()),
+            ..ToolOutcome::plain(json!({}))
+        });
+    }
+
+    let graph = ConceptGraph::load(&taxonomy_path(env)).ok();
+    let cname = |id: &str| -> Value {
+        match graph.as_ref().and_then(|g| g.get(id)) {
+            Some(n) => json!({"id": n.id, "name": n.name}),
+            None => json!({"id": id, "name": id}),
+        }
+    };
+
+    let index = crate::exercise::index::ExerciseIndex::load(&env.root.join("exercises"));
+    let notebook = crate::profile::notebook_from_index(&index, None);
+
+    let weakest: Vec<Value> = profile
+        .weakest(5)
+        .into_iter()
+        .map(|(c, f, a)| json!({"concept": cname(&c), "fails": f, "attempts": a}))
+        .collect();
+    let due: Vec<Value> = profile.due_concepts(chrono::Utc::now()).iter().map(|c| cname(c)).collect();
+    let codes: Vec<Value> = profile
+        .top_error_codes(5)
+        .into_iter()
+        .map(|(c, n)| json!({"code": c, "count": n}))
+        .collect();
+    let notebook_json: Vec<Value> = notebook
+        .iter()
+        .take(5)
+        .map(|e| {
+            json!({
+                "title": e.title,
+                "attempts": e.attempts,
+                "passed": e.passed,
+                "last_error": e.last_error,
+                "concepts": e.concepts,
+            })
+        })
+        .collect();
+
+    let mut value = json!({
+        "weakest_concepts": weakest,
+        "sm2_due_now": due,
+        "top_error_codes": codes,
+        "notebook_most_failed": notebook_json,
+        "note": "数据来自本地练习索引与做题信号（确定性统计）。出题建议优先结合薄弱概念与到期复习；\
+                 同概念已多次失败时给更简单的变式并引用之前的报错。",
+    });
+    if weakest.is_empty() && codes.is_empty() {
+        value["note"] = json!("画像只有少量信号；按对话语境出题即可");
+    }
+    Ok(ToolOutcome {
+        note: Some(format!(
+            "学习画像：{} 个概念有记录，{} 个到期复习",
+            profile.concepts.len(),
+            due.len()
+        )),
+        ..ToolOutcome::plain(value)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -509,7 +598,15 @@ mod tests {
     fn schemas_cover_all_tools() {
         let schemas = tool_schemas();
         let names: Vec<&str> = schemas.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, vec![TOOL_LIST_CONCEPTS, TOOL_GENERATE_EXERCISE, TOOL_CHECK_CODE]);
+        assert_eq!(
+            names,
+            vec![
+                TOOL_LIST_CONCEPTS,
+                TOOL_GENERATE_EXERCISE,
+                TOOL_CHECK_CODE,
+                TOOL_LEARNER_PROFILE
+            ]
+        );
         for s in &schemas {
             assert!(s.parameters.is_object());
             assert!(!s.description.is_empty());
