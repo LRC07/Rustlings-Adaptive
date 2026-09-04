@@ -114,10 +114,12 @@ pub(crate) fn run() {
         if line.is_empty() {
             continue;
         }
-        // ```-fenced paste mode: lines between two ``` lines become ONE
-        // message, so pasting multi-line code does not fire one turn
-        // per line (the "paste a snippet" scenario is core).
-        let line = if line.starts_with("```") {
+        // ```-fence paste mode: lines between two ``` lines become ONE
+        // message. Only a SINGLE-line ``` opens the interactive fence
+        // collector — a pasted multi-line block (M4.9 paste
+        // aggregation) is already one message and may itself contain
+        // fences; sending it verbatim is correct.
+        let line = if line.starts_with("```") && !line.contains('\n') {
             match read_paste() {
                 Some(code) if !code.trim().is_empty() => code,
                 _ => continue,
@@ -330,7 +332,7 @@ fn print_banner(
     }
     if first_run {
         println!("{}", render::dim("  试试：直接提问（如「什么是所有权」）、贴一段报错代码、"));
-        println!("{}", render::dim("  或说「来一道 E0382 的题」；多行代码用两行 ``` 围住。"));
+        println!("{}", render::dim("  或说「来一道 E0382 的题」；多行代码直接粘贴（自动并为一条消息）。"));
     }
 }
 
@@ -387,9 +389,10 @@ fn parse_command(line: &str) -> Cmd<'_> {
 
 fn print_help() {
     println!();
-    println!("  对话：直接输入问题 / 贴报错或代码（多行用两行 ``` 围住）。教练会锚定");
-    println!("        错误码与概念，需要时本地编译你的代码取证（check_code），或生成");
-    println!("        一道可开练的小练习（generate_exercise）。任务执行中可随时 Ctrl-C 打断。");
+    println!("  对话：直接输入问题 / 贴报错或代码（多行直接粘贴即可，自动并为一条");
+    println!("        消息；也可以用两行 ``` 围住）。教练会锚定错误码与概念，需要时");
+    println!("        本地编译你的代码取证（check_code），或生成一道可开练的小练习");
+    println!("        （generate_exercise）。任务执行中可随时 Ctrl-C 打断。");
     println!("  命令：");
     println!("    /new        开启新会话（旧会话落盘可回看）");
     println!("    /clear      清屏（/clear all 连同回滚缓冲区一起清）");
