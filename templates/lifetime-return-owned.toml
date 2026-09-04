@@ -52,3 +52,15 @@ pub fn main_flow() -> String {
     greeting("alice")
 }
 '''
+
+
+[review_hints]
+root_cause = [
+    "不能返回局部 String 的引用（函数返回它就销毁）：正确做法是返回 owned String 把所有权交出去，或返回与输入同寿命的切片",
+    "greeting 拼接结果天然是新分配的 String，返回它不丢性能——该 owned 就 owned",
+]
+misconceptions = [
+    "以为把引用标成 'static 就能修（局部量根本没有 'static）",
+    "以为返回 String 是性能浪费（这正是所有权转移的用途）",
+    "以为引用与值可以随意互换返回类型（谁拥有数据决定了寿命）",
+]

@@ -46,3 +46,15 @@ pub fn analyze(s: &str) -> (usize, &str) {
     (len, &s[..len])
 }
 '''
+
+
+[review_hints]
+root_cause = [
+    "返回从原串借用的切片：split_whitespace().next().unwrap_or(空串) 的类型是 &str，与输入同寿命、零分配；空输入回退空切片",
+    "元组返回 (usize, &str)：长度是计算值，切片是借用视图——两者的生命周期要求不同",
+]
+misconceptions = [
+    "以为要把首词 to_string() 再返回引用（悬垂，局部 String 出函数即亡）",
+    "以为切片是拷贝（切片只是原串的借用视图）",
+    "空输入时 unwrap 直接 panic（unwrap_or(空串) 兜底）",
+]

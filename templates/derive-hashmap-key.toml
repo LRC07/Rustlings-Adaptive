@@ -66,3 +66,15 @@ pub fn count_tags(tags: Vec<Tag>) -> std::collections::HashMap<Tag, usize> {
     counts
 }
 '''
+
+
+[review_hints]
+root_cause = [
+    "HashMap<K, V> 的 bound 要求 K: Eq + Hash（定位与去重），打印键还要 Debug——枚举全部可 derive，一行带齐",
+    "Eq 与 Hash 必须一致（相等的键哈希必须相同），derive 合成的实现天然一致，不用担心",
+]
+misconceptions = [
+    "以为任意类型都能当 HashMap 键（Python dict 习惯）",
+    "以为要把枚举转成 String 当键（丢失类型检查，stringly-typed 反模式）",
+    "以为必须手写 impl Hash（derive 即可，手写反而容易写错与 Eq 不一致）",
+]

@@ -59,3 +59,15 @@ pub fn sum(list: &List) -> i32 {
     }
 }
 '''
+
+
+[review_hints]
+root_cause = [
+    "递归 enum 的大小在编译期算不出来（Node 直接含 Node 是无限套娃，E0072）；Box 是大小已知的指针，把递归部分装箱后整个类型的大小就确定了",
+    "sum 走 match 递归：Nil 返 0，Node(count, next) 累加 count 并对 next 继续求和；Box 自动解引用，match 直接可用",
+]
+misconceptions = [
+    "以为像 Java/Python 一样字段引用对象不用管类型大小（GC 思维）",
+    "以为要把链表换成 Vec 或把节点 clone 一份才能修（方向错了，装箱即可）",
+    "以为 Box 会拷贝里面的值（只是把值放到堆上，访问时自动解引用）",
+]

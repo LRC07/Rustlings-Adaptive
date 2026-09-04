@@ -44,3 +44,15 @@ fn sum_passing(scores: &[i32], pass: i32) -> i32 {
     scores.iter().filter(|&&s| s >= pass).sum()
 }
 '''
+
+
+[review_hints]
+root_cause = [
+    "iter().filter(|&&s| s >= line).sum()：filter 的谓词拿到的是 &u32，模式 &&s 解包两层引用；sum() 要能推断出元素类型",
+    "及格线过滤与求和全部惰性链式完成，一次遍历，无中间 Vec",
+]
+misconceptions = [
+    "以为 filter 闭包拿到的是值（是引用，&&s 模式让初学者卡住）",
+    "sum() 类型推断报错后改回 for 循环（标注类型即可：let total: u32 = …）",
+    "以为要先 collect 成 Vec 再求和（多一次分配）",
+]

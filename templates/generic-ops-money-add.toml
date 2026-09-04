@@ -69,3 +69,15 @@ pub fn checkout(prices: Vec<Money>) -> Money {
     total
 }
 '''
+
+
+[review_hints]
+root_cause = [
+    "`+` 是 std::ops::Add 的语法糖：为 Money 实现 Add（Output = Money，self + other 返回新的 Money）之后，sum/fold 都能用",
+    "空购物车要靠 fold 的初始值 Money(0)（或 sum 前的判断），不产生 panic",
+]
+misconceptions = [
+    "以为 + 对自定义类型自动可用（数值类型直觉）",
+    "以为必须给 Money 实现 Copy 才能累加（取所有权或按引用迭代即可）",
+    "空 vec 直接 sum 得 0 的直觉没错，但忘了 Money(0) 这个「零值」要自己给",
+]

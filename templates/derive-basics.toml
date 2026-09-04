@@ -59,3 +59,15 @@ pub fn shifted(p: &Point, dx: i32, dy: i32) -> Point {
     Point { x: p.x + dx, y: p.y + dy }
 }
 '''
+
+
+[review_hints]
+root_cause = [
+    "assert_eq! 在 trait bound 层面要求类型实现 PartialEq + Debug，{:?} 格式化要求 Debug——缺哪个编译器就报哪个 bound",
+    "一行 #[derive(Debug, PartialEq)] 让编译器合成两个实现，等价于手写 impl",
+]
+misconceptions = [
+    "以为 assert_eq! 只要类型相同就能用（不知道 trait bound 的存在）",
+    "以为要像 Java 一样手写 equals/toString（Rust 的 derivable trait 是惯例）",
+    "以为 derive 一次只能带一个 trait（#[derive(A, B)] 可并列）",
+]

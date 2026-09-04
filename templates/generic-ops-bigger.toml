@@ -51,3 +51,15 @@ pub fn bigger<T: PartialOrd>(a: T, b: T) -> T {
     }
 }
 '''
+
+
+[review_hints]
+root_cause = [
+    "比较运算符是 trait 方法的语法糖：`>` 需要 T: PartialOrd——给泛型函数声明这个 bound 后，i32 与 &str 都能传入（两者都实现了它）",
+    "选 PartialOrd 而不是 Ord：部分序覆盖浮点等类型，本题语义够用且更宽",
+]
+misconceptions = [
+    "以为泛型参数天生什么运算都能做（运算符背后全是 trait）",
+    "以为要按类型写重载（Rust 无重载，bound 一处声明）",
+    "把 bound 写成 Eq/Ord（语义不对：Ord 是全序，且与 > 的 bound 不匹配）",
+]

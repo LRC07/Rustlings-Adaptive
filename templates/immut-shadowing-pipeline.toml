@@ -48,3 +48,15 @@ pub fn pipeline(raw: &str) -> i32 {
     x
 }
 '''
+
+
+[review_hints]
+root_cause = [
+    "遮蔽是同一名字的新绑定：let x = raw; let x = x.trim(); let x = x.parse()… 每一步类型可以完全不同，中间变量名与 mut 都省了",
+    "流水线每步语义独立（去空格 → 解析 → 乘 2），解析失败按题意回退 0（unwrap_or）",
+]
+misconceptions = [
+    "以为遮蔽要求前后同类型（正是不同类型才好用）",
+    "以为重新赋值必须 mut（遮蔽是新绑定，不是赋值）",
+    "以为一行 let 链完（每步一个 let，可读性反而更好）",
+]

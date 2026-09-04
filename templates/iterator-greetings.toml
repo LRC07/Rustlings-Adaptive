@@ -48,3 +48,15 @@ fn greetings(names: &[&str]) -> Vec<String> {
         .collect()
 }
 '''
+
+
+[review_hints]
+root_cause = [
+    "迭代器三段式：iter() → filter(|s| !s.is_empty()) 惰性跳过空名 → map(|s| format!(「Hi, {s}?」)) 逐个造问候 → collect() 收成 Vec",
+    "适配器是惰性的：不 collect 就不执行；filter/map 只是描述转换，collect 才驱动",
+]
+misconceptions = [
+    "以为要 for 循环加 push（iterator-only 约束下编译不过，且更冗长）",
+    "以为 filter 之后还要先收集成 Vec 再 map（链式一步到位）",
+    "collect 的目标类型推断失败就放弃（ turbofish collect::<Vec<_>>() 或 let 绑定标注）",
+]

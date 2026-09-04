@@ -68,3 +68,15 @@ pub fn finalize(session: Session) -> (String, Archive) {
     (token, Archive { user, expires_at })
 }
 '''
+
+
+[review_hints]
+root_cause = [
+    "结构体字段可以逐个 move（部分移动）：self.token 移出并返回，其余字段再用来构造 Archive——移动过的字段不能再读，未移动的照常可用",
+    "finalize(self) 消费 self 是设计好的：token 交调用方，剩余数据归档，一次性完成",
+]
+misconceptions = [
+    "以为结构体只能整体 move（字段级部分移动是合法且惯用的）",
+    "以为移出一个字段后整个结构体都不能用了（只有被移的字段失效）",
+    "以为要 clone 整个结构体再拆（clone 逃逸，违背 no-clone 约束）",
+]

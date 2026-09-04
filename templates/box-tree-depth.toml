@@ -67,3 +67,15 @@ pub fn depth(t: &Tree) -> usize {
     }
 }
 '''
+
+
+[review_hints]
+root_cause = [
+    "递归必须有基准情形：叶节点 depth 为 0；内部节点是 1 + max(左, 右)，children 是 Option<(Box, Box)>，match 拆开即可",
+    "Box 字段在函数里自动解引用：递归调用 depth 直接传引用，不需要手动 *",
+]
+misconceptions = [
+    "忘记基准情形，递归没有终点（编译不报错但运行栈溢出）",
+    "以为 Box 字段要手动 *children 解引用才能用",
+    "以为要 clone 左右子树才能递归调用（传引用即可，clone 是逃逸）",
+]

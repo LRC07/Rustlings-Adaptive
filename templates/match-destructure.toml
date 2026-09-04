@@ -60,3 +60,15 @@ pub fn describe(e: &Event) -> String {
     }
 }
 '''
+
+
+[review_hints]
+root_cause = [
+    "match 分支模式可以直接解构：Event::Click { x, y } 把字段绑定为局部变量，Event::Key(c) 绑定 char——绑定后按题意返回坐标和与大写字母",
+    "绑定模式是 match 的常态用法，不需要访问器也不需要二次 match",
+]
+misconceptions = [
+    "以为枚举字段能像结构体那样点出来（先解构才有字段）",
+    "以为分支里只能匹配常量（绑定模式才是主力）",
+    "先用 _ 丢掉 payload 再想办法取回（已经丢了，直接绑定）",
+]

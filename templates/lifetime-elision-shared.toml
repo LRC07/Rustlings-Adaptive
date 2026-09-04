@@ -59,3 +59,15 @@ pub fn report(title: &str, body: &str, prefix: &str) -> String {
     format!("{prefix}: {}", headline(title, body))
 }
 '''
+
+
+[review_hints]
+root_cause = [
+    "两个输入引用时省略规则不再适用，必须显式标注：fn headline<'a>(title: &'a str, body: &'a str) -> &'a str——返回值寿命与两个输入同时挂钩",
+    "生命周期标注只声明引用之间的关系，不改变任何值的实际存活时间",
+]
+misconceptions = [
+    "以为所有返回引用都要写生命周期（单输入引用时可省略，这是省略规则第一条）",
+    "以为写上 'a 就能把局部值活得更久（标注不延长寿命，悬垂照样悬垂）",
+    "把 'a 标到返回 String 上（owned 类型与生命周期无关）",
+]

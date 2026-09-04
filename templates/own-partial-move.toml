@@ -77,3 +77,15 @@ pub fn split(c: Config) -> (String, u32) {
     (name, retries)
 }
 '''
+
+
+[review_hints]
+root_cause = [
+    "先把要的字段 move 出来（let name = c.name; let retries = c.retries;），未移动字段（enabled 等）仍可继续用——部分移动的精髓",
+    "函数返回 owned 值与继续借用剩余字段可以共存，编译器按字段粒度跟踪",
+]
+misconceptions = [
+    "以为 c.name 移出后 c 整个不可用（只有 name 字段失效）",
+    "以为 &self 也能实现字段转移（&self 拿不到所有权）",
+    "用 clone 把字段复制一份绕过移动（违背 no-clone，且语义变成共享）",
+]

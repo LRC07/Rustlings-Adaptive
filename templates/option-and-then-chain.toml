@@ -45,3 +45,15 @@ fn doubled(input: Option<&str>) -> Option<i32> {
     input.and_then(|s| s.parse::<i32>().ok()).map(|n| n * 2)
 }
 '''
+
+
+[review_hints]
+root_cause = [
+    "and_then 是惰性组合：只在 Some 时执行闭包，None 直接透传——parse 放进 and_then，失败变 None，一行链式替代 unwrap + match",
+    "急切求值（unwrap_or(expr) 参数先算）与惰性（unwrap_or_else / and_then）的区别是本考点核心",
+]
+misconceptions = [
+    "以为 unwrap_or(重计算) 的默认值只在需要时才算（参数急切求值，白算）",
+    "以为 and_then 闭包要再包一层 Some（闭包本来就返回 Option）",
+    "以为处理 None 必须 match（组合子就是为这个生的）",
+]

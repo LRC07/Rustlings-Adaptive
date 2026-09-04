@@ -78,3 +78,15 @@ pub fn parse_head(raw: &str) -> Result<i32, ParseError> {
     Ok(head.parse::<i32>()?)
 }
 '''
+
+
+[review_hints]
+root_cause = [
+    "两条主线：①给 ParseError 实现 From<ParseIntError>，? 遇到 parse 的错误就自动转换成 ParseError::NotANumber 并提前返回；②Display 不能 derive，要手写 impl fmt::Display",
+    "错误枚举就是「错误分类」：变体承载语义（NotANumber），原始错误通过 From 收编",
+]
+misconceptions = [
+    "以为 ? 直接透传任意错误（同类型才直接透传，异类型要配 From）",
+    "以为 Display 也能 derive（不能，需手写 impl fmt::Display）",
+    "以为要在调用点手动 match parse 结果再包装（? + From 才是惯用法）",
+]

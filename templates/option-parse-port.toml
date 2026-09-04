@@ -46,3 +46,15 @@ fn port(config: Option<&str>) -> u16 {
     config.and_then(|s| s.parse::<u16>().ok()).unwrap_or(8080)
 }
 '''
+
+
+[review_hints]
+root_cause = [
+    "「缺失与解析失败都回退默认 8080」= parse().ok() 把 Result 变 Option，再 unwrap_or(8080)——错误处理收敛为一个默认值，无 panic 路径",
+    "unwrap 的 panic 风险在服务配置场景不可接受：unwrap_or 是权限最小的恢复策略",
+]
+misconceptions = [
+    "以为解析失败会自动得到默认值（unwrap 会 panic）",
+    "以为要完整 match Result 的 Ok/Err（.ok() + unwrap_or 更直接）",
+    "默认值随手写 0 而不是业务默认 8080（语义错误）",
+]

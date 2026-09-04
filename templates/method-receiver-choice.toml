@@ -102,3 +102,15 @@ pub fn main_flow() -> (usize, Vec<String>) {
     (n, items)
 }
 '''
+
+
+[review_hints]
+root_cause = [
+    "接收者是权限声明：修改状态用 &mut self，只读用 &self，消费调用者（into_*）用 self——push/len/into_items 正好一一对应",
+    "调用处的绑定可变性要匹配接收者：&mut self 要求变量本身是 mut 绑定",
+]
+misconceptions = [
+    "以为三种接收者只是风格差异，可以互换（权限语义完全不同）",
+    "以为全用 self 最省心（消费掉调用者，后续无法使用）",
+    "以为 &self 与 &mut self 有拷贝成本差异（都是引用，零拷贝）",
+]

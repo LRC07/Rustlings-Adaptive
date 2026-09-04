@@ -61,3 +61,15 @@ pub fn main_flow() -> (String, String) {
     (a, b)
 }
 '''
+
+
+[review_hints]
+root_cause = [
+    "参数声明 &str：String 经 deref 强转自动变 &str，字面量本来就是 &str——一个签名通吃两种，Rust 用 deref coercion 替代重载",
+    "返回新 String（拼接结果）：该 owned 就 owned，不要返回借用拼接临时量",
+]
+misconceptions = [
+    "以为要写两个重载分别接 String 和字面量（Rust 无重载，deref 强转是正解）",
+    "以为参数用 String 更通用（会逼调用方转移所有权，&str 才是宽容签名）",
+    "以为调用时要手动 &owned.as_str()（直接 &owned 即可触发强转）",
+]

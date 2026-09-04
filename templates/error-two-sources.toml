@@ -88,3 +88,15 @@ pub fn get_port(raw: &str) -> Result<u16, ConfigError> {
     Ok(port)
 }
 '''
+
+
+[review_hints]
+root_cause = [
+    "多错误源合并到一个枚举：parse 失败经 From<ParseIntError> 变 NotANumber，业务规则（端口为 0）自己构造 ZeroPort——统一出口后 ? 全程可用",
+    "业务校验错误与外部解析错误是两类语义，枚举变体就是分类，调用方 match 一次拿到全部分类",
+]
+misconceptions = [
+    "以为业务校验错误也要包在解析错误里（两个变体各表其意）",
+    "以为 ? 遇到两种不同错误就没法用（为每个来源配 From 即可）",
+    "以为每层都要手动 match 转换（From 写一次，? 处处可用）",
+]

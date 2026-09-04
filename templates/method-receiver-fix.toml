@@ -85,3 +85,15 @@ pub fn main_flow() -> i32 {
     c.total()
 }
 '''
+
+
+[review_hints]
+root_cause = [
+    "从函数体判断权限：有字段赋值/修改 → &mut self；只读返回 → &self；拿走数据的消费型 → self；接错编译器会报 E0596 或类型不匹配",
+    "只改接收者、不动函数体：函数体怎么用 self 已经决定了权限需求",
+]
+misconceptions = [
+    "以为全用 &mut self 最省事（权限过宽，调用方被迫 mut 绑定）",
+    "以为函数体能编译就行、接收者随便（权限泄漏）",
+    "分不清 &self 与 self 对链式调用/后续使用的影响（self 调用完原值没了）",
+]
