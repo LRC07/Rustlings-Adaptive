@@ -61,6 +61,11 @@ pub fn tool_schemas() -> Vec<Tool> {
                         "type": "string",
                         "description": "题目主题：概念 id（用 list_concepts 查询，如 borrow.move-semantics）、\
                                         rustc 错误码（如 E0382）或自由文本关键词"
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "一句话说明为什么现在出这道题（结合对话语境，如「你贴的代码报 E0382」）；\
+                                        会展示给用户并随题归档"
                     }
                 },
                 "required": ["topic"]
@@ -213,6 +218,31 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
         }),
     )?;
 
+    // M4.5a: register the exercise in the index (metadata + trigger
+    // context + session attribution) so the practice board and the
+    // coach's system prompt know about it.
+    let trigger = args
+        .get("reason")
+        .and_then(|r| r.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("对话请求：{topic_text}"));
+    let exercises_dir = env.root.join("exercises");
+    if let Err(e) = crate::exercise::index::register_generated(
+        &exercises_dir,
+        &outcome.path,
+        &outcome.title,
+        &outcome.concepts,
+        &outcome.error_codes,
+        Some(outcome.difficulty.as_str()),
+        crate::exercise::index::Source::TemplateFill { template_id: outcome.template_id.clone() },
+        env.session_id.as_deref(),
+        Some(&trigger),
+    ) {
+        progress(&format!("index 登记失败：{e:#}"));
+    }
+
     let value = json!({
         "ok": true,
         "title": outcome.title,
@@ -222,6 +252,7 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
         "difficulty": outcome.difficulty.name_cn(),
         "attempts": outcome.attempts,
         "used_llm": outcome.used_llm,
+        "trigger": trigger,
         "note": "题目已写入练习目录并接线，用户可以立即开始做题",
     });
     Ok(ToolOutcome {
@@ -235,6 +266,8 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
             title: outcome.title,
             path: outcome.path,
             difficulty: outcome.difficulty.name_cn().to_string(),
+            concepts: outcome.concepts,
+            trigger: Some(trigger),
         }),
         usage: bridge.acc,
         value,
@@ -389,6 +422,8 @@ mod tests {
             tracker: Arc::new(std::sync::Mutex::new(tracker)),
             cfg: crate::config::ModelConfig::default(),
             root: root.to_path_buf(),
+            session_id: Some("session_test".to_string()),
+            practice_note: None,
         }
     }
 

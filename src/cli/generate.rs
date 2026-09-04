@@ -4,10 +4,11 @@
 //! directly). Progress prints stage lines; Ctrl-C aborts between
 //! rounds (the interrupt flag is checked inside the generator).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::config::ModelConfig;
+use crate::exercise::index;
 use crate::generator;
 use crate::llm::LlmClient;
 use crate::usage::UsageTracker;
@@ -16,13 +17,15 @@ use super::{practice, read_line_or_leave};
 
 /// `g` / `/generate` — generate an exercise from a topic. `arg` may
 /// carry the topic directly (`/g E0382`); otherwise it is prompted.
+/// Returns the generated exercise path (for session bookkeeping).
 pub(crate) fn cmd_generate(
     cfg: &ModelConfig,
     tracker: &Arc<Mutex<UsageTracker>>,
     client: &Option<LlmClient>,
     ctx: &practice::PracticeCtx,
+    session: Option<(&str, &[String])>,
     arg: Option<&str>,
-) {
+) -> Option<PathBuf> {
     println!();
     println!("── 生成练习 ──");
     let topic_text = match arg {
@@ -30,8 +33,8 @@ pub(crate) fn cmd_generate(
         None => {
             println!("  输入主题：概念（如 trait 关联类型）、错误码（如 E0382）或关键词；直接回车返回。");
             match read_line_or_leave("主题> ") {
-                None => return,
-                Some(t) if t.is_empty() => return,
+                None => return None,
+                Some(t) if t.is_empty() => return None,
                 Some(t) => t,
             }
         }
@@ -120,20 +123,48 @@ pub(crate) fn cmd_generate(
             }
             println!("    文件 {}（练习名 {}）", out.path.display(), out.name);
             println!();
+
+            // M4.5a: register in the exercise index (with trigger
+            // context) so the board attributes this exercise.
+            let trigger = format!("你请求了「{topic_text}」");
+            match index::register_generated(
+                &ctx.root,
+                &out.path,
+                &out.title,
+                &out.concepts,
+                &out.error_codes,
+                Some(out.difficulty.as_str()),
+                index::Source::TemplateFill { template_id: out.template_id.clone() },
+                session.map(|(id, _)| id),
+                Some(&trigger),
+            ) {
+                Ok(_) => {}
+                Err(e) => println!("  （index 登记失败：{e:#}）"),
+            }
+
             let go = read_line_or_leave("  现在开始做这道题？[Y/n] ").unwrap_or_default();
             let go = go.to_ascii_lowercase();
             if go == "n" || go == "no" {
-                return;
+                return Some(out.path);
             }
             // Path comparison uses canonicalize(): the generator's path
             // carries a "./" prefix while discover() yields plain
             // relative paths, so raw equality would always miss.
-            practice::enter_at(ctx, &out.path);
+            practice::enter_at(
+                ctx,
+                &out.path,
+                practice::EnterOpts {
+                    include_fixtures: false,
+                    session_paths: session.map(|(_, paths)| paths).unwrap_or(&[]),
+                },
+            );
+            Some(out.path)
         }
         Err(e) => {
             println!();
             println!("  生成失败：{e:#}");
             println!("  可换一个主题重试，或检查 templates/ 与 taxonomy/ 的内容。");
+            None
         }
     }
 }

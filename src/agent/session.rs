@@ -35,6 +35,11 @@ pub struct Session {
     /// derived lazily on save; old files without it load as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Exercises produced in this session (index keys, in production
+    /// order; M4.5a). Metadata lives in the exercise index — this list
+    /// only orders/links.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exercises: Vec<String>,
     pub messages: Vec<ChatMessage>,
     /// Where this session is persisted (not serialized).
     #[serde(skip)]
@@ -61,6 +66,7 @@ impl Session {
             started_at: started,
             model: model.to_string(),
             title: None,
+            exercises: Vec::new(),
             messages: Vec::new(),
             path,
         }
@@ -228,6 +234,7 @@ mod tests {
             started_at: Utc::now(),
             model: "m".into(),
             title: None,
+            exercises: Vec::new(),
             messages: sample_messages(),
             path: path.clone(),
         };
@@ -249,6 +256,7 @@ mod tests {
             started_at: Utc::now(),
             model: "m".into(),
             title: None,
+            exercises: Vec::new(),
             messages: sample_messages(),
             path,
         };
@@ -273,6 +281,7 @@ mod tests {
             started_at: Utc::now(),
             model: "m".into(),
             title: Some("导出".into()),
+            exercises: Vec::new(),
             messages: sample_messages(),
             path: dir.join("session_export.json"),
         };
@@ -290,7 +299,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rs_sessions_list_{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         for id in ["session_a", "session_b"] {
-            let mut s = Session { id: id.into(), started_at: Utc::now(), model: "m".into(), title: None, messages: vec![], path: dir.join(format!("{id}.json")) };
+            let mut s = Session { id: id.into(), started_at: Utc::now(), model: "m".into(), title: None, exercises: Vec::new(), messages: vec![], path: dir.join(format!("{id}.json")) };
             s.title = Some(id.into());
             s.save().unwrap();
         }

@@ -40,6 +40,15 @@ impl Difficulty {
             Difficulty::Hard => "困难",
         }
     }
+
+    /// Canonical lowercase key stored in the exercise index / JSON.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Difficulty::Easy => "easy",
+            Difficulty::Medium => "medium",
+            Difficulty::Hard => "hard",
+        }
+    }
 }
 
 /// What kind of value a slot expects (design §7.2: ident | type | literal).

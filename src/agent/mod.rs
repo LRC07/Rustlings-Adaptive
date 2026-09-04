@@ -47,8 +47,9 @@ the real diagnostics.
 - When the user wants to practice, or a quick focused exercise would \
 verify their understanding, call `generate_exercise` with a topic (a \
 concept id from `list_concepts`, an error code like E0382, or free \
-text). After it succeeds, say the exercise is ready and can be started \
-immediately.
+text) and a short `reason` (one line: why this exercise now, derived \
+from the conversation). After it succeeds, say the exercise is ready \
+and can be started immediately.
 - At most a few tool calls per turn; never call the same tool twice \
 with identical arguments.
 
@@ -106,6 +107,12 @@ pub struct AgentEnv {
     pub cfg: ModelConfig,
     /// Repo root (templates/, taxonomy/, exercises/ live under it).
     pub root: PathBuf,
+    /// Current session id (M4.5a): stamped onto generated exercises in
+    /// the index so the board can attribute them.
+    pub session_id: Option<String>,
+    /// Practice-state summary (M4.5a state back-flow), appended to the
+    /// system prompt for every turn. Computed per turn by the CLI.
+    pub practice_note: Option<String>,
 }
 
 /// Offer to jump into the practice sub-mode after an exercise was
@@ -115,6 +122,10 @@ pub struct PracticeOffer {
     pub title: String,
     pub path: PathBuf,
     pub difficulty: String,
+    /// Concept ids of the generated exercise (M4.5a card).
+    pub concepts: Vec<String>,
+    /// Why this exercise was produced (M4.5a card, from tool `reason`).
+    pub trigger: Option<String>,
 }
 
 /// Result of one completed user turn.
@@ -152,8 +163,17 @@ pub fn run_turn(
     progress: &dyn Fn(&str),
 ) -> Result<TurnOutcome> {
     let mut msgs: Vec<ChatMessage> = history.to_vec();
-    if msgs.is_empty() {
-        msgs.push(ChatMessage::system(SYSTEM_PROMPT));
+    // The system prompt is rebuilt from the canonical constant on every
+    // turn, so the per-turn practice note (M4.5a state back-flow) never
+    // accumulates across a persisted history.
+    let sys = match &env.practice_note {
+        Some(note) => format!("{SYSTEM_PROMPT}\n\n{note}"),
+        None => SYSTEM_PROMPT.to_string(),
+    };
+    if msgs.first().map(|m| m.role.as_str()) == Some("system") {
+        msgs[0] = ChatMessage::system(sys);
+    } else {
+        msgs.insert(0, ChatMessage::system(sys));
     }
     msgs.push(ChatMessage::user(input));
 
@@ -430,6 +450,8 @@ mod tests {
             ))),
             cfg: ModelConfig::default(),
             root: PathBuf::from("."),
+            session_id: None,
+            practice_note: None,
         }
     }
 

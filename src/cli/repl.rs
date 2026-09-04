@@ -12,7 +12,7 @@
 //! abandons the turn and returns to the prompt. Every completed turn
 //! is appended to the session JSON file (R5).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -68,6 +68,17 @@ pub(crate) fn run() {
 
     let mut practice_ctx = practice::PracticeCtx::new(&root.join("exercises"), cfg.editor.clone());
 
+    // M4.5a: reconcile the exercise index with disk (adds entries for
+    // untracked exercises, recovering template provenance) and consume
+    // the legacy `.progress` file once.
+    {
+        let mut index = crate::exercise::index::ExerciseIndex::load(&practice_ctx.root);
+        let discovered = crate::exercise::discover_all(&practice_ctx.root);
+        let templates = crate::template::load_dir(&root.join("templates")).unwrap_or_default();
+        index.reconcile(&discovered, &templates);
+        crate::exercise::index::migrate_progress(&mut index, &practice_ctx.root, &discovered);
+    }
+
     loop {
         if agent::is_interrupted() {
             agent::reset_interrupt();
@@ -117,14 +128,34 @@ pub(crate) fn run() {
             }
             Cmd::Ui(arg) => switch_ui(&mut cfg, arg),
             Cmd::Topics => topics_page(),
-            Cmd::Practice => {
+            Cmd::Practice(arg) => {
                 agent::reset_interrupt();
-                practice::enter(&practice_ctx);
-                repaint_chat(&session, &cfg, &tracker);
+                let opts = practice::EnterOpts {
+                    include_fixtures: arg == Some("all"),
+                    session_paths: &session.exercises,
+                };
+                match practice::enter(&practice_ctx, opts) {
+                    Some(msg) => {
+                        repaint_chat(&session, &cfg, &tracker);
+                        println!("{} [问教练] 把练习代码带回对话", super::render::bold("你>"));
+                        agent_turn(&mut session, &msg, &cfg, &tracker, &client, &practice_ctx);
+                    }
+                    None => repaint_chat(&session, &cfg, &tracker),
+                }
             }
             Cmd::Generate(arg) => {
                 agent::reset_interrupt();
-                generate::cmd_generate(&cfg, &tracker, &client, &practice_ctx, arg);
+                let gen_path = generate::cmd_generate(
+                    &cfg,
+                    &tracker,
+                    &client,
+                    &practice_ctx,
+                    Some((session.id.as_str(), session.exercises.as_slice())),
+                    arg,
+                );
+                if let Some(p) = gen_path {
+                    register_session_exercise(&mut session, &practice_ctx, &p);
+                }
                 repaint_chat(&session, &cfg, &tracker);
             }
             Cmd::Usage => print_usage(&cfg, &tracker),
@@ -178,6 +209,20 @@ fn current_spent(tracker: &Arc<Mutex<UsageTracker>>) -> f64 {
     tracker.lock().unwrap_or_else(|p| p.into_inner()).all_totals().cost_usd
 }
 
+/// Append a generated exercise to the session's exercise list (M4.5a):
+/// the list holds index keys in production order; the exercise index
+/// carries the metadata itself.
+fn register_session_exercise(session: &mut Session, ctx: &practice::PracticeCtx, path: &Path) {
+    if let Some(key) = crate::exercise::index::key_for(&ctx.root, path)
+        && !session.exercises.contains(&key)
+    {
+        session.exercises.push(key);
+    }
+    if let Err(e) = session.save() {
+        eprintln!("  （会话保存失败：{e:#}）");
+    }
+}
+
 fn short_id(id: &str) -> String {
     id.strip_prefix("session_").unwrap_or(id).to_string()
 }
@@ -220,7 +265,7 @@ enum Cmd<'a> {
     Clear(bool),
     Ui(Option<&'a str>),
     Topics,
-    Practice,
+    Practice(Option<&'a str>),
     Generate(Option<&'a str>),
     Usage,
     Config,
@@ -249,7 +294,7 @@ fn parse_command(line: &str) -> Cmd<'_> {
         ("clear", a) => Cmd::Clear(a == Some("all")),
         ("ui", a) => Cmd::Ui(a),
         ("topics", _) => Cmd::Topics,
-        ("practice", _) | ("p", _) => Cmd::Practice,
+        ("practice", a) | ("p", a) => Cmd::Practice(a),
         ("generate", a) | ("g", a) => Cmd::Generate(a),
         ("usage", _) | ("u", _) => Cmd::Usage,
         ("config", _) | ("c", _) => Cmd::Config,
@@ -268,7 +313,8 @@ fn print_help() {
     println!("    /clear      清屏（/clear all 连同回滚缓冲区一起清）");
     println!("    /ui         界面模式：/ui view 视口重绘（默认）｜ /ui scroll 滚动");
     println!("    /topics     查看概念图谱（出题主题的权威列表）");
-    println!("    /practice   做题模式（练习列表，数字选题 / n 下一题 / v 全部验证）");
+    println!("    /practice   做题模式（本会话/按主题/全库分区，/practice all 含种子题；");
+    println!("                题目页可 [a] 问教练、[f] 反馈难度）");
     println!("    /generate   直接生成练习（可带主题：/g E0382；离线也可用）");
     println!("    /usage      用量与花费（本次会话 / 累计 / 预算余量）");
     println!("    /config     模型配置页（endpoint / model / api_key / 预算 / 编辑器）");
@@ -300,11 +346,16 @@ fn agent_turn(
     };
 
     agent::reset_interrupt();
+    // M4.5a state back-flow: append the practice-state summary to the
+    // system prompt for this turn (recomputed each turn).
+    let practice_note = practice::PracticeCtx::load_index(practice_ctx).practice_note(&session.exercises);
     let env = AgentEnv {
         caller: Arc::new(cl.clone()),
         tracker: tracker.clone(),
         cfg: cfg.clone(),
         root: PathBuf::from("."),
+        session_id: Some(session.id.clone()),
+        practice_note,
     };
     let history = session.messages.clone();
     let input = input.to_string();
@@ -373,16 +424,35 @@ fn agent_turn(
                 println!("  会话保存失败：{e:#}");
             }
 
-            // Practice offer from generate_exercise.
+            // Practice offer from generate_exercise (M4.5a: card with
+            // concepts/difficulty/trigger + session registration).
             if let Some(offer) = turn.practice {
+                register_session_exercise(session, practice_ctx, &offer.path);
                 println!();
-                println!("  题目已就绪：《{}》（{}）", offer.title, offer.difficulty);
+                println!("  题目已就绪：《{}》", offer.title);
+                let mut line = format!("    概念 {} ｜ 难度 {}", offer.concepts.join("、"), offer.difficulty);
+                if offer.concepts.is_empty() {
+                    line = format!("    难度 {}", offer.difficulty);
+                }
+                println!("{line}");
+                if let Some(t) = &offer.trigger {
+                    println!("    触发：{t}");
+                }
                 match read_line_or_leave("  回车开始做题，输入 n 留在对话> ") {
                     None => {}
                     Some(ans) => {
                         let a = ans.trim().to_ascii_lowercase();
                         if a.is_empty() || a == "y" || a == "yes" || a == "是" {
-                            practice::enter_at(practice_ctx, &offer.path);
+                            let opts = practice::EnterOpts {
+                                include_fixtures: false,
+                                session_paths: &session.exercises,
+                            };
+                            if let Some(msg) = practice::enter_at(practice_ctx, &offer.path, opts) {
+                                repaint_chat(session, cfg, tracker);
+                                println!("{} [问教练] 把练习代码带回对话", super::render::bold("你>"));
+                                agent_turn(session, &msg, cfg, tracker, client, practice_ctx);
+                                return;
+                            }
                             repaint_chat(session, cfg, tracker);
                         }
                     }
@@ -704,7 +774,8 @@ mod tests {
         assert!(matches!(parse_command("/exit"), Cmd::Exit));
         assert!(matches!(parse_command("/q"), Cmd::Exit));
         assert!(matches!(parse_command("/help"), Cmd::Help));
-        assert!(matches!(parse_command("/p"), Cmd::Practice));
+        assert!(matches!(parse_command("/p"), Cmd::Practice(None)));
+        assert!(matches!(parse_command("/practice all"), Cmd::Practice(Some("all"))));
         assert!(matches!(parse_command("/usage"), Cmd::Usage));
         assert!(matches!(parse_command("/u"), Cmd::Usage));
         assert!(matches!(parse_command("/config"), Cmd::Config));

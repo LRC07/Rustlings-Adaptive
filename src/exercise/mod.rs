@@ -1,30 +1,46 @@
 //! Exercise domain: discovery of `exercises/**/*.rs`, title parsing, and
 //! running a single exercise through `rustc --test`.
+//!
+//! M4.5a: seed exercises live under `exercises/fixtures/` and are
+//! excluded from the default discovery (they are development fixtures,
+//! not learner content); `discover_all` includes them. Every discovered
+//! exercise carries `rel_path` — its location relative to the exercises
+//! directory — which doubles as the exercise index key.
+
+pub mod index;
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+/// Directory holding seed fixtures (excluded from default discovery).
+pub const FIXTURES_DIR: &str = "fixtures";
+
 pub struct Exercise {
     pub path: PathBuf,
+    /// Path relative to the exercises root, '/'-separated; the index key.
+    pub rel_path: String,
     pub name: String,
     pub category: String,
     pub title: String,
+    /// True for seed fixtures under `exercises/fixtures/`.
+    pub is_fixture: bool,
 }
 
-impl Exercise {
-    pub fn is_done(&self, progress: &[String]) -> bool {
-        progress.iter().any(|p| p == self.path.to_string_lossy().as_ref())
-    }
+/// Full discovery including seed fixtures (`/practice all`); this is
+/// the discovery entry point used everywhere (the board itself filters
+/// fixtures out of the learner views).
+pub fn discover_all(root: &Path) -> Vec<Exercise> {
+    discover_filtered(root, true)
 }
 
-pub fn discover(root: &Path) -> Vec<Exercise> {
+fn discover_filtered(root: &Path, include_fixtures: bool) -> Vec<Exercise> {
     let mut out = Vec::new();
-    walk(root, root, &mut out);
+    walk(root, root, include_fixtures, &mut out);
     out
 }
 
-fn walk(root: &Path, dir: &Path, out: &mut Vec<Exercise>) {
+fn walk(root: &Path, dir: &Path, include_fixtures: bool, out: &mut Vec<Exercise>) {
     let rd = match fs::read_dir(dir) {
         Ok(r) => r,
         Err(_) => return,
@@ -32,7 +48,14 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<Exercise>) {
     for entry in rd.flatten() {
         let p = entry.path();
         if p.is_dir() {
-            walk(root, &p, out);
+            // Skip the fixtures subtree entirely unless asked for.
+            if !include_fixtures
+                && p.file_name().and_then(|s| s.to_str()) == Some(FIXTURES_DIR)
+                && p.parent().map(|d| d == root).unwrap_or(false)
+            {
+                continue;
+            }
+            walk(root, &p, include_fixtures, out);
             continue;
         }
         if p.extension().and_then(|e| e.to_str()) == Some("rs") {
@@ -44,15 +67,18 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<Exercise>) {
                 p.file_name().and_then(|s| s.to_str()),
                 Some("lib.rs" | "main.rs" | "mod.rs")
             );
-            let category = p
-                .parent()
-                .and_then(|parent| parent.strip_prefix(root).ok())
-                .and_then(|rel| rel.to_str())
-                .unwrap_or("")
-                .to_string();
+            let rel = match p.strip_prefix(root) {
+                Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+                Err(_) => continue,
+            };
+            let category = match rel.rsplit_once('/') {
+                Some((cat, _)) => cat.to_string(),
+                None => String::new(),
+            };
             if is_module_root || category.is_empty() {
                 continue;
             }
+            let is_fixture = category == FIXTURES_DIR || category.starts_with(&format!("{FIXTURES_DIR}/"));
             let name = p
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -61,9 +87,11 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<Exercise>) {
             let title = read_title(&p);
             out.push(Exercise {
                 path: p,
+                rel_path: rel,
                 name,
                 category,
                 title,
+                is_fixture,
             });
         }
     }
@@ -94,10 +122,17 @@ fn read_title(p: &Path) -> String {
     String::new()
 }
 
+/// Outcome of one compile+run pass.
+#[derive(Debug, Clone)]
+pub struct RunResult {
+    pub passed: bool,
+    /// First `error[E####]` code when compilation failed, e.g. "E0382".
+    pub first_error: Option<String>,
+}
+
 /// Compile the exercise with `rustc --test` and run its test binary.
-/// Prints rustc stderr / test output as-is; returns whether everything
-/// passed.
-pub fn compile_and_run(ex: &Exercise) -> bool {
+/// Prints rustc stderr / test output as-is.
+pub fn compile_and_run(ex: &Exercise) -> RunResult {
     let tmp = format!("/tmp/my_rustlings_{}", ex.name);
     let _ = fs::remove_file(&tmp);
     let depinfo = format!("{tmp}.d");
@@ -118,15 +153,16 @@ pub fn compile_and_run(ex: &Exercise) -> bool {
     match compile {
         Err(e) => {
             eprintln!("  调用 rustc 失败: {e}");
-            return false;
+            return RunResult { passed: false, first_error: None };
         }
         Ok(out) if !out.status.success() => {
             let stderr = String::from_utf8_lossy(&out.stderr);
+            let first_error = first_error_code(&stderr);
             // Trim the noisy "error: aborting due to ..." tail slightly.
             print_indented(&stderr);
             println!();
             println!("  编译失败。请修正上方错误后重试。");
-            return false;
+            return RunResult { passed: false, first_error };
         }
         Ok(_) => {}
     }
@@ -137,7 +173,7 @@ pub fn compile_and_run(ex: &Exercise) -> bool {
     match run {
         Err(e) => {
             eprintln!("  运行测试二进制失败: {e}");
-            false
+            RunResult { passed: false, first_error: None }
         }
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
@@ -150,13 +186,22 @@ pub fn compile_and_run(ex: &Exercise) -> bool {
             }
             if out.status.success() {
                 println!("  全部测试通过。");
-                true
+                RunResult { passed: true, first_error: None }
             } else {
                 println!("  测试未通过（退出码 {:?}）。", out.status.code());
-                false
+                RunResult { passed: false, first_error: None }
             }
         }
     }
+}
+
+/// Extract the first `error[E0xxx]` code from human-format rustc
+/// output (the exercise runner compiles without `--error-format=json`).
+fn first_error_code(stderr: &str) -> Option<String> {
+    let start = stderr.find("error[E")? + "error[".len();
+    let end = stderr[start..].find(']')? + start;
+    let code = &stderr[start..end];
+    (code.len() == 5 && code[1..].bytes().all(|b| b.is_ascii_digit())).then(|| code.to_string())
 }
 
 fn print_indented(s: &str) {
@@ -246,6 +291,51 @@ pub fn open_editor(path: &Path, config_editor: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discover_skips_fixtures_by_default() {
+        let dir = std::env::temp_dir().join(format!("rs_disc_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        for rel in [
+            "generated/gen1.rs",
+            "fixtures/generics/seed1.rs",
+            "traits/t1.rs",
+            "lib.rs",
+        ] {
+            let p = dir.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(&p, "// 题目\nfn main() {}\n").unwrap();
+        }
+        let learner: Vec<String> = discover_all(&dir)
+            .into_iter()
+            .filter(|e| !e.is_fixture)
+            .map(|e| e.name.clone())
+            .collect();
+        assert!(learner.contains(&"gen1".to_string()), "{learner:?}");
+        assert!(learner.contains(&"t1".to_string()), "{learner:?}");
+        assert!(!learner.iter().any(|n| n == "seed1" || n == "lib"), "{learner:?}");
+
+        let all: Vec<String> = discover_all(&dir).iter().map(|e| e.name.clone()).collect();
+        assert!(all.contains(&"seed1".to_string()), "{all:?}");
+
+        let seed = discover_all(&dir).into_iter().find(|e| e.name == "seed1").unwrap();
+        assert!(seed.is_fixture);
+        assert_eq!(seed.rel_path, "fixtures/generics/seed1.rs");
+        assert_eq!(seed.category, "fixtures/generics");
+
+        let learner = discover_all(&dir).into_iter().find(|e| e.name == "gen1").unwrap();
+        assert!(!learner.is_fixture);
+        assert_eq!(learner.rel_path, "generated/gen1.rs");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn first_error_extraction() {
+        let stderr = "error[E0382]: use of moved value `s`\n --> src.rs:2:20\n";
+        assert_eq!(first_error_code(stderr), Some("E0382".to_string()));
+        assert_eq!(first_error_code("error: aborting due to 1 previous error"), None);
+        assert_eq!(first_error_code("error[E30]: malformed"), None);
+    }
 
     /// Mutating EDITOR/VISUAL/PATH here is safe: this is the only test
     /// that touches these variables (config tests use prefixed names),

@@ -111,6 +111,7 @@ pub struct Outcome {
     pub template_id: String,
     pub title: String,
     pub concepts: Vec<String>,
+    pub error_codes: Vec<String>,
     pub difficulty: template::Difficulty,
     pub slots: std::collections::BTreeMap<String, String>,
     pub attempts: u32,
@@ -242,6 +243,7 @@ pub fn generate(
                 template_id: t.id.clone(),
                 title: t.title.clone(),
                 concepts: t.concepts.clone(),
+                error_codes: t.error_codes.clone(),
                 difficulty: t.difficulty,
                 slots: values,
                 attempts: attempt + 1,
@@ -470,7 +472,10 @@ fn extract_json(text: &str) -> Option<&str> {
 // Output: exercise file + generated-exercises wiring
 // ---------------------------------------------------------------------------
 
-fn sanitize_module_name(id: &str) -> String {
+/// Rust module/file-stem name for a template id (`own-closure-capture`
+/// → `own_closure_capture`). Public so the exercise index can map a
+/// generated file name back to its template during reconciliation.
+pub fn sanitize_module_name(id: &str) -> String {
     let name: String = id
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })

@@ -427,8 +427,8 @@ mod tests {
         // traits1 is an unsolved template -> must fail;
         // generics1 contains a full reference solution -> must pass 5 tests.
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let traits1 = fs::read_to_string(root.join("exercises/traits/traits1.rs")).unwrap();
-        let generics1 = fs::read_to_string(root.join("exercises/generics/generics1.rs")).unwrap();
+        let traits1 = fs::read_to_string(root.join("exercises/fixtures/traits/traits1.rs")).unwrap();
+        let generics1 = fs::read_to_string(root.join("exercises/fixtures/generics/generics1.rs")).unwrap();
         let wd = temp_dir("seed");
         let t = run_test_flow(&traits1, &wd, "traits1").unwrap();
         assert!(!t.compiled, "unsolved traits1 should not compile");
