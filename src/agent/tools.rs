@@ -41,6 +41,7 @@ pub const TOOL_LIST_CONCEPTS: &str = "list_concepts";
 pub const TOOL_GENERATE_EXERCISE: &str = "generate_exercise";
 pub const TOOL_CHECK_CODE: &str = "check_code";
 pub const TOOL_LEARNER_PROFILE: &str = "learner_profile";
+pub const TOOL_BORROWLAB: &str = "borrowlab";
 
 /// Schemas offered to the model (OpenAI function format).
 pub fn tool_schemas() -> Vec<Tool> {
@@ -99,6 +100,22 @@ pub fn tool_schemas() -> Vec<Tool> {
                 .into(),
             parameters: json!({"type": "object", "properties": {}}),
         },
+        Tool {
+            name: TOOL_BORROWLAB.into(),
+            description: "假设实验室：把学习者代码的假设改写同时交给本地 rustc 编译，返回两个版本错误码的\
+                          增减 diff（新出现的错误 / 消除的错误）。用于回答「如果我改成 X 会怎样」「为什么\
+                          这里必须借用」这类假设性问题——让借用检查器亲自给出证据，不要凭记忆臆断。\
+                          hypothesis 必须是改写后的完整可编译源码（其他部分保持不变）"
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string", "description": "学习者当前的完整源码"},
+                    "hypothesis": {"type": "string", "description": "假设改动后的完整源码（只改假设的部分）"}
+                },
+                "required": ["code", "hypothesis"]
+            }),
+        },
     ]
 }
 
@@ -150,7 +167,8 @@ pub fn execute(name: &str, arguments: &str, env: &AgentEnv, progress: &dyn Fn(&s
         TOOL_GENERATE_EXERCISE => generate_exercise(&args, env, progress),
         TOOL_CHECK_CODE => check_code(&args, progress),
         TOOL_LEARNER_PROFILE => learner_profile(env),
-        other => Err(anyhow!("未知工具「{other}」；可用工具：{TOOL_LIST_CONCEPTS} / {TOOL_GENERATE_EXERCISE} / {TOOL_CHECK_CODE} / {TOOL_LEARNER_PROFILE}")),
+        TOOL_BORROWLAB => borrowlab(&args, progress),
+        other => Err(anyhow!("未知工具「{other}」；可用工具：{TOOL_LIST_CONCEPTS} / {TOOL_GENERATE_EXERCISE} / {TOOL_CHECK_CODE} / {TOOL_LEARNER_PROFILE} / {TOOL_BORROWLAB}")),
     }
 }
 
@@ -441,6 +459,73 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
 }
 
 // ---------------------------------------------------------------------------
+// borrowlab (M7)
+// ---------------------------------------------------------------------------
+
+/// Run the hypothesis lab: compile the learner's code and the assumed
+/// rewrite side by side with the real rustc, diff the error codes.
+fn borrowlab(args: &Value, progress: &dyn Fn(&str)) -> Result<ToolOutcome> {
+    let code = args
+        .get("code")
+        .and_then(|c| c.as_str())
+        .ok_or_else(|| anyhow!("缺少 code 参数（学习者当前源码）"))?;
+    let hypothesis = args
+        .get("hypothesis")
+        .and_then(|c| c.as_str())
+        .ok_or_else(|| anyhow!("缺少 hypothesis 参数（假设改动后的完整源码）"))?;
+    if code.trim() == hypothesis.trim() {
+        return Err(anyhow!("hypothesis 与 code 相同——假设改动必须真的改变代码"));
+    }
+
+    progress("假设实验室：双向 rustc 取证…");
+    let report = crate::borrowlab::apply_and_check(code, hypothesis)?;
+
+    let side_json = |s: &crate::borrowlab::LabSide| {
+        json!({
+            "compiles": s.compiles,
+            "error_codes": s.codes,
+            "first_error": s.first_error,
+        })
+    };
+    let fmt = |list: &[(String, u32)]| -> Vec<Value> {
+        list.iter().map(|(c, n)| json!({"code": c, "count": n})).collect()
+    };
+
+    let note = if report.hypothesis.compiles && !report.baseline.compiles {
+        "假设改动后编译通过（基线失败）".to_string()
+    } else if report.no_change() {
+        "假设改动没有改变诊断结果".to_string()
+    } else {
+        let mut parts: Vec<String> = Vec::new();
+        if !report.resolved_errors.is_empty() {
+            let list: Vec<String> =
+                report.resolved_errors.iter().map(|(c, _)| c.clone()).collect();
+            parts.push(format!("消除 {}", list.join("、")));
+        }
+        if !report.new_errors.is_empty() {
+            let list: Vec<String> = report.new_errors.iter().map(|(c, _)| c.clone()).collect();
+            parts.push(format!("引入 {}", list.join("、")));
+        }
+        format!("假设改动{}", parts.join("，"))
+    };
+
+    let value = json!({
+        "baseline": side_json(&report.baseline),
+        "hypothesis": side_json(&report.hypothesis),
+        "new_errors": fmt(&report.new_errors),
+        "resolved_errors": fmt(&report.resolved_errors),
+        "note": "以上是两次真实 rustc 编译的 diff。基于它解释「为什么」——错误码变化意味着\
+                 哪条所有权/借用规则被满足了或被触犯了；如果引入了新错误，说明假设的改法\
+                 触发了另一条规则，正好可以讲清楚两者的关系。",
+    });
+
+    Ok(ToolOutcome {
+        note: Some(format!("假设实验室：{note}")),
+        ..ToolOutcome::plain(value)
+    })
+}
+
+// ---------------------------------------------------------------------------
 // check_code
 // ---------------------------------------------------------------------------
 
@@ -604,7 +689,8 @@ mod tests {
                 TOOL_LIST_CONCEPTS,
                 TOOL_GENERATE_EXERCISE,
                 TOOL_CHECK_CODE,
-                TOOL_LEARNER_PROFILE
+                TOOL_LEARNER_PROFILE,
+                TOOL_BORROWLAB
             ]
         );
         for s in &schemas {

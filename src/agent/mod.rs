@@ -76,6 +76,12 @@ rustc and return real diagnostics (codes, messages, lines).
 SM-2 due reviews, top error codes, most-failed exercises. Call it when \
 the user asks what they are weak at or what to review, or before \
 picking a topic when history could steer the choice.
+- `borrowlab` {\"code\": string, \"hypothesis\": string} — the \
+hypothesis lab: compiles the learner's code AND the hypothetical \
+rewrite locally, returns the error-code diff (new / resolved). Use it \
+for what-if questions (make t a reference instead, move vs borrow, \
+...) — let the borrow checker provide the evidence, then explain the \
+rule behind the change; never guess.
 
 If your runtime cannot emit native tool calls, output a single JSON \
 object on its own line instead: {\"tool\": \"<name>\", \"arguments\": \

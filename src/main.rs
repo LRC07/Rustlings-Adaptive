@@ -3,6 +3,7 @@
 //! `usage`, `verifier`, `template`, `taxonomy`, and `generator` modules.
 
 mod agent;
+mod borrowlab;
 mod cli;
 mod config;
 mod constraints;
