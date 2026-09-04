@@ -39,6 +39,8 @@ pub struct Usage {
 pub struct LlmReply {
     pub content: String,
     pub usage: Usage,
+    /// "length" when the completion was cut off by max_tokens (M4.7).
+    pub finish_reason: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +112,9 @@ pub struct TurnOutput {
     pub content: Option<String>,
     pub tool_calls: Vec<ToolCall>,
     pub usage: Usage,
+    /// choices[0].finish_reason ("stop" | "length" | "tool_calls" | …);
+    /// "length" means the output was cut off by max_tokens (M4.7).
+    pub finish_reason: Option<String>,
 }
 
 impl TurnOutput {
@@ -159,13 +164,29 @@ impl LlmClient {
     pub fn chat(&self, user_prompt: &str) -> Result<LlmReply> {
         let msgs = [ChatMessage::user(user_prompt)];
         let out = self.chat_turn(&msgs, &[])?;
-        Ok(LlmReply { content: out.content.unwrap_or_default(), usage: out.usage })
+        Ok(LlmReply {
+            content: out.content.unwrap_or_default(),
+            usage: out.usage,
+            finish_reason: out.finish_reason,
+        })
     }
 
     /// One conversation turn with the full history and an optional tool
     /// schema list (M4 agent loop). Returns text and/or tool calls.
     pub fn chat_turn(&self, messages: &[ChatMessage], tools: &[Tool]) -> Result<TurnOutput> {
-        let body = build_request_body(&self.model, messages, tools);
+        self.chat_turn_bounded(messages, tools, None)
+    }
+
+    /// Same turn with an optional `max_tokens` cap on the completion
+    /// (M4.7): long-output generation (exercise drafts) needs a hard
+    /// bound so a rambling model cannot burn minutes per round.
+    pub fn chat_turn_bounded(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[Tool],
+        max_tokens: Option<u32>,
+    ) -> Result<TurnOutput> {
+        let body = build_request_body(&self.model, messages, tools, max_tokens);
         let resp = self
             .http
             .post(chat_url(&self.endpoint))
@@ -185,7 +206,12 @@ impl LlmClient {
 
 /// Build the OpenAI-compatible request body from internal message
 /// types (flat → wire mapping happens here).
-pub fn build_request_body(model: &str, messages: &[ChatMessage], tools: &[Tool]) -> serde_json::Value {
+pub fn build_request_body(
+    model: &str,
+    messages: &[ChatMessage],
+    tools: &[Tool],
+    max_tokens: Option<u32>,
+) -> serde_json::Value {
     let msgs: Vec<serde_json::Value> = messages
         .iter()
         .map(|m| {
@@ -215,6 +241,9 @@ pub fn build_request_body(model: &str, messages: &[ChatMessage], tools: &[Tool])
         .collect();
 
     let mut body = serde_json::json!({ "model": model, "messages": msgs });
+    if let Some(n) = max_tokens {
+        body["max_tokens"] = serde_json::json!(n);
+    }
     if !tools.is_empty() {
         let wire_tools: Vec<serde_json::Value> = tools
             .iter()
@@ -249,6 +278,8 @@ pub fn parse_turn_response(body: &str) -> Result<TurnOutput> {
     struct ChoiceWire {
         #[serde(default)]
         message: Option<MessageWire>,
+        #[serde(default)]
+        finish_reason: Option<String>,
     }
     #[derive(Deserialize)]
     struct MessageWire {
@@ -273,10 +304,13 @@ pub fn parse_turn_response(body: &str) -> Result<TurnOutput> {
     }
 
     let resp: Wire = serde_json::from_str(body).context("解析模型响应 JSON 失败")?;
-    let msg = resp
+    let choice = resp
         .choices
         .first()
-        .and_then(|c| c.message.as_ref())
+        .ok_or_else(|| anyhow!("模型响应中没有回复内容"))?;
+    let msg = choice
+        .message
+        .as_ref()
         .ok_or_else(|| anyhow!("模型响应中没有回复内容"))?;
     let tool_calls = msg
         .tool_calls
@@ -294,6 +328,7 @@ pub fn parse_turn_response(body: &str) -> Result<TurnOutput> {
         content: msg.content.clone(),
         tool_calls,
         usage: resp.usage.unwrap_or_default(),
+        finish_reason: choice.finish_reason.clone(),
     })
 }
 
@@ -376,7 +411,7 @@ mod tests {
             description: "d".into(),
             parameters: serde_json::json!({"type": "object"}),
         }];
-        let body = build_request_body("m1", &msgs, &tools);
+        let body = build_request_body("m1", &msgs, &tools, None);
         assert_eq!(body["model"], "m1");
         assert_eq!(body["messages"].as_array().unwrap().len(), 4);
         let asst = &body["messages"][2];
@@ -392,7 +427,7 @@ mod tests {
 
     #[test]
     fn request_without_tools_omits_tool_keys() {
-        let body = build_request_body("m1", &[ChatMessage::user("q")], &[]);
+        let body = build_request_body("m1", &[ChatMessage::user("q")], &[], None);
         assert!(body.get("tools").is_none());
         assert!(body.get("tool_choice").is_none());
     }

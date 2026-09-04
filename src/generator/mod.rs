@@ -13,6 +13,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
@@ -144,27 +145,18 @@ impl Tier {
     }
 }
 
-/// Which tiers the caller allows (design §7.5). `Auto` falls through
-/// matched → adapted → free (later tiers need an LLM).
+/// Which tiers the caller allows (design §7.5). Crate-internal test
+/// seam: the public entry always runs `Auto` (matched → adapted → free
+/// fall-through); neither the user nor the coach model picks a tier
+/// (M4.7 decision).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(dead_code)] // variants exercised via tests
 pub enum GenerateMode {
     #[default]
     Auto,
     Matched,
     Adapted,
     Free,
-}
-
-impl GenerateMode {
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "auto" => Some(GenerateMode::Auto),
-            "matched" => Some(GenerateMode::Matched),
-            "adapted" => Some(GenerateMode::Adapted),
-            "free" => Some(GenerateMode::Free),
-            _ => None,
-        }
-    }
 }
 
 /// Result of a successful generation.
@@ -189,6 +181,15 @@ pub struct Outcome {
 /// Implemented for any `FnMut` closure.
 pub trait LlmCaller {
     fn call(&mut self, prompt: &str) -> Result<LlmReply>;
+
+    /// Bounded variant (M4.7): ask the endpoint to cap the completion at
+    /// `max_tokens` so a rambling draft cannot burn minutes per round.
+    /// Default ignores the cap so closure/mock implementations stay
+    /// trivial; the real bridge forwards it onto the wire.
+    fn call_bounded(&mut self, prompt: &str, max_tokens: u32) -> Result<LlmReply> {
+        let _ = max_tokens;
+        self.call(prompt)
+    }
 }
 
 impl<F: FnMut(&str) -> Result<LlmReply>> LlmCaller for F {
@@ -271,6 +272,18 @@ pub fn gate_draft(d: &template::ExerciseDraft, workdir: &Path) -> Result<verifie
 /// diagnostics are fed back to the model (repair loop, ≤4 rounds).
 /// Tiers 2/3 require an LLM caller; `Auto` falls through 1 → 2 → 3.
 pub fn generate(
+    topic: &Topic,
+    paths: &Paths,
+    llm: Option<&mut dyn LlmCaller>,
+    progress: Option<&mut dyn FnMut(GenerateStage)>,
+) -> Result<Outcome> {
+    generate_with_mode(topic, GenerateMode::Auto, paths, llm, progress)
+}
+
+/// Mode-parameterized entry — crate-internal (tests). The public
+/// surface always runs the automatic fall-through: the user and the
+/// coach model never pick the tier (M4.7 decision).
+pub(crate) fn generate_with_mode(
     topic: &Topic,
     mode: GenerateMode,
     paths: &Paths,
@@ -549,6 +562,14 @@ fn nearest_template<'a>(
         .ok_or_else(|| anyhow!("没有关键词命中的模板可作改编骨架"))
 }
 
+/// Hard cap on one draft round's completion tokens (M4.7): the whole
+/// exercise JSON must fit; "length" truncations are fed back to the
+/// model with a demand to compress.
+pub const DRAFT_MAX_TOKENS: u32 = 3000;
+/// Wall-clock budget for the whole draft repair loop (M4.7): on slow
+/// endpoints, stop with a clear report instead of burning rounds.
+pub const DRAFT_TIME_BUDGET: Duration = Duration::from_secs(420);
+
 /// The repair loop: prompt → parse → normalize → gate; failures (with
 /// the real rustc diagnostics) are fed back for the next round.
 fn llm_draft_loop(
@@ -561,11 +582,20 @@ fn llm_draft_loop(
     stage_label: &'static str,
 ) -> Result<DraftResult> {
     let concept_ids: Vec<String> = graph.ids().cloned().collect();
+    let started = Instant::now();
     let mut last_fail = String::new();
     for attempt in 1..=LLM_ATTEMPTS {
         if crate::agent::is_interrupted() {
             crate::agent::reset_interrupt();
             bail!("已打断");
+        }
+        if started.elapsed() > DRAFT_TIME_BUDGET {
+            bail!(
+                "出题耗时超过预算（{}s，已尝试 {} 轮）。端点较慢时每轮长输出可能需要数分钟；\
+                 建议 /model 切换更快的模型，或稍后重试。",
+                DRAFT_TIME_BUDGET.as_secs(),
+                attempt - 1
+            );
         }
         if let Some(cb) = progress.as_mut() {
             let note = (attempt > 1 && !last_fail.is_empty())
@@ -574,7 +604,14 @@ fn llm_draft_loop(
         }
 
         let prompt = draft_prompt(request, base, &concept_ids, attempt, &last_fail);
-        let reply = call.call(&prompt).map_err(|e| anyhow!("LLM 调用失败：{e:#}"))?;
+        let reply = call.call_bounded(&prompt, DRAFT_MAX_TOKENS).map_err(|e| anyhow!("LLM 调用失败：{e:#}"))?;
+        if reply.finish_reason.as_deref() == Some("length") {
+            last_fail = format!(
+                "上一轮输出在 {DRAFT_MAX_TOKENS} tokens 处被截断：整题 JSON 必须更精简\
+                 （测试只留 2 个、注释删减、字段紧凑），重新输出完整 JSON"
+            );
+            continue;
+        }
         let Some(json) = extract_json(&reply.content) else {
             last_fail = "上一轮回复中没有 JSON 对象；请只输出一个 JSON 对象".into();
             continue;
@@ -1205,7 +1242,7 @@ fn add(a: i32, b: i32) -> i32 {
     fn generates_with_defaults_offline() {
         let fx = Fixture::new();
         let paths = fx.paths();
-        let out = generate(&Topic::Concept("test.concept".into()), GenerateMode::Auto, &paths, None, None).unwrap();
+        let out = generate(&Topic::Concept("test.concept".into()), &paths, None, None).unwrap();
 
         assert_eq!(out.name, "mini_add");
         assert_eq!(out.tier, Tier::Matched { template_id: "mini-add".into() });
@@ -1233,8 +1270,8 @@ fn add(a: i32, b: i32) -> i32 {
     fn second_generation_picks_free_name_and_wires_both() {
         let fx = Fixture::new();
         let paths = fx.paths();
-        let out1 = generate(&Topic::Concept("test".into()), GenerateMode::Auto, &paths, None, None).unwrap();
-        let out2 = generate(&Topic::ErrorCode("E0308".into()), GenerateMode::Auto, &paths, None, None).unwrap();
+        let out1 = generate(&Topic::Concept("test".into()), &paths, None, None).unwrap();
+        let out2 = generate(&Topic::ErrorCode("E0308".into()), &paths, None, None).unwrap();
         assert_eq!(out1.name, "mini_add");
         assert_eq!(out2.name, "mini_add_2");
         let lib = fs::read_to_string(&paths.wiring_rs).unwrap();
@@ -1245,7 +1282,7 @@ fn add(a: i32, b: i32) -> i32 {
     #[test]
     fn error_code_routes_via_reverse_index() {
         let fx = Fixture::new();
-        let out = generate(&Topic::ErrorCode("e0308".into()), GenerateMode::Auto, &fx.paths(), None, None).unwrap();
+        let out = generate_with_mode(&Topic::ErrorCode("e0308".into()), GenerateMode::Auto, &fx.paths(), None, None).unwrap();
         assert_eq!(out.tier, Tier::Matched { template_id: "mini-add".into() });
     }
 
@@ -1253,9 +1290,9 @@ fn add(a: i32, b: i32) -> i32 {
     fn unknown_concept_and_code_are_clear_errors() {
         let fx = Fixture::new();
         let paths = fx.paths();
-        let err = generate(&Topic::Concept("没有的东西".into()), GenerateMode::Auto, &paths, None, None).unwrap_err();
+        let err = generate(&Topic::Concept("没有的东西".into()), &paths, None, None).unwrap_err();
         assert!(err.to_string().contains("解析为概念"), "{err}");
-        let err = generate(&Topic::ErrorCode("E9999".into()), GenerateMode::Auto, &paths, None, None).unwrap_err();
+        let err = generate(&Topic::ErrorCode("E9999".into()), &paths, None, None).unwrap_err();
         assert!(err.to_string().contains("E9999"), "{err}");
     }
 
@@ -1263,9 +1300,9 @@ fn add(a: i32, b: i32) -> i32 {
     fn free_text_matches_by_taxonomy_name_or_title() {
         let fx = Fixture::new();
         let paths = fx.paths();
-        let out = generate(&Topic::FreeText("来一道 测试概念 的题".into()), GenerateMode::Auto, &paths, None, None).unwrap();
+        let out = generate(&Topic::FreeText("来一道 测试概念 的题".into()), &paths, None, None).unwrap();
         assert_eq!(out.tier, Tier::Matched { template_id: "mini-add".into() });
-        let out = generate(&Topic::FreeText("加法".into()), GenerateMode::Auto, &paths, None, None).unwrap();
+        let out = generate(&Topic::FreeText("加法".into()), &paths, None, None).unwrap();
         assert_eq!(out.tier, Tier::Matched { template_id: "mini-add".into() });
     }
 
@@ -1295,7 +1332,7 @@ fn add(a: i32, b: i32) -> i32 {
                 Ok(reply(r#"{"slots": {"word": "b"}}"#))
             }
         };
-        let out = generate(&Topic::FreeText("随便来一道".into()), GenerateMode::Auto, &paths, Some(&mut call), None).unwrap();
+        let out = generate(&Topic::FreeText("随便来一道".into()), &paths, Some(&mut call), None).unwrap();
         assert_eq!(out.tier, Tier::Matched { template_id: "mini-add".into() });
         assert_eq!(out.slots.get("word").map(String::as_str), Some("b"));
         assert!(out.used_llm);
@@ -1307,7 +1344,7 @@ fn add(a: i32, b: i32) -> i32 {
         let fx = Fixture::new();
         let paths = fx.paths();
         let mut call = |_prompt: &str| -> Result<LlmReply> { Ok(reply("这不是 JSON")) };
-        let out = generate(&Topic::Concept("test.concept".into()), GenerateMode::Auto, &paths, Some(&mut call), None).unwrap();
+        let out = generate(&Topic::Concept("test.concept".into()), &paths, Some(&mut call), None).unwrap();
         assert!(!out.used_llm, "LLM 输出无效时不算用上 LLM");
         assert!(out.path.exists());
     }
@@ -1339,7 +1376,7 @@ fn add(a: i32, b: i32) -> i32 {
         let fx = Fixture::new();
         let paths = fx.paths();
         let mut call = |_prompt: &str| -> Result<LlmReply> { Ok(reply(VALID_DRAFT_JSON)) };
-        let out = generate(
+        let out = generate_with_mode(
             &Topic::FreeText("出一道取余的题".into()),
             GenerateMode::Free,
             &paths,
@@ -1363,7 +1400,7 @@ fn add(a: i32, b: i32) -> i32 {
         let paths = fx.paths();
         // "加法" keyword-hits the mini-add template (its title/tests).
         let mut call = |_prompt: &str| -> Result<LlmReply> { Ok(reply(VALID_DRAFT_JSON)) };
-        let out = generate(
+        let out = generate_with_mode(
             &Topic::FreeText("加法".into()),
             GenerateMode::Adapted,
             &paths,
@@ -1387,7 +1424,7 @@ fn add(a: i32, b: i32) -> i32 {
                 Ok(reply(VALID_DRAFT_JSON))
             }
         };
-        let out = generate(
+        let out = generate_with_mode(
             &Topic::FreeText("完全无关的主题词汇".into()),
             GenerateMode::Auto,
             &paths,
@@ -1406,7 +1443,7 @@ fn add(a: i32, b: i32) -> i32 {
         // test.concept.sub is not in the graph → falls back to test.concept.
         json = json.replace("\"concepts\": [\"test.concept\"]", "\"concepts\": [\"test.concept.sub\"]");
         let mut call = move |_prompt: &str| -> Result<LlmReply> { Ok(reply(&json)) };
-        let out = generate(
+        let out = generate_with_mode(
             &Topic::FreeText("任意".into()),
             GenerateMode::Free,
             &paths,
@@ -1415,6 +1452,53 @@ fn add(a: i32, b: i32) -> i32 {
         )
         .unwrap();
         assert_eq!(out.concepts, vec!["test.concept".to_string()]);
+    }
+
+    /// M4.7: the draft loop must (a) request a token cap on the wire
+    /// and (b) feed "length" truncations back as a compress-demand.
+    #[test]
+    fn tier3_bounds_tokens_and_handles_truncation() {
+        let fx = Fixture::new();
+        let paths = fx.paths();
+        let caps = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let rec = caps.clone();
+        struct BoundedRecorder {
+            rec: std::rc::Rc<std::cell::RefCell<Vec<u32>>>,
+            round: std::cell::Cell<u32>,
+        }
+        impl LlmCaller for BoundedRecorder {
+            fn call(&mut self, prompt: &str) -> Result<LlmReply> {
+                self.call_bounded(prompt, 1)
+            }
+            fn call_bounded(&mut self, _prompt: &str, max_tokens: u32) -> Result<LlmReply> {
+                self.rec.borrow_mut().push(max_tokens);
+                let n = self.round.get();
+                self.round.set(n + 1);
+                if n == 0 {
+                    // Round 1: truncated output.
+                    Ok(LlmReply {
+                        content: "{\"title\": \"被截断\".to_st".to_string(),
+                        usage: Default::default(),
+                        finish_reason: Some("length".to_string()),
+                    })
+                } else {
+                    Ok(reply(VALID_DRAFT_JSON))
+                }
+            }
+        }
+        let mut call = BoundedRecorder { rec, round: std::cell::Cell::new(0) };
+        let out = generate_with_mode(
+            &Topic::FreeText("取余".into()),
+            GenerateMode::Free,
+            &paths,
+            Some(&mut call),
+            None,
+        )
+        .unwrap();
+        assert_eq!(out.tier, Tier::Free);
+        let caps = caps.borrow();
+        assert!(caps.iter().all(|&c| c == DRAFT_MAX_TOKENS), "cap must be {DRAFT_MAX_TOKENS}, got {caps:?}");
+        assert_eq!(caps.len(), 2, "truncation triggered exactly one retry");
     }
 
     #[test]
@@ -1437,7 +1521,7 @@ fn add(a: i32, b: i32) -> i32 {
                 Ok(reply(VALID_DRAFT_JSON))
             }
         };
-        let out = generate(
+        let out = generate_with_mode(
             &Topic::FreeText("取余".into()),
             GenerateMode::Free,
             &paths,
@@ -1453,7 +1537,7 @@ fn add(a: i32, b: i32) -> i32 {
     #[test]
     fn tier3_requires_llm() {
         let fx = Fixture::new();
-        let err = generate(
+        let err = generate_with_mode(
             &Topic::FreeText("取余".into()),
             GenerateMode::Free,
             &fx.paths(),
@@ -1487,6 +1571,7 @@ fn add(a: i32, b: i32) -> i32 {
         LlmReply {
             content: content.to_string(),
             usage: Default::default(),
+            finish_reason: Some("stop".to_string()),
         }
     }
 }

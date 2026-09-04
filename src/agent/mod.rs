@@ -49,7 +49,10 @@ verify their understanding, call `generate_exercise` with a topic (a \
 concept id from `list_concepts`, an error code like E0382, or free \
 text) and a short `reason` (one line: why this exercise now, derived \
 from the conversation). After it succeeds, say the exercise is ready \
-and can be started immediately.
+and can be started immediately. If generation FAILS, briefly tell the \
+user why and suggest retrying / changing the topic / switching models \
+(`/model`) — NEVER write an exercise yourself in the reply: an \
+exercise without local triple verification is worthless here.
 - At most a few tool calls per turn; never call the same tool twice \
 with identical arguments.
 
@@ -73,11 +76,33 @@ object on its own line instead: {\"tool\": \"<name>\", \"arguments\": \
 /// Blocking chat-turn caller; trait so tests can mock the model.
 pub trait ChatTurnCaller: Send + Sync {
     fn chat_turn(&self, messages: &[ChatMessage], tools: &[Tool]) -> Result<TurnOutput>;
+
+    /// Bounded variant for long-output generation (M4.7). The default
+    /// ignores the cap so mocks stay trivial; the real client applies
+    /// `max_tokens` on the wire.
+    fn chat_turn_bounded(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[Tool],
+        max_tokens: Option<u32>,
+    ) -> Result<TurnOutput> {
+        let _ = max_tokens;
+        self.chat_turn(messages, tools)
+    }
 }
 
 impl ChatTurnCaller for crate::llm::LlmClient {
     fn chat_turn(&self, messages: &[ChatMessage], tools: &[Tool]) -> Result<TurnOutput> {
         crate::llm::LlmClient::chat_turn(self, messages, tools)
+    }
+
+    fn chat_turn_bounded(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[Tool],
+        max_tokens: Option<u32>,
+    ) -> Result<TurnOutput> {
+        crate::llm::LlmClient::chat_turn_bounded(self, messages, tools, max_tokens)
     }
 }
 
@@ -420,11 +445,11 @@ mod tests {
     use crate::llm::{ToolCall, Usage};
 
     fn reply(content: &str) -> TurnOutput {
-        TurnOutput { content: Some(content.into()), tool_calls: vec![], usage: Usage { prompt_tokens: 10, completion_tokens: 5 } }
+        TurnOutput { content: Some(content.into()), tool_calls: vec![], usage: Usage { prompt_tokens: 10, completion_tokens: 5 }, finish_reason: Some("stop".into()) }
     }
 
     fn calls_output(calls: Vec<ToolCall>) -> TurnOutput {
-        TurnOutput { content: None, tool_calls: calls, usage: Usage { prompt_tokens: 10, completion_tokens: 5 } }
+        TurnOutput { content: None, tool_calls: calls, usage: Usage { prompt_tokens: 10, completion_tokens: 5 }, finish_reason: Some("tool_calls".into()) }
     }
 
     fn call(id: &str, name: &str, args: &str) -> ToolCall {

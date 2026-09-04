@@ -92,7 +92,6 @@ pub(crate) fn cmd_generate(
     let paths = generator::Paths::from_root(Path::new("."));
     match generator::generate(
         &topic,
-        generator::GenerateMode::Auto,
         &paths,
         llm,
         Some(&mut |stage: generator::GenerateStage| {

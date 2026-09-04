@@ -66,12 +66,6 @@ pub fn tool_schemas() -> Vec<Tool> {
                         "type": "string",
                         "description": "一句话说明为什么现在出这道题（结合对话语境，如「你贴的代码报 E0382」）；\
                                         会展示给用户并随题归档"
-                    },
-                    "mode": {
-                        "type": "string",
-                        "enum": ["auto", "matched", "adapted", "free"],
-                        "description": "出题层级（§7.5 三层漏斗）：auto=先模板直配、没有就改编、再自由生成（默认）；\
-                                        matched=只用现有模板；adapted=以相近模板为骨架改写；free=完全自由生成"
                     }
                 },
                 "required": ["topic"]
@@ -180,7 +174,13 @@ struct CallerBridge {
 
 impl generator::LlmCaller for CallerBridge {
     fn call(&mut self, prompt: &str) -> Result<LlmReply> {
-        let out: TurnOutput = self.caller.chat_turn(&[ChatMessage::user(prompt.to_string())], &[])?;
+        self.call_bounded(prompt, u32::MAX)
+    }
+
+    fn call_bounded(&mut self, prompt: &str, max_tokens: u32) -> Result<LlmReply> {
+        let cap = (max_tokens < u32::MAX).then_some(max_tokens);
+        let out: TurnOutput =
+            self.caller.chat_turn_bounded(&[ChatMessage::user(prompt.to_string())], &[], cap)?;
         let cost = usage::cost_usd(
             out.usage.prompt_tokens,
             out.usage.completion_tokens,
@@ -188,7 +188,11 @@ impl generator::LlmCaller for CallerBridge {
             self.output_price,
         );
         self.acc.add(out.usage.prompt_tokens, out.usage.completion_tokens, cost);
-        Ok(LlmReply { content: out.content.unwrap_or_default(), usage: out.usage })
+        Ok(LlmReply {
+            content: out.content.unwrap_or_default(),
+            usage: out.usage,
+            finish_reason: out.finish_reason,
+        })
     }
 }
 
@@ -203,11 +207,6 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
         return Err(anyhow!("topic 不能为空"));
     }
     let topic = Topic::from_input(&topic_text);
-    let mode = args
-        .get("mode")
-        .and_then(|m| m.as_str())
-        .and_then(generator::GenerateMode::parse)
-        .unwrap_or(generator::GenerateMode::Auto);
     progress(&format!("生成练习（{topic_text}）：选模板…"));
 
     let paths = Paths::from_root(&env.root);
@@ -217,9 +216,8 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
         output_price: env.cfg.prices.output,
         acc: UsageAcc::default(),
     };
-    let outcome = generator::generate(
+    let outcome = match generator::generate(
         &topic,
-        mode,
         &paths,
         Some(&mut bridge),
         Some(&mut |stage: generator::GenerateStage| {
@@ -232,7 +230,29 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
                 None => progress(&base),
             }
         }),
-    )?;
+    ) {
+        Ok(o) => o,
+        Err(e) => {
+            // M4.7 fallback gate: a failed generation must NEVER turn
+            // into a hand-written exercise by the model (no local
+            // triple-verification, no rustc evidence, no archiving).
+            // Return a structured instruction instead of an error so
+            // the model follows the designed degradation path.
+            let reason = ellipsize(&format!("{e:#}"), 400);
+            return Ok(ToolOutcome {
+                value: json!({
+                    "ok": false,
+                    "error": reason,
+                    "fallback": "出题管线暂时失败。请向用户转述失败原因摘要，并建议：稍后重试、\
+                                 换一个主题，或 /model 切换更快的模型。**不要自行在回复里编写练习题**\
+                                 ——未经本地三重校验的题目不可靠，这不是合格的替代品。",
+                }),
+                note: Some(format!("出题失败：{reason}")),
+                practice: None,
+                usage: bridge.acc,
+            });
+        }
+    };
 
     // M4.5a: register the exercise in the index (metadata + trigger
     // context + session attribution) so the practice board and the
