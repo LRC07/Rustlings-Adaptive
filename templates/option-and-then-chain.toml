@@ -1,0 +1,47 @@
+# 批次一 #2b（M4.5d）：Option 组合子 ×2：and_then 剥掉嵌套
+id = "option-and-then-chain"
+title = "Option 组合子：and_then + map 链式改写"
+concepts = ["types.option-result"]
+error_codes = ["E0308"]
+difficulty = "medium"
+constraints = ["no-unwrap", "max-lines=40"]
+confusion = "初学者会 map 里嵌 unwrap「绕过」第二层失败——Option<Result<T, E>> 的双层结构要用 and_then 才能干净剥开"
+anti_patterns = ["unwrap-ladder", "nested-match"]
+
+body = '''
+// 两步流水线：解析字符串成数字，再翻倍；任一步失败都返回 None。
+//
+// TODO: 现在的实现 parse 失败会 panic（unwrap）。用 and_then（接住
+//       解析）+ map（做变换）改写成一行，禁止 unwrap 与 match。
+//       区别：and_then 的闭包返回 Option（继续可能失败的一步），
+//       map 的闭包返回普通值（纯变换）——一步之差，语义分明。
+//       提示：parse::<i32>().ok() 先把 Result 变成 Option。
+fn doubled(input: Option<&str>) -> Option<i32> {
+    input.map(|s| s.parse::<i32>().unwrap() * 2)
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn doubles_parsed() {
+        assert_eq!(doubled(Some("21")), Some(42));
+    }
+
+    #[test]
+    fn none_or_unparsable_is_none() {
+        assert_eq!(doubled(None), None);
+        assert_eq!(doubled(Some("abc")), None);
+    }
+}
+'''
+
+reference = '''
+fn doubled(input: Option<&str>) -> Option<i32> {
+    input.and_then(|s| s.parse::<i32>().ok()).map(|n| n * 2)
+}
+'''

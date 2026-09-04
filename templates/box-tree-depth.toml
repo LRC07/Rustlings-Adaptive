@@ -1,0 +1,69 @@
+# 批次一 #6b（M4.5d）：递归类型与 Box ×2：二叉树深度（medium）
+id = "box-tree-depth"
+title = "Box：递归二叉树与深度计算"
+concepts = ["pointers.box"]
+error_codes = ["E0072"]
+difficulty = "medium"
+constraints = ["no-clone", "max-lines=40"]
+confusion = "有了「递归要 Box」的经验后，初学者常漏掉两件事：递归方法的基准情形（叶节点深度 0），以及 Box 字段在方法里会自动解引用、不用手动 *"
+anti_patterns = ["unwrap-children", "clone-tree"]
+
+body = '''
+// 二叉树：先给递归字段装箱（E0072），再实现 depth。
+//
+// TODO:
+//   1. 修正 Tree 的递归字段（用 Box 包住递归部分）
+//   2. 实现 depth：叶节点（children 为 None）深度 0，
+//      否则 1 + 两棵子树深度的较大值。
+pub struct Tree {
+    pub value: i32,
+    pub children: Option<(Tree, Tree)>,
+}
+
+pub fn depth(t: &Tree) -> usize {
+    todo!()
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn leaf(v: i32) -> Tree {
+        Tree { value: v, children: None }
+    }
+
+    #[test]
+    fn leaf_depth_is_zero() {
+        assert_eq!(depth(&leaf(1)), 0);
+    }
+
+    #[test]
+    fn three_levels_is_two() {
+        let t = Tree {
+            value: 0,
+            children: Some((
+                Box::new(leaf(1)),
+                Box::new(Tree { value: 2, children: Some((Box::new(leaf(3)), Box::new(leaf(4)))) }),
+            )),
+        };
+        assert_eq!(depth(&t), 2);
+    }
+}
+'''
+
+reference = '''
+pub struct Tree {
+    pub value: i32,
+    pub children: Option<(Box<Tree>, Box<Tree>)>,
+}
+
+pub fn depth(t: &Tree) -> usize {
+    match &t.children {
+        None => 0,
+        Some((l, r)) => 1 + depth(l).max(depth(r)),
+    }
+}
+'''

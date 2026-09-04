@@ -1,0 +1,60 @@
+# 批次一 #10a（M4.5d）：派生与核心 trait ×1：Debug + PartialEq（easy）
+id = "derive-basics"
+title = "derive：让类型能比较、能打印"
+concepts = ["traits.derive"]
+error_codes = ["E0277", "E0369"]
+difficulty = "easy"
+constraints = ["no-clone", "max-lines=40"]
+confusion = "Java 有 toString/equals 但要手写或 Lombok；Python 有 __eq__/__repr__ 鸭子补；初学者在 Rust 第一次撞上「assert_eq! 需要 Debug + PartialEq」的 E0277，不知道 derive 一行就能补齐"
+anti_patterns = ["manual-impl-eq"]
+
+body = '''
+// 测试里的 assert_eq! 与 {:?} 打印都在抱怨 Point（E0277）。
+//
+// TODO: 给 Point 补一行 derive，把缺失的 trait 一次带齐；
+//       其余代码不动。
+#[derive(Clone)]
+pub struct Point {
+    pub x: i32,
+    pub y: i32,
+}
+
+pub fn origin() -> Point {
+    Point { x: 0, y: 0 }
+}
+
+pub fn shifted(p: &Point, dx: i32, dy: i32) -> Point {
+    Point { x: p.x + dx, y: p.y + dy }
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compares_and_prints() {
+        assert_eq!(origin(), Point { x: 0, y: 0 });
+        assert_ne!(origin(), shifted(&origin(), 1, 0));
+        assert!(format!("{:?}", origin()).contains("Point"));
+    }
+}
+'''
+
+reference = '''
+#[derive(Clone, Debug, PartialEq)]
+pub struct Point {
+    pub x: i32,
+    pub y: i32,
+}
+
+pub fn origin() -> Point {
+    Point { x: 0, y: 0 }
+}
+
+pub fn shifted(p: &Point, dx: i32, dy: i32) -> Point {
+    Point { x: p.x + dx, y: p.y + dy }
+}
+'''

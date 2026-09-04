@@ -1,0 +1,62 @@
+# 批次一 #9a（M4.5d）：String 与 &str ×1：签名收 &str（easy）
+id = "string-args"
+title = "String 与 &str：函数签名收 &str 最通用"
+concepts = ["types.strings"]
+error_codes = ["E0308"]
+difficulty = "easy"
+constraints = ["no-clone", "max-lines=40"]
+confusion = "Java/Python 只有一种字符串类型；初学者不懂 String（拥有所有权的堆字符串）与 &str（借用的切片）的分工，签名一律写 String，调用方传字面量就 E0308"
+anti_patterns = ["string-params", "clone-at-call-site"]
+
+body = '''
+// shout 要同时能喊字面量和 String —— 现在的签名只收 String，
+// main_flow 的第一处调用报 E0308。
+//
+// TODO: 把 shout 的参数改成 &str，并把 main_flow 里传 owned 的
+//       调用改成 &owned（&String 会自动解引用强转成 &str）。
+pub fn shout(msg: String) -> String {
+    format!("【{msg}】")
+}
+
+pub fn main_flow() -> (String, String) {
+    let owned = String::from("hi");
+    let a = shout("literal");
+    let b = shout(owned);
+    (a, b)
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shouts_both_kinds() {
+        assert_eq!(shout("yo"), "【yo】");
+        let owned = String::from("hey");
+        assert_eq!(shout(&owned), "【hey】");
+    }
+
+    #[test]
+    fn flow_uses_both() {
+        let (a, b) = main_flow();
+        assert_eq!(a, "【literal】");
+        assert_eq!(b, "【hi】");
+    }
+}
+'''
+
+reference = '''
+pub fn shout(msg: &str) -> String {
+    format!("【{msg}】")
+}
+
+pub fn main_flow() -> (String, String) {
+    let owned = String::from("hi");
+    let a = shout("literal");
+    let b = shout(&owned);
+    (a, b)
+}
+'''

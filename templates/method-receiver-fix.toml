@@ -1,0 +1,86 @@
+# 批次一 #5a（M4.5d）：方法接收者 ×1：self 拿走所有权（easy）
+id = "method-receiver-fix"
+title = "方法接收者：self 会拿走所有权"
+concepts = ["ownership.method-receiver"]
+error_codes = ["E0382", "E0596"]
+difficulty = "easy"
+constraints = ["no-clone", "max-lines=40"]
+confusion = "Python/Java 的方法第一个参数总是对象引用（self/this 可读可写）；初学者想不到 Rust 的 self 会把值整个 move 进方法，也不知道改状态要 &mut self"
+anti_patterns = ["clone-self-inside", "return-self-rebuild"]
+
+body = '''
+// Counter：bump 计数、total 读数。下面两个方法的接收者写错了，
+// main_flow 里的连续调用会触发 E0382（值被 move 走）。
+//
+// TODO: 只改两个方法的接收者（self → &mut self / &self），
+//       函数体与 main_flow 都不动。
+pub struct Counter {
+    total: i32,
+}
+
+impl Counter {
+    pub fn new() -> Self {
+        Counter { total: 0 }
+    }
+
+    pub fn bump(self) -> Self {
+        Counter { total: self.total + 1 }
+    }
+
+    pub fn total(self) -> i32 {
+        self.total
+    }
+}
+
+pub fn main_flow() -> i32 {
+    let mut c = Counter::new();
+    c.bump();
+    c.bump();
+    c.total()
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flow_counts_two_bumps() {
+        assert_eq!(main_flow(), 2);
+    }
+
+    #[test]
+    fn fresh_counter_is_zero() {
+        assert_eq!(Counter::new().total(), 0);
+    }
+}
+'''
+
+reference = '''
+pub struct Counter {
+    total: i32,
+}
+
+impl Counter {
+    pub fn new() -> Self {
+        Counter { total: 0 }
+    }
+
+    pub fn bump(&mut self) {
+        self.total += 1;
+    }
+
+    pub fn total(&self) -> i32 {
+        self.total
+    }
+}
+
+pub fn main_flow() -> i32 {
+    let mut c = Counter::new();
+    c.bump();
+    c.bump();
+    c.total()
+}
+'''

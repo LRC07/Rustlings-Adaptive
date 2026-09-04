@@ -1,0 +1,48 @@
+# 批次一 #9b（M4.5d）：String 与 &str ×2：返回切片零分配（medium）
+id = "string-slice-borrow"
+title = "String 与 &str：返回切片而不是分配新串"
+concepts = ["types.strings"]
+error_codes = ["E0308"]
+difficulty = "medium"
+constraints = ["no-clone", "max-lines=40"]
+confusion = "Java 的 substring 返回新对象（看似免费）；初学者写 Rust 也随手 to_owned 分配，忘了「借一段出去」用切片就行——返回引用的寿命跟着输入走"
+anti_patterns = ["to-owned-escape"]
+
+body = '''
+// 分析首词：返回它的长度与切片本身（零分配）。
+//
+// TODO: 补全 analyze 的第二返回值：用切片语法 &s[..len] 从原串借用；
+//       空串时 len 为 0，切片 &s[..0] 也是合法的。禁止 to_owned/clone。
+//       对比：返回 &str 把「字符串内容」借出去，生命周期跟输入走，
+//       调用方零拷贝；返回 String 则总是多一次堆分配。
+//       注意返回类型 (usize, &str) 里的 &str 已经告诉你方向了。
+pub fn analyze(s: &str) -> (usize, &str) {
+    let len = s.split_whitespace().next().map(|w| w.len()).unwrap_or(0);
+    (len, todo!())
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_word_slice() {
+        assert_eq!(analyze("hello world"), (5, "hello"));
+    }
+
+    #[test]
+    fn empty_is_empty() {
+        assert_eq!(analyze(""), (0, ""));
+    }
+}
+'''
+
+reference = '''
+pub fn analyze(s: &str) -> (usize, &str) {
+    let len = s.split_whitespace().next().map(|w| w.len()).unwrap_or(0);
+    (len, &s[..len])
+}
+'''

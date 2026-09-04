@@ -1,0 +1,46 @@
+# 批次一 #8a（M4.5d）：mut 绑定与遮蔽 ×1：E0384（easy）
+id = "immut-shadowing"
+title = "可变绑定：改值要 mut，重绑定用遮蔽"
+concepts = ["ownership.immut"]
+error_codes = ["E0384"]
+difficulty = "easy"
+constraints = ["no-clone", "max-lines=40"]
+confusion = "Python/JS 的 let/const 也能重绑，但没人区分「改原值」与「换新值」；Rust 的默认不可变把这两件事拆开：改原值要 mut，换新值用 shadowing"
+anti_patterns = ["mut-everywhere"]
+
+body = '''
+// 计数器：count 要累加两次。编译器报 E0384（不可变绑定被二次赋值）。
+//
+// TODO: 两种修法任选其一：
+//         a) 给绑定加 mut（就地累加）
+//         b) 每步用 let count = ... 遮蔽重绑（新值，非改旧值）
+//       最终返回 2。
+pub fn counter() -> i32 {
+    let count = 0;
+    count = count + 1;
+    count = count + 1;
+    count
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counts_twice() {
+        assert_eq!(counter(), 2);
+    }
+}
+'''
+
+reference = '''
+pub fn counter() -> i32 {
+    let mut count = 0;
+    count = count + 1;
+    count = count + 1;
+    count
+}
+'''

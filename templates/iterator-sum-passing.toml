@@ -1,0 +1,47 @@
+# 批次一 #1a（M4.5d）：迭代器链 ×1：filter + sum 替代手写循环
+id = "iterator-sum-passing"
+title = "迭代器链：filter + sum 替代手写循环"
+concepts = ["iterators.adapters"]
+error_codes = ["E0277", "E0282"]
+difficulty = "easy"
+constraints = ["iterator-only", "no-clone", "max-lines=40"]
+confusion = "C/Java 的求和过滤就是 for + if 累加；Python 的 sum(gen) 语法形似但不同——初学者不知道 Rust 的适配器能逐段组合成一条链"
+anti_patterns = ["manual-loop"]
+
+body = '''
+// 统计及格（>= pass）分数的总和。
+//
+// TODO: 用迭代器一行完成：iter() → filter（闭包里比较及格线）→ sum()。
+//       禁止 for/while/loop（iterator-only），禁止 clone。
+//       提示：filter 的闭包拿到的是 &i32（用 |&&s| 或 |&s|）；
+//       sum() 会从返回类型推断出 i32，不必再标注。
+//       写完读一遍这条链：iter 产出 → filter 留下及格的 → sum 加总，
+//       和题面是同一句话。
+fn sum_passing(scores: &[i32], pass: i32) -> i32 {
+    todo!()
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sums_passing_only() {
+        assert_eq!(sum_passing(&[50, 70, 90, 59], 60), 160);
+    }
+
+    #[test]
+    fn empty_is_zero() {
+        assert_eq!(sum_passing(&[], 60), 0);
+    }
+}
+'''
+
+reference = '''
+fn sum_passing(scores: &[i32], pass: i32) -> i32 {
+    scores.iter().filter(|&&s| s >= pass).sum()
+}
+'''

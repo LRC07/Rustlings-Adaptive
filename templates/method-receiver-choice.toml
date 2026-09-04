@@ -1,0 +1,103 @@
+# 批次一 #5b（M4.5d）：方法接收者 ×2：三个方法各选正确的 self（medium）
+id = "method-receiver-choice"
+title = "方法接收者：为三个方法各选正确的 self 形式"
+concepts = ["ownership.method-receiver"]
+error_codes = ["E0382", "E0507", "E0596"]
+difficulty = "medium"
+constraints = ["no-clone", "max-lines=40"]
+confusion = "三种接收者（self / &self / &mut self）各有归属：改状态、只读、消费；从 GC 语言过来的人没有「方法会消费调用者」的概念，倾向全用 self 或全用 &self"
+anti_patterns = ["always-take-self", "clone-self-inside"]
+
+body = '''
+// 购物车：push 放入商品、len 查询数量、into_items 消费购物车
+// 返回商品列表（这就是它叫 into_ 的原因）。
+//
+// TODO: 补全三个方法的接收者（self / &self / &mut self 各有归属）
+//       与函数体，让 main_flow 通过测试。禁止 clone。
+pub struct Cart {
+    items: Vec<String>,
+}
+
+impl Cart {
+    pub fn new() -> Self {
+        Cart { items: Vec::new() }
+    }
+
+    pub fn push(self, item: &str) {
+        todo!()  // 三个方法都要补：先想清楚接收者，再写函数体
+    }
+
+    pub fn len(self) -> usize {
+        todo!()
+    }
+
+    pub fn into_items(self) -> Vec<String> {
+        // into_ 前缀的惯用约定：这个方法会消费（take ownership of）
+        // 调用者本身 —— 这也决定了它该用什么接收者。
+        // 现在的实现是错的：返回了空列表（测试会抓住它）。
+        Vec::new()
+    }
+}
+
+pub fn main_flow() -> (usize, Vec<String>) {
+    let mut cart = Cart::new();
+    cart.push("book");
+    cart.push("pen");
+    let n = cart.len();
+    let items = cart.into_items();
+    (n, items)
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flow_counts_and_consumes() {
+        let (n, items) = main_flow();
+        assert_eq!(n, 2);
+        assert_eq!(items, vec!["book".to_string(), "pen".to_string()]);
+    }
+
+    #[test]
+    fn empty_cart_len_is_zero() {
+        assert_eq!(Cart::new().len(), 0);
+    }
+}
+'''
+
+reference = '''
+pub struct Cart {
+    items: Vec<String>,
+}
+
+impl Cart {
+    pub fn new() -> Self {
+        Cart { items: Vec::new() }
+    }
+
+    pub fn push(&mut self, item: &str) {
+        self.items.push(item.to_string());
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn into_items(self) -> Vec<String> {
+        self.items
+    }
+}
+
+pub fn main_flow() -> (usize, Vec<String>) {
+    let mut cart = Cart::new();
+    cart.push("book");
+    cart.push("pen");
+    let n = cart.len();
+    let items = cart.into_items();
+    (n, items)
+}
+'''

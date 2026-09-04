@@ -1,0 +1,48 @@
+# 批次一 #2a（M4.5d）：Option 组合子 ×1：unwrap_or 收敛默认值
+id = "option-parse-port"
+title = "Option 组合子：缺省与解析失败都回到默认值"
+concepts = ["types.option-result"]
+error_codes = ["E0308"]
+difficulty = "easy"
+constraints = ["no-unwrap", "max-lines=40"]
+confusion = "Python 的 dict.get(key, default) 一行给默认值；初学者在 Rust 里随手 unwrap，忘了「缺失」和「解析失败」两条路都要收敛"
+anti_patterns = ["unwrap-ladder"]
+
+body = '''
+// 从环境配置里解析端口号：缺失或不是合法 u16 时都用 8080。
+//
+// TODO: 消灭两处 unwrap（no-unwrap 约束）：用 and_then 把 parse 的
+//       Result 折回 Option，再用 unwrap_or 收敛到默认值（一行即可）。
+//       提示：parse::<u16>() 返回 Result，.ok() 才能变 Option；
+//       and_then 的闭包返回 Option —— 链条上任何一环是 None，
+//       后面就整段跳过，这正是我们要的「任一步失败都用默认值」。
+fn port(config: Option<&str>) -> u16 {
+    config.unwrap().parse::<u16>().unwrap()
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_valid() {
+        assert_eq!(port(Some("3000")), 3000);
+    }
+
+    #[test]
+    fn defaults_on_missing_or_bad() {
+        assert_eq!(port(None), 8080);
+        assert_eq!(port(Some("abc")), 8080);
+        assert_eq!(port(Some("99999")), 8080);
+    }
+}
+'''
+
+reference = '''
+fn port(config: Option<&str>) -> u16 {
+    config.and_then(|s| s.parse::<u16>().ok()).unwrap_or(8080)
+}
+'''

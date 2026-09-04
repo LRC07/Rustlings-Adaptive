@@ -1,0 +1,66 @@
+# 批次一 #4a（M4.5d）：模式匹配 ×1：穷尽性（E0004）
+id = "match-exhaustive"
+title = "模式匹配：match 必须穷尽所有变体"
+concepts = ["patterns.basics"]
+error_codes = ["E0004"]
+difficulty = "easy"
+constraints = ["no-clone", "max-lines=40"]
+confusion = "C/Java 的 switch 漏分支只是被 default 静默兜底的逻辑 bug；Rust 把「漏变体」变成编译错误 E0004，初学者第一次见到会以为是自己语法写错了"
+anti_patterns = ["wildcard-catch-all"]
+
+body = '''
+// 红绿灯各方向的等待秒数。编译器说 match 不完整（E0004）。
+//
+// TODO: 补上缺失的分支（Yellow：3 秒）。不要用 _ 兜底——
+//       以后新增变体时，穷尽 match 会逼你处理它。
+#[derive(Debug, PartialEq)]
+pub enum Light {
+    Red,
+    Yellow,
+    Green,
+}
+
+pub fn seconds(l: &Light) -> u32 {
+    match l {
+        Light::Red => 30,
+        Light::Green => 45,
+    }
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_lights() {
+        assert_eq!(seconds(&Light::Red), 30);
+        assert_eq!(seconds(&Light::Yellow), 3);
+        assert_eq!(seconds(&Light::Green), 45);
+    }
+
+    #[test]
+    fn yellow_is_short() {
+        assert!(seconds(&Light::Yellow) < seconds(&Light::Green));
+    }
+}
+'''
+
+reference = '''
+#[derive(Debug, PartialEq)]
+pub enum Light {
+    Red,
+    Yellow,
+    Green,
+}
+
+pub fn seconds(l: &Light) -> u32 {
+    match l {
+        Light::Red => 30,
+        Light::Yellow => 3,
+        Light::Green => 45,
+    }
+}
+'''

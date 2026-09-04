@@ -1,0 +1,60 @@
+# 批次一 #12a（M4.5d）：生命周期省略 ×1：两个输入引用时省略不够（medium）
+id = "lifetime-elision-shared"
+title = "生命周期：省略规则不够时必须自己标注"
+concepts = ["lifetimes.elision"]
+error_codes = ["E0106"]
+difficulty = "medium"
+constraints = ["no-clone", "max-lines=40"]
+confusion = "多数函数不用写生命周期就编译过（省略规则），初学者因此以为它「不存在」；直到两个输入引用都可能被返回时编译器拒绝推断——这一刻才需要亲手标注"
+anti_patterns = ["lifetime-everywhere", "to-owned-escape"]
+
+body = '''
+// headline 返回 title 或 body —— 两个输入引用都可能被返回，
+// 省略规则推不出返回引用跟谁绑定（E0106）。
+//
+// TODO: 给 headline 补上生命周期标注（'a 串起两个输入与返回值）。
+//       report 已经写好，修好后原样工作。禁止 to_owned/clone。
+fn headline(title: &str, body: &str) -> &str {
+    if title.len() >= body.len() {
+        title
+    } else {
+        body
+    }
+}
+
+pub fn report(title: &str, body: &str, prefix: &str) -> String {
+    format!("{prefix}: {}", headline(title, body))
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefers_longer() {
+        assert_eq!(report("short", "a much longer body", "NOTE"), "NOTE: a much longer body");
+    }
+
+    #[test]
+    fn title_wins_when_tied() {
+        assert_eq!(report("same", "four", "T"), "T: same");
+    }
+}
+'''
+
+reference = '''
+fn headline<'a>(title: &'a str, body: &'a str) -> &'a str {
+    if title.len() >= body.len() {
+        title
+    } else {
+        body
+    }
+}
+
+pub fn report(title: &str, body: &str, prefix: &str) -> String {
+    format!("{prefix}: {}", headline(title, body))
+}
+'''

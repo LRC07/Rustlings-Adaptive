@@ -1,0 +1,89 @@
+# 批次一 #3b（M4.5d）：自定义错误 ×2：两个错误源统一收口
+id = "error-two-sources"
+title = "自定义错误：两个错误源统一收口"
+concepts = ["errors.from-into", "errors.custom"]
+error_codes = ["E0277", "E0308"]
+difficulty = "medium"
+constraints = ["no-unwrap", "max-lines=40"]
+confusion = "从异常语言过来的人会把「格式不对」和「值非法」抛成同一个泛型异常；Rust 里每条失败路径都要在错误枚举里有个名字，Display 还得自己写"
+anti_patterns = ["string-as-error", "unwrap-ladder"]
+
+body = '''
+// 读取配置端口：字符串要解析成 u16（解析失败），且 0 是非法值。
+// ConfigError 要同时接住这两条失败路径。
+//
+// TODO:
+//   1. 实现 fmt::Display（NotANumber 显示原始输入，ZeroPort 显示说明）
+//   2. 实现 std::error::Error（空实现体即可）
+//   3. get_port 已把两条路径都收进 ConfigError —— 保持不变
+// 禁止 unwrap/expect。
+use std::fmt;
+
+#[derive(Debug)]
+pub enum ConfigError {
+    NotANumber(String),
+    ZeroPort,
+}
+
+pub fn get_port(raw: &str) -> Result<u16, ConfigError> {
+    let port: u16 = raw.parse().map_err(|_| ConfigError::NotANumber(raw.to_string()))?;
+    if port == 0 {
+        return Err(ConfigError::ZeroPort);
+    }
+    Ok(port)
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_valid_port() {
+        assert!(matches!(get_port("8080"), Ok(8080)));
+    }
+
+    #[test]
+    fn rejects_not_a_number() {
+        assert!(matches!(get_port("abc"), Err(ConfigError::NotANumber(_))));
+    }
+
+    #[test]
+    fn rejects_zero_and_displays() {
+        let e = get_port("0").unwrap_err();
+        assert!(matches!(e, ConfigError::ZeroPort));
+        assert!(!format!("{e}").is_empty());
+    }
+}
+'''
+
+reference = '''
+use std::fmt;
+
+#[derive(Debug)]
+pub enum ConfigError {
+    NotANumber(String),
+    ZeroPort,
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConfigError::NotANumber(s) => write!(f, "not a number: {s}"),
+            ConfigError::ZeroPort => write!(f, "port 0 is not allowed"),
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
+pub fn get_port(raw: &str) -> Result<u16, ConfigError> {
+    let port: u16 = raw.parse().map_err(|_| ConfigError::NotANumber(raw.to_string()))?;
+    if port == 0 {
+        return Err(ConfigError::ZeroPort);
+    }
+    Ok(port)
+}
+'''

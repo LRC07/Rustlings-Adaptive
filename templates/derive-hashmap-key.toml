@@ -1,0 +1,67 @@
+# 批次一 #10b（M4.5d）：派生与核心 trait ×2：当 HashMap 的键（medium）
+id = "derive-hashmap-key"
+title = "derive：让枚举能当 HashMap 的键"
+concepts = ["traits.derive"]
+error_codes = ["E0277"]
+difficulty = "medium"
+constraints = ["no-clone", "max-lines=40"]
+confusion = "Python 的任意可哈希对象都能当 dict 键；Java 要求 equals/hashCode 成对实现。Rust 把要求摆在明面上：键要 Eq + Hash，打印要 Debug——少一个都编译不过"
+anti_patterns = ["stringly-typed-key", "manual-hash"]
+
+body = '''
+// 把标签当 HashMap 的键来计数 —— 编译器会逐个指出缺的 trait。
+//
+// TODO: 给 Tag 补一行 derive（想清楚：做键要什么？打印要什么？
+//       == 比较要什么？），其余代码不动。
+#[derive(Clone)]
+pub enum Tag {
+    Bug,
+    Doc,
+    Perf,
+}
+
+pub fn count_tags(tags: Vec<Tag>) -> std::collections::HashMap<Tag, usize> {
+    let mut counts = std::collections::HashMap::new();
+    for t in tags {
+        *counts.entry(t).or_insert(0) += 1;
+    }
+    counts
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counts_by_tag() {
+        let counts = count_tags(vec![Tag::Bug, Tag::Bug, Tag::Doc]);
+        assert_eq!(counts.get(&Tag::Bug), Some(&2));
+        assert_eq!(counts.get(&Tag::Doc), Some(&1));
+    }
+
+    #[test]
+    fn printable() {
+        assert!(format!("{:?}", Tag::Perf).contains("Perf"));
+    }
+}
+'''
+
+reference = '''
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Tag {
+    Bug,
+    Doc,
+    Perf,
+}
+
+pub fn count_tags(tags: Vec<Tag>) -> std::collections::HashMap<Tag, usize> {
+    let mut counts = std::collections::HashMap::new();
+    for t in tags {
+        *counts.entry(t).or_insert(0) += 1;
+    }
+    counts
+}
+'''

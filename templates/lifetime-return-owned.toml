@@ -1,0 +1,53 @@
+# 批次一 #12b（M4.5d）：生命周期省略 ×2：悬垂引用改返回 owned（easy）
+id = "lifetime-return-owned"
+title = "悬垂引用：别返回局部量的引用"
+concepts = ["borrowing.dangling"]
+error_codes = ["E0515", "E0106", "E0308"]
+difficulty = "easy"
+constraints = ["no-clone", "max-lines=40"]
+confusion = "GC 语言里返回新建对象天经地义；初学者不知道 format! 的结果在函数结束时被 drop，返回 &g 是悬垂引用（E0515）——修法不是延命，而是把所有权交出去"
+anti_patterns = ["static-lifetime-escape", "leak-to-live"]
+
+body = '''
+// greeting 拼出问候语再返回 —— 但返回的是局部量的引用（E0515）。
+//
+// TODO: 修好悬垂：让函数返回 owned 的 String（调用方用法不变，
+//       main_flow 不用改）。
+fn greeting(name: &str) -> &str {
+    let g = format!("Hello, {name}!");
+    &g
+}
+
+pub fn main_flow() -> String {
+    greeting("alice")
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn greets() {
+        assert_eq!(main_flow(), "Hello, alice!");
+    }
+
+    #[test]
+    fn greets_empty_name() {
+        assert_eq!(greeting(""), "Hello, !");
+    }
+}
+'''
+
+reference = '''
+fn greeting(name: &str) -> String {
+    let g = format!("Hello, {name}!");
+    g
+}
+
+pub fn main_flow() -> String {
+    greeting("alice")
+}
+'''

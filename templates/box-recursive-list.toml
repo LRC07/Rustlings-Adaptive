@@ -1,0 +1,60 @@
+# 批次一 #6a（M4.5d）：递归类型与 Box ×1：链表（easy）
+id = "box-recursive-list"
+title = "Box：递归类型必须有已知大小"
+concepts = ["pointers.box"]
+error_codes = ["E0072"]
+difficulty = "easy"
+constraints = ["no-clone", "max-lines=40"]
+confusion = "Python/Java 的对象字段引用别的对象是常态，GC 不管类型大小；初学者不知道 Rust 在编译期要算出每个类型的确切大小，递归 enum 直接写会 E0072（无限大小）"
+anti_patterns = ["vec-as-list"]
+
+body = '''
+// 递归链表：编译器报 E0072（递归类型有无限大小）。
+//
+// TODO: 只改 Node 变体的类型——把递归部分装进 Box；
+//       sum 已经写好了，类型修复后它会原样工作（Box 会自动解引用）。
+pub enum List {
+    Node(i32, List),
+    Nil,
+}
+
+pub fn sum(list: &List) -> i32 {
+    match list {
+        List::Node(v, next) => v + sum(next),
+        List::Nil => 0,
+    }
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sums_nested() {
+        let l = List::Node(1, Box::new(List::Node(2, Box::new(List::Nil))));
+        assert_eq!(sum(&l), 3);
+    }
+
+    #[test]
+    fn nil_is_zero() {
+        assert_eq!(sum(&List::Nil), 0);
+    }
+}
+'''
+
+reference = '''
+pub enum List {
+    Node(i32, Box<List>),
+    Nil,
+}
+
+pub fn sum(list: &List) -> i32 {
+    match list {
+        List::Node(v, next) => v + sum(next),
+        List::Nil => 0,
+    }
+}
+'''

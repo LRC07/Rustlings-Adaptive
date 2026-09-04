@@ -1,0 +1,70 @@
+# 批次一 #11b（M4.5d）：泛型运算 ×2：为自定义类型实现 Add（medium）
+id = "generic-ops-money-add"
+title = "运算符重载：为自定义类型实现 Add"
+concepts = ["generics.functions"]
+error_codes = ["E0369", "E0277"]
+difficulty = "medium"
+constraints = ["no-clone", "max-lines=40"]
+confusion = "Python 给 __add__ 就能用 +；初学者不知道 Rust 的 + 是 std::ops::Add 的语法糖，自定义类型要自己实现（并声明 Output 关联类型）"
+anti_patterns = ["add-method-named-plus", "clone-to-add"]
+
+body = '''
+// 结账：把一组价格相加。现在 total + p 报 E0369——Money 还不会加法。
+//
+// TODO: 实现 std::ops::Add for Money（相加产生新的 Money，
+//       Output 关联类型 = Money）；checkout 的函数体不用改
+//       （checkout 会消耗 prices 的所有权，每个 p 都是 owned 的）。
+use std::ops::Add;
+
+#[derive(Debug, PartialEq)]
+pub struct Money(pub u64);
+
+pub fn checkout(prices: Vec<Money>) -> Money {
+    let mut total = Money(0);
+    for p in prices {
+        total = total + p;
+    }
+    total
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adds_up() {
+        assert_eq!(checkout(vec![Money(10), Money(20)]), Money(30));
+    }
+
+    #[test]
+    fn empty_is_zero() {
+        assert_eq!(checkout(vec![]), Money(0));
+    }
+}
+'''
+
+reference = '''
+use std::ops::Add;
+
+#[derive(Debug, PartialEq)]
+pub struct Money(pub u64);
+
+impl Add for Money {
+    type Output = Money;
+
+    fn add(self, rhs: Money) -> Money {
+        Money(self.0 + rhs.0)
+    }
+}
+
+pub fn checkout(prices: Vec<Money>) -> Money {
+    let mut total = Money(0);
+    for p in prices {
+        total = total + p;
+    }
+    total
+}
+'''

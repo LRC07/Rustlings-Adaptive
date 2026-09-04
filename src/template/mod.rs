@@ -849,17 +849,24 @@ misconceptions = ["以为 String 赋值会深拷贝"]
     /// Repo-level fixture test: the whole hand-written template library
     /// must load cleanly, reference valid taxonomy concepts/codes, and —
     /// most importantly — every template must pass the triple gate with
-    /// its default slot fill (design §7.4 gates 1–3).
+    /// its default slot fill (design §7.4 gates 1–3). Every slot
+    /// rotation (attempt 1..4) must ALSO pass the full gate — this is
+    /// the data-side guard against the M3 "hardcoded expectation"
+    /// bug class (expectations must be computed from the slots).
     #[test]
     fn repo_template_library_is_consistent_and_valid() {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let templates = load_dir(&root.join("templates")).unwrap();
-        assert_eq!(templates.len(), 12, "模板库应为 12 个（M3 首批 10 + M3.1 错误处理 2）");
+        assert!(
+            templates.len() >= 12,
+            "模板库应 ≥12 个（M3 首批 12 + M4.5d 扩容），实际 {}",
+            templates.len()
+        );
         let graph =
             crate::taxonomy::ConceptGraph::load(&root.join("taxonomy/concepts.toml")).unwrap();
         assert!(
-            graph.len() >= 30,
-            "概念图谱应 ≥36 节点，实际 {}",
+            graph.len() >= 50,
+            "概念图谱应 ≥50 节点（M4.5d 扩容后），实际 {}",
             graph.len()
         );
 
@@ -891,37 +898,33 @@ misconceptions = ["以为 String 赋值会深拷贝"]
         std::fs::create_dir_all(&wd).unwrap();
 
         for t in &templates {
-            // Retry rotations must all be renderable (values valid).
-            for attempt in 1..4 {
+            let cs = constraints_of(t).unwrap();
+
+            // Every slot rotation must pass the FULL gate: the test
+            // expectations must be computed from the slots, not pinned
+            // to the default values (M3 lesson, now enforced).
+            for attempt in 0..4 {
                 let vals = fill_for_attempt(t, attempt);
+                let r = render(t, &vals).unwrap();
+
+                let v = crate::constraints::check(&r.reference_file(), &cs);
                 assert!(
-                    render(t, &vals).is_ok(),
-                    "模板 {} 第 {attempt} 次填槽非法",
+                    v.is_empty(),
+                    "模板 {} 第 {attempt} 次填槽的参考解违反自身约束: {v:?}",
                     t.id
                 );
+                let report =
+                    crate::verifier::verify_exercise(&r.user_file(), &r.reference_file(), &wd)
+                        .unwrap();
+                assert!(
+                    report.all_pass(),
+                    "模板 {} 第 {attempt} 次填槽未通过三重校验: {report:?}",
+                    t.id
+                );
+                first_error_matches(&t.error_codes, &report).unwrap_or_else(|e| {
+                    panic!("模板 {} 第 {attempt} 次填槽首错误码不一致: {e:#}", t.id)
+                });
             }
-
-            let values = fill_for_attempt(t, 0);
-            let r = render(t, &values).unwrap();
-
-            // Gate 3: reference satisfies its own declared constraints.
-            let cs = constraints_of(t).unwrap();
-            let v = crate::constraints::check(&r.reference_file(), &cs);
-            assert!(v.is_empty(), "模板 {} 参考解违反自身约束: {v:?}", t.id);
-
-            // Gate 1: triple verification (template fails, ref passes).
-            let report =
-                crate::verifier::verify_exercise(&r.user_file(), &r.reference_file(), &wd).unwrap();
-            assert!(
-                report.all_pass(),
-                "模板 {} 未通过三重校验: {report:?}",
-                t.id
-            );
-
-            // Gate C1 (M4.5b): the unfinished template's first compile
-            // error must be one of the declared error codes.
-            first_error_matches(&t.error_codes, &report)
-                .unwrap_or_else(|e| panic!("模板 {} 首错误码不一致: {e:#}", t.id));
         }
         let _ = std::fs::remove_dir_all(&wd);
     }

@@ -246,3 +246,97 @@ name = "Option 与 Result 基础"
 parents = ["types", "errors"]
 error_codes = ["E0308"]
 fix_patterns = ["ok-or", "map-or-else"]
+
+[[concept]]
+id = "iterators"
+name = "迭代器"
+
+[[concept]]
+id = "iterators.adapters"
+name = "迭代器适配器（map/filter/sum）"
+parents = ["iterators"]
+error_codes = ["E0277", "E0282", "E0369"]
+fix_patterns = ["use-iterator-chain", "add-sum-trait"]
+
+[[concept]]
+id = "patterns"
+name = "模式匹配"
+
+[[concept]]
+id = "patterns.basics"
+name = "match 完备性与枚举解构"
+parents = ["patterns"]
+error_codes = ["E0004", "E0005", "E0308"]
+fix_patterns = ["exhaustive-match", "use-if-let"]
+
+[[concept]]
+id = "ownership.method-receiver"
+name = "方法接收者（self/&self/&mut self）"
+parents = ["ownership"]
+error_codes = ["E0382", "E0507"]
+fix_patterns = ["choose-receiver", "borrow-instead-of-move"]
+
+[[concept]]
+id = "pointers"
+name = "智能指针"
+
+[[concept]]
+id = "pointers.box"
+name = "Box 与递归类型"
+parents = ["pointers"]
+error_codes = ["E0072"]
+fix_patterns = ["box-recursive"]
+
+[[concept]]
+id = "pointers.rc-refcell"
+name = "Rc 与 RefCell 共享可变"
+parents = ["pointers"]
+error_codes = ["E0596", "E0382"]
+fix_patterns = ["interior-mutability", "clone-the-rc"]
+
+[[concept]]
+id = "pointers.deref"
+name = "Deref 与解引用强转"
+parents = ["pointers"]
+error_codes = ["E0308", "E0277"]
+fix_patterns = ["deref-coercion"]
+
+[[concept]]
+id = "closures"
+name = "闭包"
+
+[[concept]]
+id = "closures.traits"
+name = "Fn/FnMut/FnOnce 与捕获"
+parents = ["closures", "ownership"]
+error_codes = ["E0597", "E0373"]
+fix_patterns = ["pick-fn-bound", "move-into-closure"]
+
+[[concept]]
+id = "collections"
+name = "常用集合"
+
+[[concept]]
+id = "collections.hashmap"
+name = "HashMap 与所有权"
+parents = ["collections"]
+error_codes = ["E0382", "E0502"]
+fix_patterns = ["use-entry", "borrow-not-move"]
+
+[[concept]]
+id = "collections.vec"
+name = "Vec 与所有权"
+parents = ["collections"]
+error_codes = ["E0382", "E0502"]
+fix_patterns = ["borrow-not-move"]
+
+[[concept]]
+id = "modules"
+name = "模块与可见性"
+
+[[concept]]
+id = "modules.visibility"
+name = "pub 可见性与路径"
+parents = ["modules"]
+error_codes = ["E0603"]
+fix_patterns = ["widen-visibility"]

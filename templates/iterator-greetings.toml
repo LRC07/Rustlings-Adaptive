@@ -1,0 +1,51 @@
+# 批次一 #1b（M4.5d）：迭代器链 ×2：filter + map + collect 组合
+id = "iterator-greetings"
+title = "迭代器链：filter + map + collect 组合"
+concepts = ["iterators.adapters"]
+error_codes = ["E0277", "E0283"]
+difficulty = "medium"
+constraints = ["iterator-only", "no-clone", "max-lines=40"]
+confusion = "初学者会先 for 循环 push 到 Vec——忘了 collect 能把适配器链直接收成容器，也容易漏掉 collect 的目标类型标注"
+anti_patterns = ["manual-loop", "collect-then-filter"]
+
+body = '''
+// 把名字列表整理成问候语：跳过空名，其余变成 "Hi, <name>!"。
+//
+// TODO: 用迭代器链完成（iter → filter → map → collect），
+//       禁止 for/while/loop，禁止 clone。
+//       提示：collect 的目标类型可由返回值推断；
+//       filter 的闭包拿到 &str（用 |n| 判断即可）。
+//       对比：这条链一行表达了「跳过空名 → 逐个造问候语 → 收集成
+//       Vec」三步，比手写循环少一个可变状态（Vec 暂存）。
+fn greetings(names: &[&str]) -> Vec<String> {
+    todo!()
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skips_empty_and_greets() {
+        assert_eq!(greetings(&["alice", "", "bob"]), vec!["Hi, alice!", "Hi, bob!"]);
+    }
+
+    #[test]
+    fn all_empty_gives_empty() {
+        assert_eq!(greetings(&["", ""]), Vec::<String>::new());
+    }
+}
+'''
+
+reference = '''
+fn greetings(names: &[&str]) -> Vec<String> {
+    names
+        .iter()
+        .filter(|n| !n.is_empty())
+        .map(|n| format!("Hi, {n}!"))
+        .collect()
+}
+'''

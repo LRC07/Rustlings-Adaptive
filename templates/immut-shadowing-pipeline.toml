@@ -1,0 +1,49 @@
+# 批次一 #8b（M4.5d）：mut 绑定与遮蔽 ×2：遮蔽流水线（medium）
+id = "immut-shadowing-pipeline"
+title = "遮蔽：同名变量在清洗流水线中换类型"
+concepts = ["ownership.immut"]
+error_codes = ["E0308"]
+difficulty = "medium"
+constraints = ["no-clone", "no-unwrap", "max-lines=40"]
+confusion = "初学者要么到处加 mut，要么给每个中间值起新名字（raw/trimmed/parsed/doubled…）；shadowing 让流水线每步同名、类型在遮蔽中自然切换"
+anti_patterns = ["mut-everywhere", "unwrap-ladder"]
+
+body = '''
+// 数据清洗：trim → 解析（失败按 0）→ 翻倍。
+//
+// TODO: 用遮蔽改写：三步都用 `let x = ...`，类型从 &str 变 i32；
+//       禁止 mut、禁止 unwrap（坏输入用 unwrap_or）。
+//       现在的实现坏输入会 panic（测试里有 "abc"）。
+pub fn pipeline(raw: &str) -> i32 {
+    let x = raw.trim();
+    x.parse::<i32>().unwrap() * 2
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trims_parses_doubles() {
+        assert_eq!(pipeline(" 21 "), 42);
+    }
+
+    #[test]
+    fn bad_input_is_zero() {
+        assert_eq!(pipeline(""), 0);
+        assert_eq!(pipeline("abc"), 0);
+    }
+}
+'''
+
+reference = '''
+pub fn pipeline(raw: &str) -> i32 {
+    let x = raw.trim();
+    let x = x.parse::<i32>().unwrap_or(0);
+    let x = x * 2;
+    x
+}
+'''

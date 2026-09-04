@@ -1,0 +1,78 @@
+# 批次一 #7a（M4.5d）：部分移动 ×1：取走字段后整体不可用（easy）
+id = "own-partial-move"
+title = "部分移动：取走一个字段后，整个值不可再用"
+concepts = ["ownership.partial-move"]
+error_codes = ["E0382"]
+difficulty = "easy"
+constraints = ["no-clone", "max-lines=40"]
+confusion = "Python/JS 解构对象后原对象完好如初；初学者不知道 Rust 解构走的是 move——String 字段被搬走后，整个结构体算「被拆过」，整体使用会 E0382"
+anti_patterns = ["clone-everywhere", "string-rebuild"]
+
+body = '''
+// 归档配置：name 要搬进归档，retries 留下统计。
+// 下面的实现先搬走 name，又把整个 c 传给 show —— E0382。
+//
+// TODO: 用解构一次拿走全部字段（let Config { name, retries } = c;），
+//       修好 split；show 与 stats 保持不变。
+pub struct Config {
+    pub name: String,
+    pub retries: u32,
+}
+
+pub fn show(c: &Config) -> String {
+    format!("config {}", c.name)
+}
+
+pub fn stats(c: &Config) -> u32 {
+    c.retries
+}
+
+pub fn split(c: Config) -> (String, u32) {
+    let name = c.name;
+    show(&c);
+    (name, c.retries)
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_carries_everything() {
+        let c = Config { name: "db".into(), retries: 3 };
+        let (name, retries) = split(c);
+        assert_eq!(name, "db");
+        assert_eq!(retries, 3);
+    }
+
+    #[test]
+    fn show_and_stats_still_work() {
+        let c = Config { name: "api".into(), retries: 1 };
+        assert_eq!(show(&c), "config api");
+        assert_eq!(stats(&c), 1);
+    }
+}
+'''
+
+reference = '''
+pub struct Config {
+    pub name: String,
+    pub retries: u32,
+}
+
+pub fn show(c: &Config) -> String {
+    format!("config {}", c.name)
+}
+
+pub fn stats(c: &Config) -> u32 {
+    c.retries
+}
+
+pub fn split(c: Config) -> (String, u32) {
+    let Config { name, retries } = c;
+    (name, retries)
+}
+'''

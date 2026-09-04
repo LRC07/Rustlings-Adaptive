@@ -1,0 +1,79 @@
+# 批次一 #3a（M4.5d）：From/Into 错误转换 ×1：? 自动转换
+id = "error-from-parseint"
+title = "From 转换：让 ? 自动把底层错误收进自定义错误"
+concepts = ["errors.from-into"]
+error_codes = ["E0277"]
+difficulty = "medium"
+constraints = ["no-unwrap", "max-lines=38"]
+confusion = "Java/Python 的异常沿继承树自动向上匹配；初学者不知道 Rust 的 ? 只做一次 From 转换——自定义错误不实现 From<ParseIntError> 就接不住"
+anti_patterns = ["map-err-everywhere", "unwrap-ladder"]
+
+body = '''
+// 解析 CSV 的第一列数字。想让 ? 直接把 ParseIntError 变成
+// ParseError —— 现在还差一个 From 实现（编译器的 E0277 会指出）。
+//
+// TODO:
+//   1. 为 ParseError 实现 fmt::Display 与 std::error::Error
+//   2. 实现 From<std::num::ParseIntError> for ParseError（变体 NotANumber）
+//   3. parse_head 保持不变（? 会自动转换）
+// 禁止 unwrap/expect。
+use std::fmt;
+
+#[derive(Debug)]
+pub enum ParseError {
+    NotANumber,
+}
+
+pub fn parse_head(raw: &str) -> Result<i32, ParseError> {
+    let head = raw.split(',').next().ok_or(ParseError::NotANumber)?;
+    Ok(head.parse::<i32>()?)
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_head() {
+        assert!(matches!(parse_head("42,7"), Ok(42)));
+    }
+
+    #[test]
+    fn bad_number_is_displayable_error() {
+        let e = parse_head("x,7").unwrap_err();
+        assert!(matches!(e, ParseError::NotANumber));
+        assert!(!format!("{e}").is_empty());
+    }
+}
+'''
+
+reference = '''
+use std::fmt;
+
+#[derive(Debug)]
+pub enum ParseError {
+    NotANumber,
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "not a number")
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+impl From<std::num::ParseIntError> for ParseError {
+    fn from(_: std::num::ParseIntError) -> Self {
+        ParseError::NotANumber
+    }
+}
+
+pub fn parse_head(raw: &str) -> Result<i32, ParseError> {
+    let head = raw.split(',').next().ok_or(ParseError::NotANumber)?;
+    Ok(head.parse::<i32>()?)
+}
+'''

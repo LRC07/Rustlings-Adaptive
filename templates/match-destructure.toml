@@ -1,0 +1,62 @@
+# 批次一 #4b（M4.5d）：模式匹配 ×2：解构枚举数据
+id = "match-destructure"
+title = "模式匹配：一次解构枚举携带的数据"
+concepts = ["patterns.basics"]
+error_codes = ["E0005", "E0308"]
+difficulty = "medium"
+constraints = ["no-clone", "max-lines=40"]
+confusion = "初学者倾向先用 unwrap 拿出值再用字段访问，或嵌套 if let；忘了 match 的模式能在拆开变体的同时完成字段绑定"
+anti_patterns = ["unwrap-first-then-use", "nested-if-let"]
+
+body = '''
+// UI 事件：把点击坐标求和、把按键字符转大写。
+//
+// TODO: 在两个分支里补全逻辑（模式已解构出 x/y 与 c）：
+//         * Click { x, y } → (x + y).to_string()
+//         * Key(c)         → c.to_uppercase().to_string()
+#[derive(Debug)]
+pub enum Event {
+    Click { x: i32, y: i32 },
+    Key(char),
+}
+
+pub fn describe(e: &Event) -> String {
+    match e {
+        Event::Click { x, y } => todo!(),
+        Event::Key(c) => todo!(),
+    }
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn click_sums_coords() {
+        assert_eq!(describe(&Event::Click { x: 3, y: 4 }), "7");
+    }
+
+    #[test]
+    fn key_uppercases() {
+        assert_eq!(describe(&Event::Key('r')), "R");
+    }
+}
+'''
+
+reference = '''
+#[derive(Debug)]
+pub enum Event {
+    Click { x: i32, y: i32 },
+    Key(char),
+}
+
+pub fn describe(e: &Event) -> String {
+    match e {
+        Event::Click { x, y } => (x + y).to_string(),
+        Event::Key(c) => c.to_uppercase().to_string(),
+    }
+}
+'''
