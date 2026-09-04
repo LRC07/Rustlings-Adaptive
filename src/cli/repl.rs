@@ -45,6 +45,19 @@ pub(crate) fn run() {
     let mut client = make_client(&cfg);
     install_ctrlc();
 
+    // M4.8: give the active configuration a profile identity so /model
+    // lists everything and the user can always switch back.
+    if cfg.ensure_active_profile_recorded() {
+        match cfg.save_to_default_file() {
+            Ok(()) => {
+                if let Some(last) = cfg.models.last() {
+                    println!("  已把当前模型记录为档案「{}」（/model 可查看与切换）", last.name);
+                }
+            }
+            Err(e) => eprintln!("  （模型档案写回失败：{e:#}）"),
+        }
+    }
+
     // R5: resume the newest session so a restart continues the talk.
     let existing = Session::list();
     let mut session = match Session::resume_latest() {

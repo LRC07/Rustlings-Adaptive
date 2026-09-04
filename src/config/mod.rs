@@ -257,6 +257,46 @@ impl ModelConfig {
         let key_matches = p.api_key.trim().is_empty() || p.api_key == self.api_key;
         p.endpoint == self.endpoint && p.model == self.model && key_matches
     }
+
+    /// M4.8: make sure the ACTIVE configuration has a profile identity.
+    /// Without this, `/model` lists only the user-declared `[[models]]`
+    /// and switching is destructive (the original top-level config has
+    /// no name to switch back to). Returns true when an implicit
+    /// profile was appended (caller persists).
+    pub fn ensure_active_profile_recorded(&mut self) -> bool {
+        // Nothing meaningful to record (no key configured at all).
+        if self.api_key.trim().is_empty() {
+            return false;
+        }
+        if self.models.iter().any(|m| self.is_active_profile(m)) {
+            return false;
+        }
+        // Name from the model id, made list-friendly and unique.
+        let base: String = {
+            let n: String = self
+                .model
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect();
+            let n = n.trim_matches('-').to_string();
+            if n.is_empty() { "default".to_string() } else { n }
+        };
+        let mut name = base.clone();
+        let mut n = 2;
+        while self.models.iter().any(|m| m.name == name) {
+            name = format!("{base}-{n}");
+            n += 1;
+        }
+        self.models.push(ModelProfile {
+            name,
+            endpoint: self.endpoint.clone(),
+            api_key: self.api_key.clone(),
+            model: self.model.clone(),
+            llm_timeout_secs: self.llm_timeout_secs,
+            prices: Some(self.prices.clone()),
+        });
+        true
+    }
 }
 
 #[cfg(test)]
@@ -411,5 +451,48 @@ model = "qwen2.5:7b"
     fn old_configs_load_without_profiles() {
         let cfg: ModelConfig = toml::from_str("model = \"m\"").unwrap();
         assert!(cfg.models.is_empty());
+    }
+
+    #[test]
+    fn active_config_gets_a_profile_identity() {
+        let mut cfg = ModelConfig {
+            api_key: "sk-live".into(),
+            endpoint: "https://api.example.com/v1".into(),
+            model: "GLM-5.3-Flash".into(),
+            ..Default::default()
+        };
+        // Not yet recorded → records an implicit profile named after
+        // the model.
+        assert!(cfg.ensure_active_profile_recorded());
+        assert_eq!(cfg.models.len(), 1);
+        let p = &cfg.models[0];
+        assert_eq!(p.name, "GLM-5-3-Flash");
+        assert_eq!(p.endpoint, "https://api.example.com/v1");
+        assert_eq!(p.api_key, "sk-live");
+        assert!(cfg.is_active_profile(p));
+
+        // Recorded → idempotent.
+        assert!(!cfg.ensure_active_profile_recorded());
+
+        // Empty key (nothing configured) → never recorded.
+        let mut cfg = ModelConfig::default();
+        assert!(!cfg.ensure_active_profile_recorded());
+
+        // Name collision → suffix.
+        let mut cfg = ModelConfig {
+            api_key: "sk-live".into(),
+            model: "fast".into(),
+            ..Default::default()
+        };
+        cfg.models.push(ModelProfile {
+            name: "fast".into(),
+            endpoint: "https://other/v1".into(),
+            api_key: "sk-other".into(),
+            model: "fast".into(),
+            llm_timeout_secs: None,
+            prices: None,
+        });
+        assert!(cfg.ensure_active_profile_recorded());
+        assert_eq!(cfg.models[1].name, "fast-2");
     }
 }
