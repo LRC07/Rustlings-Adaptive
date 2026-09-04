@@ -44,27 +44,31 @@ fine-grained concept ids from the local taxonomy. Never invent codes.
 error, call `check_code` to compile it locally first and explain from \
 the real diagnostics.
 - Teach, don't dump solutions: give hints and next steps first.
-- When the user wants to practice, or a quick focused exercise would \
-verify their understanding, call `generate_exercise` with a topic (a \
-concept id from `list_concepts`, an error code like E0382, or free \
-text) and a short `reason` (one line: why this exercise now, derived \
-from the conversation). After it succeeds, say the exercise is ready \
-and can be started immediately. If generation FAILS, briefly tell the \
-user why and suggest retrying / changing the topic / switching models \
-(`/model`) — NEVER write an exercise yourself in the reply: an \
-exercise without local triple verification is worthless here.
-- At most a few tool calls per turn; never call the same tool twice \
-with identical arguments.
+- Tool discipline: at most a few tool calls per turn; never call the \
+same tool twice with identical arguments. If `check_code` fails two \
+rounds in a row, STOP experimenting and explain from the diagnostics \
+you already have — the user must always get a conclusion, not a \
+silence. When the user wants to practice, or a quick focused exercise \
+would verify their understanding, call `generate_exercise` with a \
+topic (a concept id from `list_concepts`, an error code like E0382, \
+or free text) and a short `reason` (one line: why this exercise now, \
+derived from the conversation). After it succeeds, say the exercise \
+is ready and can be started immediately. If generation FAILS, briefly \
+tell the user why and suggest retrying / changing the topic / \
+switching models (`/model`) — NEVER write an exercise yourself in the \
+reply: an exercise without local triple verification is worthless here.
 
 Tools:
 - `list_concepts` {} — list the concept ids covered by the taxonomy.
-- `generate_exercise` {\"topic\": string, \"reason\": string, \"mode\": \
-\"auto|matched|adapted|free\"} — generate a small 10-40 line fill-in \
+- `generate_exercise` {\"topic\": string, \"reason\": string, \
+\"mode\": \"auto|free\"} — generate a small 10-40 line fill-in \
 exercise, triple-verified locally (compiles / reference solution passes \
-all tests / unfinished template fails). Layers: matched = fill a \
-hand-written template; adapted = rewrite a nearby template's skeleton \
-to the topic; free = write one from scratch. auto falls through \
-matched → adapted → free. It is written to the exercise directory; \
+all tests / unfinished template fails). auto (default) falls through \
+template-fill → adapted → free generation, always through the same \
+local quality gate; free skips templates and writes one from scratch — \
+use it ONLY when the user explicitly asks for no-template / free \
+generation (repeated template matches that miss their point are a \
+strong signal to offer it). It is written to the exercise directory; \
 the user can start at once.
 - `check_code` {\"code\": string} — compile a Rust snippet with local \
 rustc and return real diagnostics (codes, messages, lines).
@@ -290,10 +294,35 @@ pub fn run_turn(
     }
 
     if reply.is_none() {
-        // Tool-round budget exhausted: close the turn gracefully.
-        let text = "（本回合的工具调用轮次已达上限，先回答到这里；可以继续追问或换个问法。）".to_string();
-        msgs.push(ChatMessage::assistant(text.clone()));
-        reply = Some(text);
+        // Tool-round budget exhausted: force ONE final tool-less call
+        // demanding a conclusion. A canned stub left the user with
+        // nothing (9.4 session 27: five check_code experiments burned
+        // the budget and the question went unanswered).
+        msgs.push(ChatMessage::user(
+            "（系统）工具调用轮次已达上限。不要再调用任何工具，立即基于已有的诊断与观察，\
+             直接给出你对问题的结论与解释。"
+                .to_string(),
+        ));
+        progress("整理结论…");
+        match env.caller.chat_turn(&window(&msgs, env.cfg.context_len), &[]) {
+            Ok(out) => {
+                record(env, out.usage, "chat", &mut totals);
+                let text = out
+                    .content
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| {
+                        "（工具调用轮次已达上限，模型未能给出结论；请继续追问或换个问法。）".to_string()
+                    });
+                msgs.push(ChatMessage::assistant(text.clone()));
+                reply = Some(text);
+            }
+            Err(_) => {
+                let text =
+                    "（本回合的工具调用轮次已达上限，先回答到这里；可以继续追问或换个问法。）".to_string();
+                msgs.push(ChatMessage::assistant(text.clone()));
+                reply = Some(text);
+            }
+        }
     }
 
     Ok(TurnOutcome {

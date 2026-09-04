@@ -175,6 +175,15 @@ pub struct ModelProfile {
     /// Empty → the active [prices] is kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prices: Option<Prices>,
+    /// Per-profile thinking switch (M4.14): reasoning models differ —
+    /// DeepSeek V4 on/off × low/high/max, Kimi K3 always-on ×
+    /// low/high/max (default max!), GLM on/off with no effort knob.
+    /// None → the active value is kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub think_mode: Option<ThinkMode>,
+    /// None → the active value is kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 /// Model configuration — R3: endpoint / key / model / context length /
@@ -337,6 +346,12 @@ impl ModelConfig {
         if let Some(pr) = p.prices {
             self.prices = pr;
         }
+        if let Some(t) = p.think_mode {
+            self.think_mode = t;
+        }
+        if let Some(e) = &p.reasoning_effort {
+            self.reasoning_effort = Some(e.clone());
+        }
         Ok(())
     }
 
@@ -383,6 +398,8 @@ impl ModelConfig {
             model: self.model.clone(),
             llm_timeout_secs: self.llm_timeout_secs,
             prices: Some(self.prices.clone()),
+            think_mode: Some(self.think_mode),
+            reasoning_effort: self.reasoning_effort.clone(),
         });
         true
     }
@@ -580,6 +597,8 @@ model = "qwen2.5:7b"
             model: "fast".into(),
             llm_timeout_secs: None,
             prices: None,
+            think_mode: None,
+            reasoning_effort: None,
         });
         assert!(cfg.ensure_active_profile_recorded());
         assert_eq!(cfg.models[1].name, "fast-2");

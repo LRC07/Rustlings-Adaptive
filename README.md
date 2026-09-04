@@ -34,6 +34,8 @@ Agent 解释并锚定知识点（细分概念图谱 + rustc 错误码双轨）�
 | M4.10 | 出题历史感知：index 感知已出模板 → 未用过优先；重复命中走变式（轮转偏移 + LLM 换值提示 + variant 带出）；无槽位且已出 → 让位 L2/L3；LLM 选模板 prompt 收紧精度判据（§6.2） | — | ✅ 完成 |
 | M4.11 | 真实端点冒烟修复：/g 路径 max_tokens cap 旁路（裸闭包忽略 call_bounded）；L2/L3 draft prompt 补 hints 要求（原缺 → 永远为空）；删 LlmClient::chat 死代码 | — | ✅ 完成 |
 | M4.12 | **思考模式接线（R3 收尾）+ 推理 token 可见化**：think_mode 三态（auto/on/off，兼容旧 bool）→ 请求体 `thinking` 参数；usage 解析 reasoning_tokens 并在 footer//usage/出题行显示；探测定案：V4 思考链不受 max_tokens 约束 | R3 | ✅ 完成 |
+| M4.13 | 推理档位实验（off 成功率~1/3；on+low 全过 = 平衡点）+ spinner 超宽折行刷屏修复 | — | ✅ 完成 |
+| M4.14 | 用户实测修复：/model 表头；`generate_exercise` 恢复受限 mode（auto/free，尊重"不用模板"的明确要求）；工具轮次耗尽强制收尾回答（不再无结论硬切）；[[models]] 档案级 think_mode/effort（三模型档位各异） | — | ✅ 完成 |
 | M5 | 解答评审门 + 交互式复盘（解释/更优解挑战/对比表/再练决策） | — | ⬜ **下一个** |
 
 > M4.7/M4.8/M4.10 已过真实端点冒烟（9.4 晚，$0.043）：L1 4.5s ✓、L3 修复环

@@ -66,6 +66,12 @@ pub fn tool_schemas() -> Vec<Tool> {
                         "type": "string",
                         "description": "一句话说明为什么现在出这道题（结合对话语境，如「你贴的代码报 E0382」）；\
                                         会展示给用户并随题归档"
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["auto", "free"],
+                        "description": "auto（默认）=分层出题：模板直配→改编→自由生成逐级回退；\
+                                        free=跳过模板直接自由生成。仅当用户明确要求『不用模板/自由生成』时才用 free"
                     }
                 },
                 "required": ["topic"]
@@ -209,6 +215,16 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
         return Err(anyhow!("topic 不能为空"));
     }
     let topic = Topic::from_input(&topic_text);
+    // M4.14: mode is a USER-INTENT relay, not a strategy pick — auto
+    // stays the default (M4.7 decision); "free" only honours an
+    // explicit no-template request, skipping tiers 1/2.
+    let mode = match args.get("mode").and_then(|m| m.as_str()) {
+        Some("free") => {
+            progress("按用户要求自由生成（跳过模板）…");
+            generator::GenerateMode::Free
+        }
+        _ => generator::GenerateMode::Auto,
+    };
     progress(&format!("生成练习（{topic_text}）：选模板…"));
 
     let paths = Paths::from_root(&env.root);
@@ -224,8 +240,9 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
         output_price: env.cfg.prices.output,
         acc: UsageAcc::default(),
     };
-    let outcome = match generator::generate_with_history(
+    let outcome = match generator::generate_with_mode(
         &topic,
+        mode,
         &paths,
         &history,
         Some(&mut bridge),

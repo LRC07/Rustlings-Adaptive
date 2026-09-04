@@ -247,6 +247,11 @@ fn handle_model(arg: Option<&str>, cfg: &mut ModelConfig, client: &mut Option<Ll
         // so mixed Chinese/ASCII rows line up.
         let name_w = cfg.models.iter().map(|m| m.name.width()).max().unwrap_or(4).max(4);
         let model_w = cfg.models.iter().map(|m| m.model.width()).max().unwrap_or(5).max(5);
+        println!(
+            "  {}  {}  端点主机",
+            render::pad_display("档案名", name_w),
+            render::pad_display("模型 id", model_w)
+        );
         for m in &cfg.models {
             let mark = if cfg.is_active_profile(m) { render::green("*") } else { " ".to_string() };
             println!(
@@ -256,7 +261,8 @@ fn handle_model(arg: Option<&str>, cfg: &mut ModelConfig, client: &mut Option<Ll
                 host_of(&m.endpoint)
             );
         }
-        println!("  用 /model <名字> 切换（* = 当前）");
+        println!("  切换：/model <档案名>（* = 当前）；写 config.toml 时给档案加");
+        println!("  think_mode / reasoning_effort 可按模型调推理档位（K3 默认 max 最贵）。");
         println!();
         return;
     };

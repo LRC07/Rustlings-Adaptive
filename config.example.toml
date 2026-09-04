@@ -59,6 +59,12 @@ usd = 5.0
 # api_key = "sk-..."
 # model = "deepseek-chat"
 # llm_timeout_secs = 120
+# # 按模型调推理档位（M4.14；留空 = 沿用当前值）：
+# #   DeepSeek V4：thinking on/off × low/high/max（默认 on+high）
+# #   Kimi K3：恒开思考 × low/high/max（默认 max，最贵！）
+# #   GLM：on/off（无档位），reasoning_effort 对它无意义
+# # think_mode = "on"
+# # reasoning_effort = "low"
 #
 # [models.prices]
 # input = 0.27
