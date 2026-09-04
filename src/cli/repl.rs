@@ -224,6 +224,7 @@ fn debrief_deps<'a>(
         client: client.as_ref(),
         cfg,
         tracker: tracker.clone(),
+        editor: cfg.editor.as_deref(),
     }
 }
 

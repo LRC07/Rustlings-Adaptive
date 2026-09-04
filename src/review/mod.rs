@@ -311,6 +311,7 @@ pub trait ReviewCaller {
 /// Inputs the reviewer sees. Everything comes from real artifacts
 /// (template/draft + the user's file + index meta) — no fabrication.
 /// Owned data so the gate can run inside a worker thread.
+#[derive(Debug, Clone)]
 pub struct ReviewInput {
     pub title: String,
     pub concepts: Vec<String>,
@@ -319,6 +320,9 @@ pub struct ReviewInput {
     /// Expected non-idiomatic patterns the exercise is designed to
     /// force away (template `anti_patterns`).
     pub anti_patterns: Vec<String>,
+    /// Root-cause / misconception seeds for the debrief quiz (template
+    /// `review_hints`), when the source is recoverable.
+    pub review_hints: Option<ReviewHintsSeed>,
     /// The language-transfer intuition behind the trap (template
     /// `confusion`), when available.
     pub confusion: Option<String>,
@@ -467,6 +471,163 @@ pub fn run_gate(
     }
 
     GateOutcome { statics, llm, llm_error, probe, verdict }
+}
+
+// ---------------------------------------------------------------------------
+// Debrief Step 1: explanation check (§4.3 quiz + free-input judging)
+// ---------------------------------------------------------------------------
+
+/// Root-cause / misconception seeds from the template (`review_hints`),
+/// passed through so the quiz stays anchored to the authored trap.
+#[derive(Debug, Clone, Default)]
+pub struct ReviewHintsSeed {
+    pub root_cause: Vec<String>,
+    pub misconceptions: Vec<String>,
+}/// One quiz option. Exactly one carries `correct = true`.
+#[derive(Debug, Clone)]
+pub struct QuizOption {
+    pub text: String,
+    pub correct: bool,
+    pub explain: String,
+}
+
+/// The Step-1 quiz: "之前为什么不过" (with a failure snapshot) or
+/// "这题考什么" (first-try pass, design §4.3).
+#[derive(Debug, Clone)]
+pub struct Quiz {
+    pub question: String,
+    pub options: Vec<QuizOption>,
+}
+
+impl Quiz {
+    /// The explanation of the correct option (for a miss correction).
+    pub fn correct_explanation(&self) -> Option<&str> {
+        self.options.iter().find(|o| o.correct).map(|o| o.explain.as_str())
+    }
+
+    /// Number of options (0 when the model returned garbage).
+    pub fn is_usable(&self) -> bool {
+        self.question.trim().len() >= 4
+            && self.options.len() >= 3
+            && self.options.iter().filter(|o| o.correct).count() == 1
+    }
+}
+
+/// Parse the quiz JSON out of a model reply.
+pub fn parse_quiz(text: &str) -> Option<Quiz> {
+    let json = crate::llm::extract_json(text)?;
+    let v: Value = serde_json::from_str(json).ok()?;
+    let question = v.get("question")?.as_str()?.trim().to_string();
+    let options = v
+        .get("options")?
+        .as_array()?
+        .iter()
+        .filter_map(|o| {
+            Some(QuizOption {
+                text: o.get("text")?.as_str()?.trim().to_string(),
+                correct: o.get("correct").and_then(Value::as_bool).unwrap_or(false),
+                explain: o.get("explain").and_then(Value::as_str).unwrap_or_default().to_string(),
+            })
+        })
+        .filter(|o| !o.text.is_empty())
+        .collect();
+    Some(Quiz { question, options })
+}
+
+const QUIZ_MAX_TOKENS: u32 = 700;
+
+const QUIZ_SYSTEM: &str = "\
+你是 Rust 教练的复盘出题器。学习者刚通过一道填空题的全部测试，现在用一道单选题校核他是否\
+真正理解了原理（而不是蒙对的）。严格只输出一个 JSON 对象（不要多余文字、不要代码围栏）：
+{\"question\":\"问题（中文，一句）\",\"options\":[{\"text\":\"选项内容（中文，短语或一句话）\",\"correct\":false,\"explain\":\"这个选项对/错的原理（中文，1-2 句，讲机制不复述选项）\"}]}
+要求：3-4 个选项；恰好 1 个 correct=true；干扰项必须像真实初学者的误解（优先取素材里的\
+误解/根因，不要凭空编造）；有失败快照时问「之前为什么没过」，一次通过时问「这题在考什么」。";
+
+fn quiz_user_prompt(input: &ReviewInput, last_fail: Option<&str>) -> String {
+    let mut p = String::new();
+    p.push_str(&format!("题目：《{}》\n", input.title));
+    if !input.concepts.is_empty() {
+        p.push_str(&format!("概念：{}\n", input.concepts.join("、")));
+    }
+    p.push_str(&format!("做题尝试次数：{}（0 = 一次通过）\n", input.attempts));
+    match last_fail {
+        Some(code) => p.push_str(&format!("失败快照：学习者之前失败时的真实报错码/信息：{code}\n")),
+        None => p.push_str("失败快照：无（一次通过，问题应问「这题在考什么」）\n"),
+    }
+    p.push_str(&format!("\n【题面】\n{}\n", input.body.trim()));
+    p.push_str(&format!("\n【学习者的最终解答】\n```rust\n{}\n```\n", input.user_code.trim()));
+    if let Some(c) = &input.confusion {
+        p.push_str(&format!("\n【本题针对的语言迁移直觉（出干扰项素材）】{c}\n"));
+    }
+    let seed = input.review_hints.as_ref();
+    if let Some(h) = seed {
+        if !h.root_cause.is_empty() {
+            p.push_str("\n【正确根因素材（correct 选项应基于它）】\n");
+            for r in &h.root_cause {
+                p.push_str(&format!("- {r}\n"));
+            }
+        }
+        if !h.misconceptions.is_empty() {
+            p.push_str("\n【常见误解素材（干扰项应基于它们）】\n");
+            for m in &h.misconceptions {
+                p.push_str(&format!("- {m}\n"));
+            }
+        }
+    }
+    p.push_str("\n请输出复盘题 JSON。");
+    p
+}
+
+/// Generate the Step-1 quiz.
+pub fn llm_quiz(call: &mut dyn ReviewCaller, input: &ReviewInput, last_fail: Option<&str>) -> Result<Quiz> {
+    let reply = call.call("debrief", QUIZ_SYSTEM, &quiz_user_prompt(input, last_fail), QUIZ_MAX_TOKENS)?;
+    if reply.finish_reason.as_deref() == Some("length") {
+        bail!("复盘题输出被截断");
+    }
+    parse_quiz(&reply.content).filter(|q| q.is_usable()).ok_or_else(|| anyhow!("复盘题 JSON 不合格"))
+}
+
+/// Result of judging a free-text answer (design §4.3: LLM 对照真实
+/// 错误码 + 根因关键词判 hit/miss).
+#[derive(Debug, Clone)]
+pub struct FreeJudgement {
+    pub hit: bool,
+    pub why: String,
+}
+
+const JUDGE_MAX_TOKENS: u32 = 400;
+
+/// Judge a free-text answer against the quiz's correct explanation.
+pub fn judge_free_input(
+    call: &mut dyn ReviewCaller,
+    quiz: &Quiz,
+    answer: &str,
+) -> Result<FreeJudgement> {
+    let correct = quiz
+        .options
+        .iter()
+        .find(|o| o.correct)
+        .map(|o| format!("{} —— {}", o.text, o.explain))
+        .unwrap_or_default();
+    let system = "\
+你是 Rust 教练的复盘判定器。学习者用自由文本回答了一道理解校核题。对照正确答案判定他的\
+回答是否抓住了核心机制（表述不精确但机制对 = hit；只是复述题目/明显错误 = miss）。\
+严格只输出 JSON：{\"hit\":true|false,\"why\":\"判定理由（中文，一句话）\"}";
+    let user = format!(
+        "【问题】{}\n【正确答案】{correct}\n【学习者的回答】{answer}\n\n请输出判定 JSON。",
+        quiz.question
+    );
+    let reply = call.call("debrief", system, &user, JUDGE_MAX_TOKENS)?;
+    if reply.finish_reason.as_deref() == Some("length") {
+        bail!("判定输出被截断");
+    }
+    let json = crate::llm::extract_json(&reply.content)
+        .ok_or_else(|| anyhow!("判定 JSON 缺失"))?;
+    let v: Value = serde_json::from_str(json)?;
+    Ok(FreeJudgement {
+        hit: v.get("hit").and_then(Value::as_bool).ok_or_else(|| anyhow!("判定 JSON 缺 hit"))?,
+        why: v.get("why").and_then(Value::as_str).unwrap_or_default().to_string(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -716,12 +877,56 @@ mod tests {
     }
 
     #[test]
+    fn parse_quiz_validates_single_correct_option() {
+        let good = r#"{"question":"这题在考什么？","options":[
+            {"text":"A","correct":true,"explain":"因为所有权移动"},
+            {"text":"B","correct":false,"explain":"误解一"},
+            {"text":"C","correct":false,"explain":"误解二"}]}"#;
+        let q = parse_quiz(good).unwrap();
+        assert!(q.is_usable());
+        assert_eq!(q.correct_explanation(), Some("因为所有权移动"));
+
+        // Two corrects → unusable.
+        let bad = r#"{"question":"q?","options":[
+            {"text":"A","correct":true,"explain":"x"},
+            {"text":"B","correct":true,"explain":"y"},
+            {"text":"C","correct":false,"explain":"z"}]}"#;
+        let q = parse_quiz(bad).unwrap();
+        assert!(!q.is_usable());
+        assert!(parse_quiz("nope").is_none());
+    }
+
+    #[test]
+    fn quiz_prompt_uses_failure_snapshot_and_seeds() {
+        let input = ReviewInput {
+            title: "题".into(),
+            concepts: vec![],
+            body: "题面".into(),
+            anti_patterns: vec![],
+            review_hints: Some(ReviewHintsSeed {
+                root_cause: vec!["值被移动后原变量失效".into()],
+                misconceptions: vec!["以为 Copy 语义".into()],
+            }),
+            confusion: Some("C 直觉".into()),
+            reference: None,
+            user_code: "fn f() {}".into(),
+            constraint_specs: vec![],
+            attempts: 1,
+        };
+        let p = quiz_user_prompt(&input, Some("E0382"));
+        assert!(p.contains("E0382") && p.contains("正确根因素材") && p.contains("常见误解素材"));
+        let p2 = quiz_user_prompt(&input, None);
+        assert!(p2.contains("一次通过"));
+    }
+
+    #[test]
     fn review_user_prompt_contains_all_sections() {
         let input = ReviewInput {
             title: "题".into(),
             concepts: vec!["ownership.move".to_string()],
             body: "// TODO".into(),
             anti_patterns: vec!["clone 逃逸".to_string()],
+            review_hints: None,
             confusion: Some("来自 C 的值语义直觉".into()),
             reference: Some("fn f() {}".into()),
             user_code: "fn f() { todo!() }".into(),

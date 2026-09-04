@@ -23,6 +23,7 @@ use crate::usage::UsageTracker;
 
 use super::render;
 use super::spinner::Spinner;
+use super::{read_line, Line};
 
 /// What the review gate / debrief needs from the REPL (built fresh at
 /// each entry so a `/model` switch takes effect).
@@ -30,6 +31,9 @@ pub(crate) struct DebriefDeps<'a> {
     pub client: Option<&'a LlmClient>,
     pub cfg: &'a ModelConfig,
     pub tracker: Arc<Mutex<UsageTracker>>,
+    /// Editor for the challenge loop's `[e]` (falls back to the
+    /// practice-level resolution when absent).
+    pub editor: Option<&'a str>,
 }
 
 /// CLI bridge for the review/debrief LLM steps: budget gate (R6) +
@@ -125,6 +129,10 @@ fn build_input(
         concepts: meta.concepts.clone(),
         body,
         anti_patterns: tpl.map(|t| t.anti_patterns.clone()).unwrap_or_default(),
+        review_hints: tpl.map(|t| review::ReviewHintsSeed {
+            root_cause: t.review_hints.as_ref().map(|h| h.root_cause.clone()).unwrap_or_default(),
+            misconceptions: t.review_hints.as_ref().map(|h| h.misconceptions.clone()).unwrap_or_default(),
+        }),
         confusion: tpl.map(|t| t.confusion.clone()),
         reference,
         user_code: user_code.to_string(),
@@ -157,9 +165,56 @@ fn body_from_file(content: &str) -> String {
 // The gate, behind a spinner (R4)
 // ---------------------------------------------------------------------------
 
+/// Run `f` on a worker thread behind a spinner; polls the interrupt
+/// flag, so Ctrl-C abandons the result (the LLM call finishes in the
+/// background and is accounted as usual). None = interrupted/panic.
+fn run_with_spinner<T, F>(label: &str, f: F) -> Option<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&dyn Fn(&str)) -> T + Send + 'static,
+{
+    let (sp, slot) = Spinner::start(label);
+    let slot2 = slot.clone();
+    let handle = std::thread::spawn(move || {
+        f(&move |s: &str| {
+            if let Ok(mut g) = slot2.lock() {
+                *g = s.to_string();
+            }
+        })
+    });
+    let res = loop {
+        if handle.is_finished() {
+            break handle.join().ok();
+        }
+        if crate::agent::is_interrupted() {
+            sp.stop();
+            println!("  （已打断；LLM 调用将在后台结束并照常记账）");
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(80));
+    };
+    sp.stop();
+    res
+}
+
+/// Fresh caller with the current config/budget/prices (R6 phases).
+fn make_caller(deps: &DebriefDeps) -> Option<Box<dyn ReviewCaller + Send>> {
+    deps.client.as_ref().map(|c| {
+        Box::new(CliReviewCaller {
+            caller: Some(Arc::new((*c).clone())),
+            model: deps.cfg.model.clone(),
+            price_in: deps.cfg.prices.input,
+            price_out: deps.cfg.prices.output,
+            budget: deps.cfg.budget_usd(),
+            tracker: deps.tracker.clone(),
+        }) as Box<dyn ReviewCaller + Send>
+    })
+}
+
 /// Run the review gate after a first-time pass, render the verdict and
-/// persist it on the index entry. Returns a follow-up coach message
-/// when the debrief decided to hand back to the conversation (M5.4).
+/// persist it on the index entry, then walk the debrief steps (§4.3).
+/// Returns a follow-up coach message when the debrief decided to hand
+/// back to the conversation (M5.4).
 pub(crate) fn after_pass(
     deps: &DebriefDeps,
     index: &mut ExerciseIndex,
@@ -174,53 +229,37 @@ pub(crate) fn after_pass(
         return None;
     };
     let attempts_before = meta.attempts.saturating_sub(1);
-    let input = build_input(repo_root, meta, &content, attempts_before);
-    let _ = last_fail; // consumed by the debrief steps (M5.3)
-
-    let caller: Option<Box<dyn ReviewCaller + Send>> = deps.client.as_ref().map(|c| {
-        Box::new(CliReviewCaller {
-            caller: Some(Arc::new((*c).clone())),
-            model: deps.cfg.model.clone(),
-            price_in: deps.cfg.prices.input,
-            price_out: deps.cfg.prices.output,
-            budget: deps.cfg.budget_usd(),
-            tracker: deps.tracker.clone(),
-        }) as Box<dyn ReviewCaller + Send>
-    });
+    let mut input = build_input(repo_root, meta, &content, attempts_before);
 
     println!();
     println!("{}", render::cyan("── 解答评审门 ──"));
 
-    let (sp, slot) = Spinner::start("评审：准备…");
-    let slot2 = slot.clone();
-    let handle = std::thread::spawn(move || {
-        review::run_gate(caller, input, &move |s: &str| {
-            if let Ok(mut g) = slot2.lock() {
-                *g = s.to_string();
-            }
-        })
-    });
-    let outcome = loop {
-        if handle.is_finished() {
-            break handle.join().ok();
-        }
-        if crate::agent::is_interrupted() {
-            sp.stop();
-            println!("  （评审已打断；LLM 调用将在后台结束并照常记账）");
-            return None;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(80));
-    };
-    sp.stop();
-    let Some(outcome) = outcome else {
-        println!("  （评审线程异常结束，已跳过）");
-        return None;
-    };
-
+    let caller = make_caller(deps);
+    let input2 = input.clone();
+    let outcome = run_with_spinner("评审：准备…", |progress| {
+        review::run_gate(caller, input2, progress)
+    })?;
     render_gate(&outcome);
     index.set_review_verdict(key, outcome.verdict.key());
 
-    // The debrief steps hook in here (M5.3/M5.4).
+    // ── Debrief (§4.3) ──
+    let _ = last_fail;
+
+    // Step 1: explanation check (understanding quiz).
+    let hit = step1_explanation_check(deps, &input, last_fail);
+
+    // Step 2: better-solution challenge (triggered when not clean).
+    let mut outcome = outcome;
+    if outcome.verdict != review::Verdict::Clean
+        && let Some((updated, code)) = step2_challenge(deps, index, key, ex, &mut input, &outcome)
+    {
+        outcome = updated;
+        input.user_code = code;
+    }
+    let _ = hit; // feeds the follow-up decision (M5.4) and the M6 profile
+    let _ = &outcome; // consumed by the comparison/follow-up steps (M5.4)
+
+    // Step 3/4 hook in here (M5.4).
     None
 }
 
@@ -310,6 +349,201 @@ fn severity_kind_cn(f: &review::Finding) -> String {
         _ => f.kind.as_str(),
     };
     format!("{sev}·{kind}")
+}
+
+// ---------------------------------------------------------------------------
+// Debrief Step 1: explanation check (§4.3)
+// ---------------------------------------------------------------------------
+
+/// Prompt that never leaves the debrief: Ctrl-C cancels the line,
+/// EOF/empty handled by the caller's own semantics.
+fn ask(prompt: &str) -> Option<String> {
+    match read_line(prompt) {
+        Line::Text(s) => Some(s),
+        Line::Interrupted => {
+            println!("  ^C 已取消本行输入");
+            None
+        }
+        Line::Eof => None,
+    }
+}
+
+/// Step 1: understanding quiz (LLM-generated options anchored on the
+/// template's root-cause/misconception seeds; free text judged by the
+/// model). Returns true when the explanation hit or was skipped.
+fn step1_explanation_check(deps: &DebriefDeps, input: &review::ReviewInput, last_fail: Option<&str>) -> bool {
+    let Some(mut caller) = make_caller(deps) else {
+        println!();
+        println!("  复盘（离线）：跳过理解校核。");
+        return true;
+    };
+    println!();
+    println!("{}", render::cyan("── 复盘 · 理解校核 ──"));
+
+    let input2 = input.clone();
+    let lf = last_fail.map(str::to_string);
+    let quiz = run_with_spinner("复盘：生成理解校核题…", move |progress| {
+        progress("生成校核题…");
+        review::llm_quiz(&mut *caller, &input2, lf.as_deref())
+    });
+    let quiz = match quiz {
+        Some(Ok(q)) => q,
+        Some(Err(_)) | None => {
+            println!("  （未能生成校核题，跳过本步）");
+            return true;
+        }
+    };
+
+    // Deterministic rotation so the correct option is not always #1.
+    let off = (input.attempts as usize) % quiz.options.len();
+    let options: Vec<review::QuizOption> = {
+        let mut v = quiz.options.clone();
+        v.rotate_left(off);
+        v
+    };
+
+    println!();
+    println!("  {}", render::bold(&quiz.question));
+    for (i, o) in options.iter().enumerate() {
+        println!("    {}. {}", i + 1, o.text);
+    }
+    println!("  输入数字选择；或直接输入你的理解；回车跳过。");
+
+    loop {
+        let Some(ans) = ask("复盘> ") else { return true };
+        let t = ans.trim();
+        if t.is_empty() {
+            return true;
+        }
+        if let Ok(n) = t.parse::<usize>()
+            && n >= 1
+            && n <= options.len()
+        {
+            let picked = &options[n - 1];
+            if picked.correct {
+                println!("  {} 解释命中：{}", render::green("✓"), picked.explain);
+                return true;
+            }
+            let Some(correct) = options.iter().find(|o| o.correct) else { return true };
+            println!("  {} 未命中。正确理解是：{}", render::red("✗"), correct.text);
+            println!("    {}", correct.explain);
+            return false;
+        }
+        // Free text → LLM judging (§4.3).
+        let Some(mut judge) = make_caller(deps) else {
+            println!("  （离线无法判读自由输入，请输入数字选项）");
+            continue;
+        };
+        let answer = t.to_string();
+        let quiz2 = quiz.clone();
+        let judged = run_with_spinner("复盘：判定你的回答…", move |progress| {
+            let _ = progress;
+            review::judge_free_input(&mut *judge, &quiz2, &answer)
+        });
+        match judged {
+            Some(Ok(j)) => {
+                if j.hit {
+                    println!("  {} 解释命中：{}", render::green("✓"), j.why);
+                } else {
+                    println!("  {} 未命中：{}", render::red("✗"), j.why);
+                    if let Some(expl) = quiz.correct_explanation() {
+                        println!("    正确理解：{expl}");
+                    }
+                }
+                return j.hit;
+            }
+            Some(Err(e)) => {
+                println!("  （判定失败：{e:#}；可输入数字选项重试）");
+            }
+            None => return true, // interrupted
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Debrief Step 2: better-solution challenge (§4.3)
+// ---------------------------------------------------------------------------
+
+/// Step 2, offered when the verdict is not clean: directional hints
+/// only (finding messages — `better_way` stays for the comparison),
+/// then `[r]` re-run + re-review, `[e]` edit, `[s]` show the reference.
+/// Returns the re-run gate outcome + updated code when the challenge
+/// produced a fresh review.
+fn step2_challenge(
+    deps: &DebriefDeps,
+    index: &mut ExerciseIndex,
+    key: &str,
+    ex: &Exercise,
+    input: &mut review::ReviewInput,
+    outcome: &review::GateOutcome,
+) -> Option<(review::GateOutcome, String)> {
+    // Direction hints: LLM finding messages; fall back to constraint
+    // violations when the LLM layer was unavailable.
+    let hints: Vec<String> = match &outcome.llm {
+        Some(r) if !r.findings.is_empty() => {
+            r.findings.iter().map(|f| f.message.clone()).collect()
+        }
+        _ => outcome
+            .statics
+            .violations
+            .iter()
+            .map(|v| v.message.clone())
+            .collect(),
+    };
+    if hints.is_empty() {
+        return None;
+    }
+
+    println!();
+    println!("{}", render::cyan("── 复盘 · 更优解挑战 ──"));
+    println!("  你的解法已通过测试，但还有更地道的方向（不给答案，只给方向）：");
+    for (i, h) in hints.iter().take(3).enumerate() {
+        println!("    {}. {h}", i + 1);
+    }
+
+    loop {
+        println!();
+        println!("  [r] 改好了，重跑并重新评审   [e] 编辑   [s] 看参考解   [Enter] 结束复盘");
+        let ans = ask("挑战> ")?;
+        match ans.trim() {
+            "" | "b" | "q" => return None,
+            "e" => {
+                crate::exercise::open_editor(&ex.path, deps.editor);
+            }
+            "s" => match &input.reference {
+                Some(r) => {
+                    println!();
+                    println!("  参考解：");
+                    for line in r.trim().lines().take(40) {
+                        println!("    {line}");
+                    }
+                }
+                None => println!("  （本题没有持久化的参考解）"),
+            },
+            "r" => {
+                let res = crate::exercise::compile_and_run(ex);
+                if !res.passed {
+                    println!("  {} 尚未通过{}", render::red("✗"), res.first_error.as_deref().unwrap_or(""));
+                    continue;
+                }
+                println!("  {} 测试通过，重新评审…", render::green("✓"));
+                let Ok(content) = std::fs::read_to_string(&ex.path) else {
+                    println!("  （无法读取练习文件）");
+                    continue;
+                };
+                input.user_code = content.clone();
+                let caller = make_caller(deps);
+                let input2 = input.clone();
+                let outcome2 = run_with_spinner("评审：重新评审…", move |progress| {
+                    review::run_gate(caller, input2, progress)
+                })?;
+                render_gate(&outcome2);
+                index.set_review_verdict(key, outcome2.verdict.key());
+                return Some((outcome2, content));
+            }
+            other => println!("  未知输入: {other}"),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

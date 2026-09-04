@@ -215,6 +215,7 @@ pub(crate) fn cmd_generate(
                 client: client.as_ref(),
                 cfg,
                 tracker: tracker.clone(),
+                editor: cfg.editor.as_deref(),
             };
             practice::enter_at(
                 ctx,
