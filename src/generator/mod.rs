@@ -893,13 +893,15 @@ fn draft_prompt(
          8. difficulty: \"easy\" (apply one known fix) | \"medium\" (choose between 2–3 \
          plausible fixes, or non-obvious error) | \"hard\" (restructure).\n\
          9. Keep it COMPACT: body 15–35 lines (hard cap 40), tests ≤20 lines, \
-         reference ≤20 lines. Trim blank lines and repetitive tests.\n\n\
+         reference ≤20 lines. Trim blank lines and repetitive tests.\n\
+         10. hints: 1–3 SHORT graded Chinese hints (方向 → 具体 → 接近正确写法), \
+         each one sentence, never giving away the answer or the exact line to write.\n\n\
          ## Output format\n\
          Answer with ONLY one JSON object (no markdown fence needed):\n\
          {{\"title\": \"中文标题\", \"file_hint\": \"english-kebab-name\", \
          \"concepts\": [\"...\"], \"error_codes\": [\"E0xxx\"], \"difficulty\": \"easy\", \
-         \"constraints\": [\"no-clone\"], \"body\": \"...\", \"tests\": \"...\", \
-         \"reference\": \"...\"}}\n\
+         \"constraints\": [\"no-clone\"], \"hints\": [\"...\"], \
+         \"body\": \"...\", \"tests\": \"...\", \"reference\": \"...\"}}\n\
          body/tests/reference are plain Rust source strings (escape newlines as \\n in JSON)."
     )
 }

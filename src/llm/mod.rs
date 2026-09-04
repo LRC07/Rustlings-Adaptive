@@ -160,17 +160,6 @@ impl LlmClient {
         }
     }
 
-    /// One-shot chat completion for a single user prompt (M1/M3 style).
-    pub fn chat(&self, user_prompt: &str) -> Result<LlmReply> {
-        let msgs = [ChatMessage::user(user_prompt)];
-        let out = self.chat_turn(&msgs, &[])?;
-        Ok(LlmReply {
-            content: out.content.unwrap_or_default(),
-            usage: out.usage,
-            finish_reason: out.finish_reason,
-        })
-    }
-
     /// One conversation turn with the full history and an optional tool
     /// schema list (M4 agent loop). Returns text and/or tool calls.
     pub fn chat_turn(&self, messages: &[ChatMessage], tools: &[Tool]) -> Result<TurnOutput> {

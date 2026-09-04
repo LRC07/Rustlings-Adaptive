@@ -50,40 +50,77 @@ pub(crate) fn cmd_generate(
 
     let topic = generator::Topic::from_input(&topic_text);
 
-    // LLM caller: enforces budget + records usage per call (R6). When
-    // no key is configured the generator runs fully offline.
-    let tracker2 = tracker.clone();
-    let mut call = move |prompt: &str| -> anyhow::Result<crate::llm::LlmReply> {
-        let totals = tracker2.lock().unwrap_or_else(|p| p.into_inner()).all_totals().cost_usd;
-        crate::usage::check_budget(totals, cfg.budget_usd())?;
-        let cl = client
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("未配置 API Key，无法调用模型"))?;
-        let reply = cl.chat(prompt)?;
-        let cost = crate::usage::cost_usd(
-            reply.usage.prompt_tokens,
-            reply.usage.completion_tokens,
-            cfg.prices.input,
-            cfg.prices.output,
-        );
-        tracker2.lock().unwrap_or_else(|p| p.into_inner()).record(
-            &cfg.model,
-            reply.usage.prompt_tokens,
-            reply.usage.completion_tokens,
-            cost,
-            "generate",
-        );
-        println!(
-            "  · LLM: 输入 {} tok / 输出 {} tok / ${:.6}",
-            reply.usage.prompt_tokens, reply.usage.completion_tokens, cost
-        );
-        Ok(reply)
-    };
-    let llm: Option<&mut dyn generator::LlmCaller> = if client.is_some() {
-        Some(&mut call)
-    } else {
-        println!("  未配置 API Key —— 使用离线模式（默认填槽）。");
-        None
+    // LLM caller: enforces budget + records usage per call (R6). Unlike
+    // a bare closure it HONOURS `call_bounded` so the draft's
+    // max_tokens cap actually reaches the wire — the default impl
+    // silently ignores the cap, which is how `/g` drafts once burned
+    // 27k output tokens per round (M4.7 regression caught in smoke).
+    struct CliCaller<'a> {
+        client: &'a LlmClient,
+        model: &'a str,
+        price_in: f64,
+        price_out: f64,
+        budget: Option<f64>,
+        tracker: Arc<Mutex<UsageTracker>>,
+    }
+
+    impl generator::LlmCaller for CliCaller<'_> {
+        fn call(&mut self, prompt: &str) -> anyhow::Result<crate::llm::LlmReply> {
+            self.call_bounded(prompt, u32::MAX)
+        }
+
+        fn call_bounded(
+            &mut self,
+            prompt: &str,
+            max_tokens: u32,
+        ) -> anyhow::Result<crate::llm::LlmReply> {
+            let totals =
+                self.tracker.lock().unwrap_or_else(|p| p.into_inner()).all_totals().cost_usd;
+            crate::usage::check_budget(totals, self.budget)?;
+            let out = self.client.chat_turn_bounded(
+                &[crate::llm::ChatMessage::user(prompt.to_string())],
+                &[],
+                (max_tokens != u32::MAX).then_some(max_tokens),
+            )?;
+            let reply = crate::llm::LlmReply {
+                content: out.content.unwrap_or_default(),
+                usage: out.usage,
+                finish_reason: out.finish_reason,
+            };
+            let cost = crate::usage::cost_usd(
+                reply.usage.prompt_tokens,
+                reply.usage.completion_tokens,
+                self.price_in,
+                self.price_out,
+            );
+            self.tracker.lock().unwrap_or_else(|p| p.into_inner()).record(
+                self.model,
+                reply.usage.prompt_tokens,
+                reply.usage.completion_tokens,
+                cost,
+                "generate",
+            );
+            println!(
+                "  · LLM: 输入 {} tok / 输出 {} tok / ${:.6}",
+                reply.usage.prompt_tokens, reply.usage.completion_tokens, cost
+            );
+            Ok(reply)
+        }
+    }
+
+    let llm: Option<&mut dyn generator::LlmCaller> = match client.as_ref() {
+        Some(cl) => Some(&mut CliCaller {
+            client: cl,
+            model: &cfg.model,
+            price_in: cfg.prices.input,
+            price_out: cfg.prices.output,
+            budget: cfg.budget_usd(),
+            tracker: tracker.clone(),
+        }),
+        None => {
+            println!("  未配置 API Key —— 使用离线模式（默认填槽）。");
+            None
+        }
     };
 
     println!(
