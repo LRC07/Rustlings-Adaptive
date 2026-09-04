@@ -498,8 +498,13 @@ fn agent_turn(
             }
             // R6: per-turn usage footer.
             let total = tracker.lock().unwrap_or_else(|p| p.into_inner()).all_totals();
+            let reasoning = if turn.reasoning_tokens > 0 {
+                format!("（其中推理 {}）", turn.reasoning_tokens)
+            } else {
+                String::new()
+            };
             print!(
-                "  ─ 本回合: {} 次调用 ｜ 输入 {} tok ｜ 输出 {} tok ｜ ${:.6}",
+                "  ─ 本回合: {} 次调用 ｜ 输入 {} tok ｜ 输出 {} tok{reasoning} ｜ ${:.6}",
                 turn.calls, turn.input_tokens, turn.output_tokens, turn.cost_usd
             );
             match cfg.budget_usd() {
@@ -565,19 +570,22 @@ fn print_usage(cfg: &ModelConfig, tracker: &Arc<Mutex<UsageTracker>>) {
     let a = t.all_totals();
     println!();
     println!("{}", render::cyan("── 用量与花费 ──"));
+    let reasoning_note = |r: u64| {
+        if r > 0 { format!("（其中推理 {r}）") } else { String::new() }
+    };
     println!(
-        "  本次会话: {} 次调用 ｜ 输入 {} tok ｜ 输出 {} tok ｜ ${:.4}",
-        s.calls, s.input_tokens, s.output_tokens, s.cost_usd
+        "  本次会话: {} 次调用 ｜ 输入 {} tok ｜ 输出 {} tok{} ｜ ${:.4}",
+        s.calls, s.input_tokens, s.output_tokens, reasoning_note(s.reasoning_tokens), s.cost_usd
     );
     for (phase, pt) in t.session_by_phase() {
         println!(
-            "    · {phase:<10} {} 次 ｜ 输入 {} tok ｜ 输出 {} tok ｜ ${:.6}",
-            pt.calls, pt.input_tokens, pt.output_tokens, pt.cost_usd
+            "    · {phase:<10} {} 次 ｜ 输入 {} tok ｜ 输出 {} tok{} ｜ ${:.6}",
+            pt.calls, pt.input_tokens, pt.output_tokens, reasoning_note(pt.reasoning_tokens), pt.cost_usd
         );
     }
     println!(
-        "  历史累计: {} 次调用 ｜ 输入 {} tok ｜ 输出 {} tok ｜ ${:.4}",
-        a.calls, a.input_tokens, a.output_tokens, a.cost_usd
+        "  历史累计: {} 次调用 ｜ 输入 {} tok ｜ 输出 {} tok{} ｜ ${:.4}",
+        a.calls, a.input_tokens, a.output_tokens, reasoning_note(a.reasoning_tokens), a.cost_usd
     );
     println!("  明细文件: {}", t.path().display());
     match cfg.budget_usd() {
@@ -600,7 +608,7 @@ fn cmd_config(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
             clear_viewport();
         }
         println!("{}", render::cyan("── 模型配置 ──"));
-        println!("  输入编号修改对应项（1/2/3/4/5），回车返回；修改会写回 config.toml");
+        println!("  输入编号修改对应项（1..6），回车返回；修改会写回 config.toml");
         println!();
         println!("  1. endpoint : {}", cfg.endpoint);
         println!("  2. model    : {}", cfg.model);
@@ -628,9 +636,9 @@ fn cmd_config(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
             cfg.prices.input, cfg.prices.output
         );
         println!(
-            "  · 上下文    : {} tokens ｜ 思考模式: {}（预留字段）",
+            "  · 上下文    : {} tokens ｜ 思考模式: {}（/config 6 可改）",
             cfg.context_len,
-            if cfg.think_mode { "开" } else { "关" }
+            cfg.think_mode.label_cn()
         );
         println!(
             "  · 界面      : {}（/ui view｜scroll 可切换）",
@@ -687,6 +695,19 @@ fn cmd_config(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
                         cfg.editor = Some(v);
                     }
                     save_and_rebuild(cfg, client);
+                }
+            }
+            "6" => {
+                println!("  说明：推理型模型（如 DeepSeek V4）默认开思考且思维链按输出 token 计费、");
+                println!("  不受 max_tokens 约束；关掉可立刻省下大量 token 与等待时间。");
+                if let Some(v) = read_line_or_leave("新思考模式（auto=沿用端点默认 / on / off）: ") {
+                    match crate::config::ThinkMode::from_word(&v) {
+                        Some(m) => {
+                            cfg.think_mode = m;
+                            save_and_rebuild(cfg, client);
+                        }
+                        None => println!("  无法识别: {v}（auto / on / off）"),
+                    }
                 }
             }
             other => println!("  未知选项: {other}"),

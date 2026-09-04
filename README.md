@@ -33,6 +33,7 @@ Agent 解释并锚定知识点（细分概念图谱 + rustc 错误码双轨）�
 | M4.9 | 粘贴聚合：bracketed paste + 零停顿启发兜底（多行粘贴合并为一条消息）；修复转义序列参数字节漏进输入（方向键遗留 bug）与 ICRNL 致粘贴双换行 | — | ✅ 完成 |
 | M4.10 | 出题历史感知：index 感知已出模板 → 未用过优先；重复命中走变式（轮转偏移 + LLM 换值提示 + variant 带出）；无槽位且已出 → 让位 L2/L3；LLM 选模板 prompt 收紧精度判据（§6.2） | — | ✅ 完成 |
 | M4.11 | 真实端点冒烟修复：/g 路径 max_tokens cap 旁路（裸闭包忽略 call_bounded）；L2/L3 draft prompt 补 hints 要求（原缺 → 永远为空）；删 LlmClient::chat 死代码 | — | ✅ 完成 |
+| M4.12 | **思考模式接线（R3 收尾）+ 推理 token 可见化**：think_mode 三态（auto/on/off，兼容旧 bool）→ 请求体 `thinking` 参数；usage 解析 reasoning_tokens 并在 footer//usage/出题行显示；探测定案：V4 思考链不受 max_tokens 约束 | R3 | ✅ 完成 |
 | M5 | 解答评审门 + 交互式复盘（解释/更优解挑战/对比表/再练决策） | — | ⬜ **下一个** |
 
 > M4.7/M4.8/M4.10 已过真实端点冒烟（9.4 晚，$0.043）：L1 4.5s ✓、L3 修复环
@@ -62,6 +63,9 @@ cargo build          # 或 cargo build --release
 1. **配置文件（推荐）**：`cp config.example.toml config.toml`，然后编辑
    `endpoint` / `api_key` / `model`，按需修改价格表 `[prices]` 与预算 `[budget]`；
    可配置多组 `[[models]]` 档案，运行中 `/model <名>` 一键切换（M4.6）；
+   **思考模式 `think_mode`**（M4.12）：推理型模型（如 DeepSeek V4）默认开
+   思考且思维链按输出 token 计费、不受 max_tokens 约束——`"off"` 可立刻
+   数倍省钱提速（`/config` 选 6 交互修改，写回 config.toml）；
 2. **环境变量**：在项目根目录建 `.env`，写 `RUSTLINGS_API_KEY=sk-...`
    （也可用 `RUSTLINGS_ENDPOINT` / `RUSTLINGS_MODEL` 覆盖对应项，
    优先级高于 config.toml）；

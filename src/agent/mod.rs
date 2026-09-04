@@ -172,6 +172,7 @@ pub struct TurnOutcome {
     pub calls: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub reasoning_tokens: u64,
     pub cost_usd: f64,
 }
 
@@ -231,6 +232,7 @@ pub fn run_turn(
                 calls: totals.calls,
                 input_tokens: totals.input_tokens,
                 output_tokens: totals.output_tokens,
+                reasoning_tokens: totals.reasoning_tokens,
                 cost_usd: totals.cost_usd,
             });
         }
@@ -302,6 +304,7 @@ pub fn run_turn(
         calls: totals.calls,
         input_tokens: totals.input_tokens,
         output_tokens: totals.output_tokens,
+        reasoning_tokens: totals.reasoning_tokens,
         cost_usd: totals.cost_usd,
     })
 }
@@ -323,6 +326,7 @@ fn run_tool(
             totals.calls += outcome.usage.calls;
             totals.input_tokens += outcome.usage.input_tokens;
             totals.output_tokens += outcome.usage.output_tokens;
+            totals.reasoning_tokens += outcome.usage.reasoning_tokens;
             totals.cost_usd += outcome.usage.cost_usd;
             if let Some(n) = outcome.note {
                 tool_notes.push(n);
@@ -346,8 +350,8 @@ fn record(env: &AgentEnv, u: crate::llm::Usage, phase: &str, totals: &mut tools:
     env.tracker
         .lock()
         .expect("usage lock")
-        .record(&env.cfg.model, u.prompt_tokens, u.completion_tokens, cost, phase);
-    totals.add(u.prompt_tokens, u.completion_tokens, cost);
+        .record(&env.cfg.model, u.prompt_tokens, u.completion_tokens, u.reasoning_tokens, cost, phase);
+    totals.add(u.prompt_tokens, u.completion_tokens, u.reasoning_tokens, cost);
 }
 
 // ---------------------------------------------------------------------------
@@ -445,11 +449,11 @@ mod tests {
     use crate::llm::{ToolCall, Usage};
 
     fn reply(content: &str) -> TurnOutput {
-        TurnOutput { content: Some(content.into()), tool_calls: vec![], usage: Usage { prompt_tokens: 10, completion_tokens: 5 }, finish_reason: Some("stop".into()) }
+        TurnOutput { content: Some(content.into()), tool_calls: vec![], usage: Usage { prompt_tokens: 10, completion_tokens: 5, reasoning_tokens: 0 }, finish_reason: Some("stop".into()) }
     }
 
     fn calls_output(calls: Vec<ToolCall>) -> TurnOutput {
-        TurnOutput { content: None, tool_calls: calls, usage: Usage { prompt_tokens: 10, completion_tokens: 5 }, finish_reason: Some("tool_calls".into()) }
+        TurnOutput { content: None, tool_calls: calls, usage: Usage { prompt_tokens: 10, completion_tokens: 5, reasoning_tokens: 0 }, finish_reason: Some("tool_calls".into()) }
     }
 
     fn call(id: &str, name: &str, args: &str) -> ToolCall {

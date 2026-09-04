@@ -97,11 +97,17 @@ pub(crate) fn cmd_generate(
                 self.model,
                 reply.usage.prompt_tokens,
                 reply.usage.completion_tokens,
+                reply.usage.reasoning_tokens,
                 cost,
                 "generate",
             );
+            let reasoning = if reply.usage.reasoning_tokens > 0 {
+                format!("（推理 {}）", reply.usage.reasoning_tokens)
+            } else {
+                String::new()
+            };
             println!(
-                "  · LLM: 输入 {} tok / 输出 {} tok / ${:.6}",
+                "  · LLM: 输入 {} tok / 输出 {} tok{reasoning} / ${:.6}",
                 reply.usage.prompt_tokens, reply.usage.completion_tokens, cost
             );
             Ok(reply)

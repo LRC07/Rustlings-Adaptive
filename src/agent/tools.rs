@@ -93,14 +93,16 @@ pub struct UsageAcc {
     pub calls: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub reasoning_tokens: u64,
     pub cost_usd: f64,
 }
 
 impl UsageAcc {
-    pub(crate) fn add(&mut self, input: u64, output: u64, cost: f64) {
+    pub(crate) fn add(&mut self, input: u64, output: u64, reasoning: u64, cost: f64) {
         self.calls += 1;
         self.input_tokens += input;
         self.output_tokens += output;
+        self.reasoning_tokens += reasoning;
         self.cost_usd += cost;
     }
 }
@@ -187,7 +189,7 @@ impl generator::LlmCaller for CallerBridge {
             self.input_price,
             self.output_price,
         );
-        self.acc.add(out.usage.prompt_tokens, out.usage.completion_tokens, cost);
+        self.acc.add(out.usage.prompt_tokens, out.usage.completion_tokens, out.usage.reasoning_tokens, cost);
         Ok(LlmReply {
             content: out.content.unwrap_or_default(),
             usage: out.usage,

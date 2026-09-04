@@ -66,6 +66,80 @@ pub enum KeySource {
     Env,
 }
 
+/// Thinking-mode switch (M4.12, R3): hybrid-reasoning models (e.g.
+/// DeepSeek V4) think by DEFAULT at effort `high`, and the chain of
+/// thought is billed as completion tokens without being bounded by
+/// `max_tokens` (live-probed 9.4, see 复盘 §4.5). So "not sending
+/// anything" can silently multiply cost.
+///
+/// - `Auto`（默认）：不发送参数，沿用端点默认（兼容旧配置的 `false`）
+/// - `On`：显式开思考（兼容旧配置的 `true`）
+/// - `Off`：显式关思考——出题/问答的成本与延迟立刻数倍下降
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThinkMode {
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
+impl ThinkMode {
+    pub fn label_cn(self) -> &'static str {
+        match self {
+            Self::Auto => "auto（沿用端点默认）",
+            Self::On => "on（强制开思考）",
+            Self::Off => "off（强制关思考，省 token）",
+        }
+    }
+
+    pub fn from_word(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" | "默认" => Some(Self::Auto),
+            "on" | "true" | "yes" | "开" => Some(Self::On),
+            "off" | "false" | "no" | "关" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    /// Wire mapping: `Auto` sends nothing.
+    pub fn to_thinking(self) -> Option<crate::llm::Thinking> {
+        match self {
+            Self::Auto => None,
+            Self::On => Some(crate::llm::Thinking::Enabled),
+            Self::Off => Some(crate::llm::Thinking::Disabled),
+        }
+    }
+}
+
+impl Serialize for ThinkMode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let s = match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        };
+        serializer.serialize_str(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for ThinkMode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Accept the legacy bool (`false` behaved exactly like Auto:
+        // nothing was ever sent) and the new string form.
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Bool(bool),
+            Str(String),
+        }
+        Ok(match Raw::deserialize(deserializer)? {
+            Raw::Bool(false) => Self::Auto,
+            Raw::Bool(true) => Self::On,
+            Raw::Str(s) => Self::from_word(&s).unwrap_or(Self::Auto),
+        })
+    }
+}
+
 /// Editor override source of truth is `editor`; UI preferences live
 /// here (M4.2): `mode` = "view" (viewport repaint, default) or "scroll"
 /// (plain scrolling transcript).
@@ -104,8 +178,8 @@ pub struct ModelProfile {
 }
 
 /// Model configuration — R3: endpoint / key / model / context length /
-/// thinking mode / prices / budget. `think_mode` and `context_len` are
-/// stored now and consumed by later milestones.
+/// thinking mode / prices / budget. `context_len` drives the window
+/// (M4.3); `think_mode` drives the wire (M4.12).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
     #[serde(default = "default_endpoint")]
@@ -117,7 +191,7 @@ pub struct ModelConfig {
     #[serde(default = "default_context_len")]
     pub context_len: u32,
     #[serde(default)]
-    pub think_mode: bool,
+    pub think_mode: ThinkMode,
     #[serde(default)]
     pub prices: Prices,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -148,7 +222,7 @@ impl Default for ModelConfig {
             api_key: String::new(),
             model: default_model(),
             context_len: default_context_len(),
-            think_mode: false,
+            think_mode: ThinkMode::Auto,
             prices: Prices::default(),
             budget: None,
             editor: None,
@@ -494,5 +568,36 @@ model = "qwen2.5:7b"
         });
         assert!(cfg.ensure_active_profile_recorded());
         assert_eq!(cfg.models[1].name, "fast-2");
+    }
+
+    #[test]
+    fn think_mode_legacy_bool_and_string_compat() {
+        // Legacy bool: `false` behaved exactly like Auto (nothing was
+        // ever sent); `true` = force on.
+        let cfg: ModelConfig = toml::from_str("think_mode = false").unwrap();
+        assert_eq!(cfg.think_mode, ThinkMode::Auto);
+        let cfg: ModelConfig = toml::from_str("think_mode = true").unwrap();
+        assert_eq!(cfg.think_mode, ThinkMode::On);
+        // New string form.
+        for (word, want) in [
+            ("auto", ThinkMode::Auto),
+            ("on", ThinkMode::On),
+            ("off", ThinkMode::Off),
+            ("OFF", ThinkMode::Off),
+        ] {
+            let cfg: ModelConfig = toml::from_str(&format!("think_mode = \"{word}\"")).unwrap();
+            assert_eq!(cfg.think_mode, want, "word={word}");
+        }
+        // Wire mapping.
+        assert_eq!(ThinkMode::Auto.to_thinking(), None);
+        assert_eq!(ThinkMode::On.to_thinking(), Some(crate::llm::Thinking::Enabled));
+        assert_eq!(ThinkMode::Off.to_thinking(), Some(crate::llm::Thinking::Disabled));
+        // Roundtrip writes the string form back.
+        let cfg: ModelConfig = toml::from_str("think_mode = \"off\"").unwrap();
+        let text = toml::to_string(&cfg).unwrap();
+        assert!(text.contains("think_mode = \"off\""), "{text}");
+        // Unknown words fall back to Auto instead of failing the load.
+        let cfg: ModelConfig = toml::from_str("think_mode = \"whatever\"").unwrap();
+        assert_eq!(cfg.think_mode, ThinkMode::Auto);
     }
 }

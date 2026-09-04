@@ -24,8 +24,13 @@ context_len = 128000
 # 可调高；缺省 480。
 # llm_timeout_secs = 480
 
-# 思考模式（预留字段，各厂商参数不同，后续版本接入）
-think_mode = false
+# 思考模式（M4.12，R3）。推理型模型（如 DeepSeek V4 系列）默认开思考
+# 且思维链按输出 token 计费、不受 max_tokens 约束——auto 时每次调用都在
+# 悄悄烧推理 token。off 可立刻数倍降低成本与延迟，质量由本地质量门兜底。
+#   "auto" = 不发送参数，沿用端点默认（兼容旧值 false）
+#   "on"   = 强制开思考（兼容旧值 true）
+#   "off"  = 强制关思考
+think_mode = "auto"
 
 # 价格：每 1M token 的美元单价（R6 费用换算用）
 [prices]

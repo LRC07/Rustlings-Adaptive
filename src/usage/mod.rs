@@ -15,13 +15,17 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// One LLM call's usage. `phase` tags what the call was for ("chat" for
-/// M1; later: 生成/评审/复盘 …).
+/// M1; later: 生成/评审/复盘 …). `reasoning_tokens` (M4.12) is the
+/// thinking-mode share of `output_tokens` — 0 when the endpoint
+/// doesn't report it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageRecord {
     pub ts: DateTime<Utc>,
     pub model: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    #[serde(default)]
+    pub reasoning_tokens: u64,
     pub cost_usd: f64,
     pub phase: String,
 }
@@ -56,6 +60,9 @@ pub struct Totals {
     pub calls: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Thinking-mode share of `output_tokens` (M4.12); 0 when the
+    /// endpoint doesn't report the breakdown.
+    pub reasoning_tokens: u64,
     pub cost_usd: f64,
 }
 
@@ -85,12 +92,22 @@ impl UsageTracker {
 
     /// Append a record and persist immediately (crash-safe enough for a
     /// CLI tool; save errors are non-fatal).
-    pub fn record(&mut self, model: &str, input_tokens: u64, output_tokens: u64, cost_usd: f64, phase: &str) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn record(
+        &mut self,
+        model: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        reasoning_tokens: u64,
+        cost_usd: f64,
+        phase: &str,
+    ) {
         self.records.push(UsageRecord {
             ts: Utc::now(),
             model: model.to_string(),
             input_tokens,
             output_tokens,
+            reasoning_tokens,
             cost_usd,
             phase: phase.to_string(),
         });
@@ -108,6 +125,7 @@ impl UsageTracker {
             t.calls += 1;
             t.input_tokens += r.input_tokens;
             t.output_tokens += r.output_tokens;
+            t.reasoning_tokens += r.reasoning_tokens;
             t.cost_usd += r.cost_usd;
         }
         t
@@ -130,6 +148,7 @@ impl UsageTracker {
             t.calls += 1;
             t.input_tokens += r.input_tokens;
             t.output_tokens += r.output_tokens;
+            t.reasoning_tokens += r.reasoning_tokens;
             t.cost_usd += r.cost_usd;
         }
         map.into_iter().collect()
@@ -190,8 +209,8 @@ mod tests {
         {
             let mut t = UsageTracker::from_path(path.clone());
             assert_eq!(t.all_totals().calls, 0);
-            t.record("m1", 1000, 2000, c, "chat");
-            t.record("m1", 10, 20, cost_usd(10, 20, 0.15, 0.60), "chat");
+            t.record("m1", 1000, 2000, 0, c, "chat");
+            t.record("m1", 10, 20, 0, cost_usd(10, 20, 0.15, 0.60), "chat");
             assert_eq!(t.session_totals().calls, 2);
         }
         // New "session" over the same file: history kept, session restarts.
