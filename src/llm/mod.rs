@@ -138,12 +138,9 @@ fn chat_url(endpoint: &str) -> String {
 }
 
 impl LlmClient {
-    pub fn new(endpoint: &str, api_key: &str, model: &str) -> Self {
-        Self::with_timeout(endpoint, api_key, model, DEFAULT_TIMEOUT)
-    }
-
     /// Same client with an explicit per-request timeout (R3: slow /
-    /// congested endpoints need a tunable ceiling).
+    /// congested endpoints need a tunable ceiling; default
+    /// `default_timeout()`).
     pub fn with_timeout(endpoint: &str, api_key: &str, model: &str, timeout: Duration) -> Self {
         let http = Client::builder()
             .timeout(timeout)
