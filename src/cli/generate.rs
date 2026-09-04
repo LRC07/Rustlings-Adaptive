@@ -196,6 +196,8 @@ pub(crate) fn cmd_generate(
                 Some(&trigger),
                 &out.hints,
                 &out.slots,
+                &out.reference,
+                &out.constraints,
             ) {
                 Ok(_) => {}
                 Err(e) => println!("  （index 登记失败：{e:#}）"),

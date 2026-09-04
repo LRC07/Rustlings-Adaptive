@@ -60,6 +60,15 @@ pub enum Thinking {
     Disabled,
 }
 
+/// Extract the outermost JSON object substring from a model reply
+/// (tolerates prose / markdown fences around it). Shared by the
+/// generator's draft loop and the M5 review/debrief JSON steps.
+pub fn extract_json(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    (end >= start).then_some(&text[start..=end])
+}
+
 // ---------------------------------------------------------------------------
 // Conversation types (M4: agent loop + tool calling)
 // ---------------------------------------------------------------------------

@@ -660,6 +660,8 @@ mod tests {
             feedback: None,
             last_error: None,
             slots: Default::default(),
+            reference: None,
+            constraints: Vec::new(),
         }
     }
 

@@ -304,14 +304,16 @@ const RUSTC_TIMEOUT: Duration = Duration::from_secs(60);
 const TEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Outcome of a polled subprocess run.
-enum RunOutcome {
+pub(crate) enum RunOutcome {
     Done(std::process::Output),
     TimedOut,
 }
 
 /// Spawn `cmd`, poll for exit, kill on timeout. stdout/stderr are
 /// drained via threads so large output cannot deadlock the poll loop.
-fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<RunOutcome> {
+/// pub(crate) so the M5 review gate can run clippy under the same
+/// hardening.
+pub(crate) fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<RunOutcome> {
     use std::io::Read;
     let mut child = cmd
         .stdin(Stdio::null())

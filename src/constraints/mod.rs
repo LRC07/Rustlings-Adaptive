@@ -168,7 +168,9 @@ fn violation(c: &Constraint, line: usize, src_line: &str, _col: usize) -> Violat
 }
 
 /// Remove `//` line comments (naive: ignores string literals; documented).
-fn strip_line_comments(code: &str) -> String {
+/// pub(crate) so the M5 review gate's static layer counts effective
+/// lines / todo! residue with the exact same semantics as `check`.
+pub(crate) fn strip_line_comments(code: &str) -> String {
     code.lines()
         .map(|l| match l.find("//") {
             Some(idx) if !in_string_literal(&l[..idx]) => &l[..idx],

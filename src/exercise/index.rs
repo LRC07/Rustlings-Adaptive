@@ -148,6 +148,17 @@ pub struct ExerciseMeta {
     /// must not re-serve the same fill.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub slots: std::collections::BTreeMap<String, String>,
+    /// Hidden reference solution (M5.1): persisted at generation time
+    /// so the review gate / debrief can compare against it later.
+    /// Reconciled entries carry a best-effort backfill rendered from
+    /// the template with the recorded (or default) slot values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    /// Constraint spec strings of the exercise (M5.1): the review
+    /// gate's static layer and the debrief comparison table consume
+    /// these; empty when unknown (seed fixtures, pre-M5.1 entries).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constraints: Vec<String>,
 }
 
 impl ExerciseMeta {
@@ -273,7 +284,8 @@ impl ExerciseIndex {
             if self.entries.contains_key(&key) {
                 continue;
             }
-            let (source, concepts, error_codes, difficulty, hints) = provenance_of(ex, templates);
+            let (source, concepts, error_codes, difficulty, hints, reference, constraints) =
+                provenance_of(ex, templates);
             self.entries.insert(
                 key.clone(),
                 ExerciseMeta {
@@ -292,6 +304,8 @@ impl ExerciseIndex {
                     hints,
                     feedback: None,
                     slots: Default::default(),
+                    reference,
+                    constraints,
                 },
             );
             added += 1;
@@ -380,28 +394,39 @@ fn strip_counter_suffix(stem: &str) -> &str {
 /// Recover provenance for a discovered exercise. Seeds map to
 /// `Source::Seed`; generated files map back to their template via the
 /// sanitized module name (optionally with a `_N` counter suffix).
+/// Template matches also backfill the reference solution (M5.1) by
+/// rendering the template with the default slot fill — a best-effort
+/// baseline for entries registered before the reference was persisted;
+/// the exact (slot-recorded) reference is stored by
+/// `register_generated` at generation time.
+#[allow(clippy::type_complexity)]
 fn provenance_of(
     ex: &Exercise,
     templates: &[Template],
-) -> (Source, Vec<String>, Vec<String>, Option<String>, Vec<String>) {
+) -> (Source, Vec<String>, Vec<String>, Option<String>, Vec<String>, Option<String>, Vec<String>) {
     if ex.is_fixture {
-        return (Source::Seed, Vec::new(), Vec::new(), None, Vec::new());
+        return (Source::Seed, Vec::new(), Vec::new(), None, Vec::new(), None, Vec::new());
     }
     let stem = ex.name.as_str();
     let base = strip_counter_suffix(stem);
     for t in templates {
         let san = crate::generator::sanitize_module_name(&t.id);
         if stem == san || base == san {
+            let reference = crate::template::render(t, &crate::template::fill_for_attempt(t, 0))
+                .ok()
+                .map(|r| r.reference.trim_end().to_string());
             return (
                 Source::TemplateFill { template_id: t.id.clone() },
                 t.concepts.clone(),
                 t.error_codes.clone(),
                 Some(t.difficulty.as_str().to_string()),
                 t.hints.clone(),
+                reference,
+                t.constraints.clone(),
             );
         }
     }
-    (Source::Unknown, Vec::new(), Vec::new(), None, Vec::new())
+    (Source::Unknown, Vec::new(), Vec::new(), None, Vec::new(), None, Vec::new())
 }
 
 /// One-shot migration of the legacy `.progress` file (M0): newline
@@ -453,7 +478,9 @@ pub fn migrate_progress(
 
 /// Register a freshly generated exercise: derive its index key from the
 /// generator's output path, build the meta entry and persist it. Returns
-/// the key (also what `Session.exercises` stores).
+/// the key (also what `Session.exercises` stores). `reference` is the
+/// hidden solution and `constraints` the exercise's spec strings —
+/// both consumed later by the M5 review gate / debrief.
 #[allow(clippy::too_many_arguments)]
 pub fn register_generated(
     exercises_dir: &Path,
@@ -467,6 +494,8 @@ pub fn register_generated(
     trigger: Option<&str>,
     hints: &[String],
     slots: &std::collections::BTreeMap<String, String>,
+    reference: &str,
+    constraints: &[String],
 ) -> anyhow::Result<String> {
     let key = key_for(exercises_dir, gen_path)
         .context("无法定位生成的练习文件（路径解析失败）")?;
@@ -487,6 +516,8 @@ pub fn register_generated(
         hints: hints.to_vec(),
         feedback: None,
         slots: slots.clone(),
+        reference: (!reference.trim().is_empty()).then(|| reference.trim_end().to_string()),
+        constraints: constraints.to_vec(),
     });
     Ok(key)
 }
@@ -548,6 +579,8 @@ mod tests {
             hints: Vec::new(),
             feedback: None,
             slots: Default::default(),
+            reference: None,
+            constraints: Vec::new(),
         });
 
         idx.record_attempt(key, false, Some("E0382"));
@@ -589,6 +622,8 @@ mod tests {
             hints: Vec::new(),
             feedback: None,
             slots: Default::default(),
+            reference: None,
+            constraints: Vec::new(),
         });
         assert!(idx.set_feedback("generated/a.rs", Feedback::TooHard));
         assert_eq!(idx.get("generated/a.rs").unwrap().feedback, Some(Feedback::TooHard));
@@ -617,6 +652,8 @@ mod tests {
                 hints: Vec::new(),
                 feedback: Some(Feedback::JustRight),
                 slots: Default::default(),
+            reference: None,
+            constraints: Vec::new(),
             });
         }
         let idx = ExerciseIndex::load_from(path);
@@ -679,6 +716,8 @@ mod tests {
             hints: Vec::new(),
             feedback: None,
             slots: Default::default(),
+            reference: None,
+            constraints: Vec::new(),
         };
         idx.entries.insert("generated/1.rs".into(), mk("generated/1.rs", "题一", &["ownership.move"], Status::Passed, false));
         idx.entries.insert("generated/2.rs".into(), mk("generated/2.rs", "题二", &["borrow.shared-mut"], Status::Failed { times: 2 }, false));
@@ -720,6 +759,8 @@ mod tests {
                 hints: Vec::new(),
                 feedback: None,
                 slots: Default::default(),
+            reference: None,
+            constraints: Vec::new(),
             },
         );
         assert!(seed_only.practice_note(&[]).is_none());

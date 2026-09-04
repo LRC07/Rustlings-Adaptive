@@ -19,7 +19,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::llm::LlmReply;
+use crate::llm::{extract_json, LlmReply};
 use crate::taxonomy::ConceptGraph;
 use crate::{constraints, template, verifier};
 
@@ -225,6 +225,12 @@ pub struct Outcome {
     pub slots: std::collections::BTreeMap<String, String>,
     /// Tiered hints from the draft/template (M4.8; tiers 2/3 only).
     pub hints: Vec<String>,
+    /// Hidden reference solution (M5.1: persisted in the exercise index
+    /// so the review gate / debrief can compare against it later).
+    pub reference: String,
+    /// Constraint spec strings of the exercise (M5.1: persisted for the
+    /// review gate's static layer and the debrief comparison table).
+    pub constraints: Vec<String>,
     pub attempts: u32,
     /// Whether any LLM call actually succeeded (selection/fill/draft).
     pub used_llm: bool,
@@ -537,6 +543,8 @@ fn generate_matched(
                 difficulty: t.difficulty,
                 slots: values,
                 hints: t.hints.clone(),
+                reference: draft.reference.clone(),
+                constraints: draft.constraints.clone(),
                 attempts: attempt + 1,
                 used_llm,
                 variant,
@@ -638,6 +646,8 @@ fn finish_draft(
         difficulty: draft.difficulty,
         slots: Default::default(),
         hints,
+        reference: draft.reference.clone(),
+        constraints: draft.constraints.clone(),
         attempts,
         used_llm: true,
         // Tiers 2/3 write a fresh scenario by construction — no
@@ -1207,13 +1217,6 @@ fn llm_fill_slots(
         return Err(anyhow!("LLM 没有给出可用槽位值"));
     }
     Ok(out)
-}
-
-/// Extract the outermost JSON object substring from an LLM reply.
-fn extract_json(text: &str) -> Option<&str> {
-    let start = text.find('{')?;
-    let end = text.rfind('}')?;
-    (end >= start).then_some(&text[start..=end])
 }
 
 // ---------------------------------------------------------------------------
