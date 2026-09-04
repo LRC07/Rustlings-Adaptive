@@ -143,6 +143,11 @@ pub struct ExerciseMeta {
     pub hints: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback: Option<Feedback>,
+    /// Actual slot values this exercise was instantiated with (tier 1
+    /// only; M4.10). Feeds the variant machinery: a repeated template
+    /// must not re-serve the same fill.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub slots: std::collections::BTreeMap<String, String>,
 }
 
 impl ExerciseMeta {
@@ -208,6 +213,11 @@ impl ExerciseIndex {
 
     pub fn get(&self, key: &str) -> Option<&ExerciseMeta> {
         self.entries.get(key)
+    }
+
+    /// All entries in key order (used by the generator's history view).
+    pub fn iter(&self) -> impl Iterator<Item = &ExerciseMeta> {
+        self.entries.values()
     }
 
     /// Insert or replace one entry and persist.
@@ -281,6 +291,7 @@ impl ExerciseIndex {
                     last_error: None,
                     hints,
                     feedback: None,
+                    slots: Default::default(),
                 },
             );
             added += 1;
@@ -455,6 +466,7 @@ pub fn register_generated(
     session_id: Option<&str>,
     trigger: Option<&str>,
     hints: &[String],
+    slots: &std::collections::BTreeMap<String, String>,
 ) -> anyhow::Result<String> {
     let key = key_for(exercises_dir, gen_path)
         .context("无法定位生成的练习文件（路径解析失败）")?;
@@ -474,6 +486,7 @@ pub fn register_generated(
         last_error: None,
         hints: hints.to_vec(),
         feedback: None,
+        slots: slots.clone(),
     });
     Ok(key)
 }
@@ -534,6 +547,7 @@ mod tests {
             last_error: None,
             hints: Vec::new(),
             feedback: None,
+            slots: Default::default(),
         });
 
         idx.record_attempt(key, false, Some("E0382"));
@@ -574,6 +588,7 @@ mod tests {
             last_error: None,
             hints: Vec::new(),
             feedback: None,
+            slots: Default::default(),
         });
         assert!(idx.set_feedback("generated/a.rs", Feedback::TooHard));
         assert_eq!(idx.get("generated/a.rs").unwrap().feedback, Some(Feedback::TooHard));
@@ -601,6 +616,7 @@ mod tests {
                 last_error: Some("E0382".into()),
                 hints: Vec::new(),
                 feedback: Some(Feedback::JustRight),
+                slots: Default::default(),
             });
         }
         let idx = ExerciseIndex::load_from(path);
@@ -662,6 +678,7 @@ mod tests {
             last_error: None,
             hints: Vec::new(),
             feedback: None,
+            slots: Default::default(),
         };
         idx.entries.insert("generated/1.rs".into(), mk("generated/1.rs", "题一", &["ownership.move"], Status::Passed, false));
         idx.entries.insert("generated/2.rs".into(), mk("generated/2.rs", "题二", &["borrow.shared-mut"], Status::Failed { times: 2 }, false));
@@ -702,6 +719,7 @@ mod tests {
                 last_error: None,
                 hints: Vec::new(),
                 feedback: None,
+                slots: Default::default(),
             },
         );
         assert!(seed_only.practice_note(&[]).is_none());

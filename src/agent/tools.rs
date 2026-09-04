@@ -210,15 +210,22 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
     progress(&format!("生成练习（{topic_text}）：选模板…"));
 
     let paths = Paths::from_root(&env.root);
+    // M4.10: feed past generation history into the pick so the learner
+    // does not silently re-serve the same template question.
+    let history = {
+        let index = crate::exercise::index::ExerciseIndex::load(&env.root.join("exercises"));
+        generator::GenHistory::from_index(&index)
+    };
     let mut bridge = CallerBridge {
         caller: env.caller.clone(),
         input_price: env.cfg.prices.input,
         output_price: env.cfg.prices.output,
         acc: UsageAcc::default(),
     };
-    let outcome = match generator::generate(
+    let outcome = match generator::generate_with_history(
         &topic,
         &paths,
+        &history,
         Some(&mut bridge),
         Some(&mut |stage: generator::GenerateStage| {
             let base = format!(
@@ -276,11 +283,12 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
         env.session_id.as_deref(),
         Some(&trigger),
         &outcome.hints,
+        &outcome.slots,
     ) {
         progress(&format!("index 登记失败：{e:#}"));
     }
 
-    let value = json!({
+    let mut value = json!({
         "ok": true,
         "title": outcome.title,
         "file": outcome.name,
@@ -289,16 +297,26 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
         "difficulty": outcome.difficulty.name_cn(),
         "attempts": outcome.attempts,
         "used_llm": outcome.used_llm,
+        "variant": outcome.variant,
         "trigger": trigger,
         "note": "题目已写入练习目录并接线，用户可以立即开始做题",
     });
+    if outcome.variant {
+        // The coach must phrase this as a variant, not pretend it is a
+        // brand-new exercise.
+        value["note"] = json!(
+            "这是同模板的变式（该模板此前已出过题，本次轮换了槽位/换了值）。\
+             请在回复里向用户说明这一点。"
+        );
+    }
     Ok(ToolOutcome {
         note: Some(format!(
-            "生成成功：《{}》（{}，{}，第 {} 轮通过）",
+            "生成成功：《{}》（{}，{}，第 {} 轮{}）",
             outcome.title,
             outcome.difficulty.name_cn(),
             outcome.tier.label_cn(),
-            outcome.attempts
+            outcome.attempts,
+            if outcome.variant { "，同模板变式" } else { "" }
         )),
         practice: Some(PracticeOffer {
             title: outcome.title,

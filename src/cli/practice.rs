@@ -659,6 +659,7 @@ mod tests {
             hints: Vec::new(),
             feedback: None,
             last_error: None,
+            slots: Default::default(),
         }
     }
 

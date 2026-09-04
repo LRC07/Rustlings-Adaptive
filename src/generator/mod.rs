@@ -159,6 +159,57 @@ pub enum GenerateMode {
     Free,
 }
 
+/// How a template was used before (M4.10), distilled from the exercise
+/// index. Drives two behaviors: unused candidates rank first, and an
+/// unavoidable repeat becomes a slot-rotated *variant* instead of a
+/// silent re-serve of the same question.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TemplateUse {
+    /// Exercises already generated from this template.
+    pub times: u32,
+    /// True when every one of them passed (nothing left to learn here
+    /// without a variant).
+    pub all_passed: bool,
+    /// Slot values used by past generations (index order), so an LLM
+    /// fill can be told which values to avoid.
+    pub prev_slot_values: Vec<std::collections::BTreeMap<String, String>>,
+}
+
+/// Generation history view (M4.10): template_id → how it was used.
+#[derive(Debug, Clone, Default)]
+pub struct GenHistory {
+    used: std::collections::BTreeMap<String, TemplateUse>,
+}
+
+impl GenHistory {
+    /// Build from the exercise index (tier-1 fills only; tiers 2/3
+    /// produce fresh scenarios and need no dedup).
+    pub fn from_index(index: &crate::exercise::index::ExerciseIndex) -> Self {
+        let mut used: std::collections::BTreeMap<String, TemplateUse> = Default::default();
+        for meta in index.iter() {
+            let crate::exercise::index::Source::TemplateFill { template_id } = &meta.source
+            else {
+                continue;
+            };
+            let entry = used.entry(template_id.clone()).or_default();
+            entry.times += 1;
+            entry.all_passed &= meta.status == crate::exercise::index::Status::Passed;
+            if !meta.slots.is_empty() {
+                entry.prev_slot_values.push(meta.slots.clone());
+            }
+        }
+        Self { used }
+    }
+
+    pub fn times(&self, template_id: &str) -> u32 {
+        self.used.get(template_id).map(|u| u.times).unwrap_or(0)
+    }
+
+    pub fn get(&self, template_id: &str) -> Option<&TemplateUse> {
+        self.used.get(template_id)
+    }
+}
+
 /// Result of a successful generation.
 #[derive(Debug, Clone)]
 pub struct Outcome {
@@ -177,6 +228,10 @@ pub struct Outcome {
     pub attempts: u32,
     /// Whether any LLM call actually succeeded (selection/fill/draft).
     pub used_llm: bool,
+    /// True when a previously-used template was intentionally reused
+    /// and the question was freshened via slot rotation / a different
+    /// LLM fill (M4.10). The caller should surface this ("变式").
+    pub variant: bool,
 }
 
 /// Blocking LLM caller provided by the CLI (handles config/budget/usage).
@@ -273,13 +328,31 @@ pub fn gate_draft(d: &template::ExerciseDraft, workdir: &Path) -> Result<verifie
 /// Every tier leaves through `gate_draft`; on failure the rustc
 /// diagnostics are fed back to the model (repair loop, ≤4 rounds).
 /// Tiers 2/3 require an LLM caller; `Auto` falls through 1 → 2 → 3.
+/// Generate an exercise for `topic` (no history awareness — the
+/// convenience/test entry; production callers use
+/// `generate_with_history`).
+#[allow(dead_code)]
 pub fn generate(
     topic: &Topic,
     paths: &Paths,
     llm: Option<&mut dyn LlmCaller>,
     progress: Option<&mut dyn FnMut(GenerateStage)>,
 ) -> Result<Outcome> {
-    generate_with_mode(topic, GenerateMode::Auto, paths, llm, progress)
+    generate_with_history(topic, paths, &GenHistory::default(), llm, progress)
+}
+
+/// History-aware entry (M4.10): `history` carries which templates the
+/// learner already received (from the exercise index). Unused
+/// candidates rank first; a repeated template becomes a slot-rotated
+/// variant instead of the same question again.
+pub fn generate_with_history(
+    topic: &Topic,
+    paths: &Paths,
+    history: &GenHistory,
+    llm: Option<&mut dyn LlmCaller>,
+    progress: Option<&mut dyn FnMut(GenerateStage)>,
+) -> Result<Outcome> {
+    generate_with_mode(topic, GenerateMode::Auto, paths, history, llm, progress)
 }
 
 /// Mode-parameterized entry — crate-internal (tests). The public
@@ -289,6 +362,7 @@ pub(crate) fn generate_with_mode(
     topic: &Topic,
     mode: GenerateMode,
     paths: &Paths,
+    history: &GenHistory,
     mut llm: Option<&mut dyn LlmCaller>,
     mut progress: Option<&mut dyn FnMut(GenerateStage)>,
 ) -> Result<Outcome> {
@@ -322,7 +396,7 @@ pub(crate) fn generate_with_mode(
             None => None,
         };
         stage!("选模板", 1, MAX_ATTEMPTS);
-        match generate_matched(topic, &templates, &graph, paths, sel_call, &mut progress) {
+        match generate_matched(topic, &templates, &graph, paths, history, sel_call, &mut progress) {
             Ok(o) => Ok(o),
             Err(tier1_err) => {
                 if matches!(mode, GenerateMode::Matched) {
@@ -370,6 +444,7 @@ fn generate_matched(
     templates: &[template::Template],
     graph: &ConceptGraph,
     paths: &Paths,
+    history: &GenHistory,
     mut sel_llm: Option<&mut dyn LlmCaller>,
     progress: &mut Option<&mut dyn FnMut(GenerateStage)>,
 ) -> Result<Outcome> {
@@ -386,10 +461,17 @@ fn generate_matched(
         };
     }
 
-    let (t, used_llm_select) = choose_template(templates, graph, topic, sel_llm.as_deref_mut())?;
+    let pick = choose_template(templates, graph, topic, history, sel_llm.as_deref_mut())?;
+    let t = pick.t;
+    // Variant of a previously-served template (M4.10): start the slot
+    // rotation at the number of past generations so the fill — and
+    // with it the scenario — genuinely differs from what the learner
+    // already saw (attempt 0 = defaults would re-serve the same one).
+    let variant = pick.variant;
+    let rotation_base = if variant { history.times(&t.id) as usize } else { 0 };
 
     let mut last_fail = String::from("尚未尝试");
-    let mut used_llm = used_llm_select;
+    let mut used_llm = pick.used_llm;
     for attempt in 0..MAX_ATTEMPTS {
         if crate::agent::is_interrupted() {
             crate::agent::reset_interrupt();
@@ -397,13 +479,19 @@ fn generate_matched(
         }
         stage!("填槽+校验", attempt + 1);
         // Base values: defaults (attempt 0) then deterministic rotation.
-        let mut values = template::fill_for_attempt(t, attempt as usize);
+        let mut values = template::fill_for_attempt(t, rotation_base + attempt as usize);
 
         // LLM fills slots on the first two attempts; later attempts rely
         // on rotation so a stuck LLM cannot loop forever.
         if attempt <= 1
             && let Some(call) = sel_llm.as_deref_mut()
-            && let Ok(filled) = llm_fill_slots(t, &topic.prompt_text(), Some(&last_fail), call)
+            && let Ok(filled) = llm_fill_slots(
+                t,
+                &topic.prompt_text(),
+                Some(&last_fail),
+                variant.then(|| history.get(&t.id)).flatten(),
+                call,
+            )
         {
             for (k, v) in filled {
                 values.insert(k, v);
@@ -451,6 +539,7 @@ fn generate_matched(
                 hints: t.hints.clone(),
                 attempts: attempt + 1,
                 used_llm,
+                variant,
             });
         }
         last_fail = failure_reason(&report);
@@ -551,6 +640,9 @@ fn finish_draft(
         hints,
         attempts,
         used_llm: true,
+        // Tiers 2/3 write a fresh scenario by construction — no
+        // repeat-detection needed (M4.10).
+        variant: false,
     })
 }
 
@@ -816,12 +908,22 @@ fn draft_prompt(
 // Template selection
 // ---------------------------------------------------------------------------
 
+/// A tier-1 template selection (M4.10 shape).
+struct Pick<'a> {
+    t: &'a template::Template,
+    /// The LLM made the selection (vs deterministic fallback).
+    used_llm: bool,
+    /// The template was served before — the fill must be freshened.
+    variant: bool,
+}
+
 fn choose_template<'a>(
     templates: &'a [template::Template],
     graph: &ConceptGraph,
     topic: &Topic,
+    history: &GenHistory,
     llm: Option<&mut (dyn LlmCaller + '_)>,
-) -> Result<(&'a template::Template, bool)> {
+) -> Result<Pick<'a>> {
     match topic {
         Topic::Concept(q) => {
             let id = graph
@@ -830,9 +932,18 @@ fn choose_template<'a>(
                     graph.ids().take(5).cloned().collect::<Vec<_>>().join("、")))?;
             let mut ids = BTreeSet::new();
             collect_concept_templates(graph, id, &mut ids);
-            let t = pick_by_ids(templates, &ids)
-                .ok_or_else(|| anyhow!("概念「{id}」还没有可用模板"))?;
-            Ok((t, false))
+            match pick_candidate(templates, &ids, history) {
+                Some(p) => Ok(p),
+                None if ids.is_empty() => {
+                    bail!("概念「{id}」还没有可用模板")
+                }
+                // All candidates served and slot-less: a repeat would
+                // be the identical question — hand off to L2/L3.
+                None => bail!(
+                    "概念「{id}」的模板题都已出过，且没有槽位可生成变式；\
+                     配置 LLM 后会自动转为改编/自由生成新场景"
+                ),
+            }
         }
         Topic::ErrorCode(code) => {
             let concepts = graph.concepts_for_code(code);
@@ -843,28 +954,65 @@ fn choose_template<'a>(
             for c in &concepts {
                 collect_concept_templates(graph, c, &mut ids);
             }
-            let t = pick_by_ids(templates, &ids)
-                .ok_or_else(|| anyhow!("错误码 {code} 相关概念还没有可用模板"))?;
-            Ok((t, false))
+            match pick_candidate(templates, &ids, history) {
+                Some(p) => Ok(p),
+                None if ids.is_empty() => {
+                    bail!("错误码 {code} 相关概念还没有可用模板")
+                }
+                None => bail!(
+                    "错误码 {code} 相关的模板题都已出过，且没有槽位可生成变式；\
+                     配置 LLM 后会自动转为改编/自由生成新场景"
+                ),
+            }
         }
         Topic::FreeText(text) => {
             // LLM first (understands loose Chinese requests), then a
             // deterministic keyword score over taxonomy names + titles.
             if let Some(call) = llm
-                && let Ok(Some(t)) = llm_pick_template(templates, text, call)
+                && let Some(p) = llm_pick_template(templates, text, history, call)?
             {
-                return Ok((t, true));
+                return Ok(p);
             }
             let ids = keyword_candidates(templates, graph, text);
-            if let Some(t) = pick_by_ids(templates, &ids) {
-                return Ok((t, false));
-            }
-            bail!(
-                "没能根据「{text}」挑出模板；试试概念（如 trait.associated-types）、\
-                 错误码（如 E0382）或更具体的关键词"
-            )
+            pick_candidate(templates, &ids, history).ok_or_else(|| {
+                if ids.is_empty() {
+                    anyhow!(
+                        "没能根据「{text}」挑出模板；试试概念（如 trait.associated-types）、\
+                         错误码（如 E0382）或更具体的关键词"
+                    )
+                } else {
+                    anyhow!(
+                        "「{text}」命中的模板题都已出过，且没有槽位可生成变式；\
+                         配置 LLM 后会自动转为改编/自由生成新场景"
+                    )
+                }
+            })
         }
     }
+}
+
+/// Choose among candidate template ids (M4.10): unused templates rank
+/// first (stable order otherwise); a used template is only eligible as
+/// an explicit variant — and only when its slots can produce a
+/// different fill (a slot-less repeat would be the identical question).
+fn pick_candidate<'a>(
+    templates: &'a [template::Template],
+    ids: &BTreeSet<String>,
+    history: &GenHistory,
+) -> Option<Pick<'a>> {
+    let mut cands: Vec<&template::Template> =
+        templates.iter().filter(|t| ids.contains(&t.id)).collect();
+    cands.sort_by_key(|t| history.times(&t.id) != 0); // stable: unused first
+    cands.into_iter().find_map(|t| {
+        let times = history.times(&t.id);
+        if times == 0 {
+            Some(Pick { t, used_llm: false, variant: false })
+        } else if !t.slots.is_empty() {
+            Some(Pick { t, used_llm: false, variant: true })
+        } else {
+            None // already served, cannot vary: skip (falls to L2/L3)
+        }
+    })
 }
 
 /// All template ids covering `concept_id` and (transitively) its children.
@@ -875,13 +1023,6 @@ fn collect_concept_templates(graph: &ConceptGraph, concept_id: &str, out: &mut B
             collect_concept_templates(graph, child, out);
         }
     }
-}
-
-fn pick_by_ids<'a>(
-    templates: &'a [template::Template],
-    ids: &BTreeSet<String>,
-) -> Option<&'a template::Template> {
-    templates.iter().find(|t| ids.contains(&t.id))
 }
 
 /// Deterministic free-text matching: taxonomy concept names/ids first
@@ -924,17 +1065,26 @@ fn keyword_candidates(
 fn llm_pick_template<'a>(
     templates: &'a [template::Template],
     request: &str,
+    history: &GenHistory,
     call: &mut (dyn LlmCaller + '_),
-) -> Result<Option<&'a template::Template>> {
+) -> Result<Option<Pick<'a>>> {
     let catalog: String = templates
         .iter()
         .map(|t| {
+            // M4.10: mark templates the learner already received so the
+            // pick can prefer fresh ones.
+            let used_note = match history.get(&t.id) {
+                Some(u) => format!(" | ALREADY USED x{} ({})", u.times,
+                    if u.all_passed { "all passed" } else { "not all passed" }),
+                None => String::new(),
+            };
             format!(
-                "- {} | {} | {} | {}",
+                "- {} | {} | {} | {}{}",
                 t.id,
                 t.title,
                 t.concepts.join(","),
-                t.error_codes.join(",")
+                t.error_codes.join(","),
+                used_note
             )
         })
         .collect::<Vec<_>>()
@@ -942,10 +1092,15 @@ fn llm_pick_template<'a>(
     let prompt = format!(
         "You are choosing a Rust practice exercise template for a learner.\n\n\
          User request: {request}\n\n\
-         Available templates (id | title | concepts | error-codes):\n{catalog}\n\n\
-         Pick a template ONLY if its concept is essentially what the request asks for. \
-         A template that merely touches adjacent keywords (e.g. a for-loop exercise for a \
-         HashMap-request) is a WRONG answer. If no template truly matches, say so.\n\n\
+         Available templates (id | title | concepts | error-codes | usage):\n{catalog}\n\n\
+         Pick a template ONLY if it trains the SPECIFIC technique or behavior the request \
+         asks for. A template that merely lives in the same concept domain while training \
+         a different technique is a WRONG answer (e.g. an and_then+map chain exercise for \
+         an unwrap_or-laziness request) — say no_match instead. Templates merely touching \
+         adjacent keywords are also WRONG answers.\n\n\
+         Prefer templates NOT marked ALREADY USED; the learner should not re-serve the \
+         same question. Pick a used one only when it is clearly the best precision match \
+         — the pipeline will then produce a fresh slot-rotated variant.\n\n\
          Answer with ONLY a JSON object:\n\
          {{\"template_id\": \"<id>\"}}  or  {{\"no_match\": true}}"
     );
@@ -961,13 +1116,18 @@ fn llm_pick_template<'a>(
         return Ok(None);
     }
     let id = v.get("template_id").and_then(Value::as_str).map(str::to_string);
-    Ok(id.and_then(|id| templates.iter().find(|t| t.id == id)))
+    Ok(id.and_then(|id| templates.iter().find(|t| t.id == id)).map(|t| Pick {
+        t,
+        used_llm: true,
+        variant: history.times(&t.id) > 0,
+    }))
 }
 
 fn llm_fill_slots(
     t: &template::Template,
     request: &str,
     last_fail: Option<&str>,
+    prev_use: Option<&TemplateUse>,
     call: &mut (dyn LlmCaller + '_),
 ) -> Result<std::collections::BTreeMap<String, String>> {
     if t.slots.is_empty() {
@@ -991,9 +1151,30 @@ fn llm_fill_slots(
         .filter(|f| *f != "尚未尝试")
         .map(|f| format!("\nA previous fill failed: {f}\nChoose DIFFERENT values this time.\n"))
         .unwrap_or_default();
+    // M4.10 variant: the learner already saw fills like these — pick
+    // fresh values so the scenario differs, not the same question.
+    let variant_note = prev_use
+        .filter(|u| !u.prev_slot_values.is_empty())
+        .map(|u| {
+            let past: Vec<String> = u
+                .prev_slot_values
+                .iter()
+                .map(|vals| {
+                    vals.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(", ")
+                })
+                .collect();
+            format!(
+                "\nThis template was already used for {} earlier exercise(s). \
+                 Past slot fills: [{}]. Choose DIFFERENT values (within the allowed \
+                 lists) so this becomes a new scenario, not a repeat.\n",
+                u.times,
+                past.join(" ; ")
+            )
+        })
+        .unwrap_or_default();
     let prompt = format!(
         "You are generating a Rust practice exercise by filling named slots.\n\n\
-         Template: {} ({})\nUser request: {request}\n{retry_note}\n\
+         Template: {} ({})\nUser request: {request}\n{retry_note}{variant_note}\n\
          Slots (name | kind | allowed values | default):\n{spec}\n\n\
          Rules: every value MUST come from the allowed list when one is given; \
          keep values short and valid Rust for their kind.\n\
@@ -1291,7 +1472,7 @@ fn add(a: i32, b: i32) -> i32 {
     #[test]
     fn error_code_routes_via_reverse_index() {
         let fx = Fixture::new();
-        let out = generate_with_mode(&Topic::ErrorCode("e0308".into()), GenerateMode::Auto, &fx.paths(), None, None).unwrap();
+        let out = generate_with_mode(&Topic::ErrorCode("e0308".into()), GenerateMode::Auto, &fx.paths(), &GenHistory::default(), None, None).unwrap();
         assert_eq!(out.tier, Tier::Matched { template_id: "mini-add".into() });
     }
 
@@ -1389,6 +1570,7 @@ fn add(a: i32, b: i32) -> i32 {
             &Topic::FreeText("出一道取余的题".into()),
             GenerateMode::Free,
             &paths,
+            &GenHistory::default(),
             Some(&mut call),
             None,
         )
@@ -1413,6 +1595,7 @@ fn add(a: i32, b: i32) -> i32 {
             &Topic::FreeText("加法".into()),
             GenerateMode::Adapted,
             &paths,
+            &GenHistory::default(),
             Some(&mut call),
             None,
         )
@@ -1437,6 +1620,7 @@ fn add(a: i32, b: i32) -> i32 {
             &Topic::FreeText("完全无关的主题词汇".into()),
             GenerateMode::Auto,
             &paths,
+            &GenHistory::default(),
             Some(&mut call),
             None,
         )
@@ -1456,6 +1640,7 @@ fn add(a: i32, b: i32) -> i32 {
             &Topic::FreeText("任意".into()),
             GenerateMode::Free,
             &paths,
+            &GenHistory::default(),
             Some(&mut call),
             None,
         )
@@ -1500,6 +1685,7 @@ fn add(a: i32, b: i32) -> i32 {
             &Topic::FreeText("取余".into()),
             GenerateMode::Free,
             &paths,
+            &GenHistory::default(),
             Some(&mut call),
             None,
         )
@@ -1534,6 +1720,7 @@ fn add(a: i32, b: i32) -> i32 {
             &Topic::FreeText("取余".into()),
             GenerateMode::Free,
             &paths,
+            &GenHistory::default(),
             Some(&mut call),
             None,
         )
@@ -1550,6 +1737,7 @@ fn add(a: i32, b: i32) -> i32 {
             &Topic::FreeText("取余".into()),
             GenerateMode::Free,
             &fx.paths(),
+            &GenHistory::default(),
             None,
             None,
         )
@@ -1574,6 +1762,177 @@ fn add(a: i32, b: i32) -> i32 {
         assert_eq!(extract_json("前言 {\"a\": 1} 后记"), Some("{\"a\": 1}"));
         assert_eq!(extract_json("```json\n{\"b\": 2}\n```"), Some("{\"b\": 2}"));
         assert_eq!(extract_json("没有对象"), None);
+    }
+
+    // ------------------------------------------------------------------
+    // M4.10: history-aware generation (dedup + variants)
+    // ------------------------------------------------------------------
+
+    /// Append a `word` slot to the mini template (same trick as
+    /// `free_text_uses_llm_choice_and_slot_fill`).
+    fn make_slotted(fx: &Fixture) {
+        let mut with_slot = MINI_TEMPLATE.to_string();
+        with_slot.push_str(
+            "\n[[slots]]\nname = \"word\"\nkind = \"literal\"\nvalues = [\"a\", \"b\"]\ndefault = \"a\"\n",
+        );
+        let with_slot = with_slot.replace("// 提示 1：完成后两个测试都应通过。", "// 填槽值：{{word}}。");
+        fs::write(fx.root.join("templates/mini-add.toml"), with_slot).unwrap();
+    }
+
+    /// A second template matching the same concept, with a `word` slot.
+    fn add_second_template(fx: &Fixture) {
+        let toml = MINI_TEMPLATE
+            .replace("mini-add", "mini-sub")
+            .replace("迷你加法", "迷你减法")
+            // Subtraction semantics: fix the expectations, not just the
+            // operator (the gate would rightly reject a + b tests).
+            .replace("assert_eq!(add(1, 2), 3);", "assert_eq!(add2(1, 2), -1);")
+            .replace("assert_eq!(add(-1, 1), 0);", "assert_eq!(add2(-1, 1), -2);")
+            .replace("fn add(", "fn add2(")
+            .replace("a + b", "a - b")
+            .replace("// 两个 i32 相加的小练习。", "// 两个 i32 相减的小练习。")
+            // The slot must appear in the body (rule filter checks it).
+            .replace("// 提示 1：完成后两个测试都应通过。", "// 填槽值：{{word}}。")
+            + "\n[[slots]]\nname = \"word\"\nkind = \"literal\"\nvalues = [\"x\", \"y\"]\ndefault = \"x\"\n";
+        fs::write(fx.root.join("templates/mini-sub.toml"), toml).unwrap();
+    }
+
+    fn history_with(template_id: &str, times: u32, prev: &[(&str, &str)]) -> GenHistory {
+        let mut h = GenHistory::default();
+        h.used.insert(
+            template_id.to_string(),
+            TemplateUse {
+                times,
+                all_passed: true,
+                prev_slot_values: vec![prev
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect()],
+            },
+        );
+        h
+    }
+
+    #[test]
+    fn unused_template_ranks_first() {
+        let fx = Fixture::new();
+        make_slotted(&fx);
+        add_second_template(&fx);
+        let h = history_with("mini-add", 1, &[("word", "a")]);
+        let out = generate_with_history(
+            &Topic::Concept("test.concept".into()),
+            &fx.paths(),
+            &h,
+            None,
+            None,
+        )
+        .unwrap();
+        // mini-add was already served → the fresh sibling wins.
+        assert_eq!(out.tier, Tier::Matched { template_id: "mini-sub".into() });
+        assert!(!out.variant);
+    }
+
+    #[test]
+    fn reused_template_becomes_rotated_variant() {
+        let fx = Fixture::new();
+        make_slotted(&fx);
+        let h = history_with("mini-add", 1, &[("word", "a")]);
+        let out = generate_with_history(
+            &Topic::Concept("test.concept".into()),
+            &fx.paths(),
+            &h,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(out.variant, "a reused template must be flagged as variant");
+        // Rotation base = past generations (1) → not the default fill "a".
+        assert_eq!(out.slots.get("word").map(String::as_str), Some("b"));
+    }
+
+    #[test]
+    fn used_slotless_template_skips_to_llm_tiers() {
+        let fx = Fixture::new();
+        let h = history_with("mini-add", 1, &[]);
+        // mini-add has no slots: a repeat would be the identical
+        // question, so tier 1 declines and — offline — the auto chain
+        // stops with the structured "matched failed" error.
+        let err = generate_with_history(
+            &Topic::Concept("test.concept".into()),
+            &fx.paths(),
+            &h,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("模板直配失败"), "{err}");
+    }
+
+    #[test]
+    fn llm_pick_prompt_carries_usage_and_precision_rules() {
+        let fx = Fixture::new();
+        make_slotted(&fx);
+        let h = history_with("mini-add", 1, &[("word", "a")]);
+        let prompts = std::cell::RefCell::new(Vec::<String>::new());
+        let mut call = |prompt: &str| -> Result<LlmReply> {
+            prompts.borrow_mut().push(prompt.to_string());
+            if prompt.contains("choosing a Rust practice") {
+                Ok(reply(r#"{"template_id": "mini-add"}"#))
+            } else {
+                Ok(reply(r#"{"slots": {"word": "b"}}"#))
+            }
+        };
+        let out = generate_with_history(
+            &Topic::FreeText("随便来一道".into()),
+            &fx.paths(),
+            &h,
+            Some(&mut call),
+            None,
+        )
+        .unwrap();
+        let picks = prompts.borrow();
+        let pick_prompt = picks.iter().find(|p| p.contains("choosing a Rust practice")).unwrap();
+        // §6.2 precision tightening + usage annotation both present.
+        assert!(pick_prompt.contains("SPECIFIC technique"), "precision rule missing");
+        assert!(pick_prompt.contains("ALREADY USED x1"), "usage annotation missing");
+        assert!(pick_prompt.contains("NOT marked ALREADY USED"), "preference rule missing");
+        // Variant fill prompt cites the previous values.
+        let fill_prompt = picks.iter().find(|p| p.contains("filling named slots")).unwrap();
+        assert!(fill_prompt.contains("already used"), "{fill_prompt}");
+        assert!(fill_prompt.contains("word=a"), "past fill values missing");
+        assert!(out.variant);
+    }
+
+    #[test]
+    fn gen_history_from_index() {
+        let dir = std::env::temp_dir().join(format!("rustlings_hist_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("index.json");
+        fs::write(
+            &path,
+            r#"{
+  "generated/a.rs": {"path": "generated/a.rs", "title": "a",
+    "source": {"kind": "template-fill", "template_id": "t1"},
+    "status": "passed", "slots": {"word": "a"}},
+  "generated/b.rs": {"path": "generated/b.rs", "title": "b",
+    "source": {"kind": "template-fill", "template_id": "t1"},
+    "status": {"failed": {"times": 1}}},
+  "generated/c.rs": {"path": "generated/c.rs", "title": "c",
+    "source": {"kind": "free"}, "status": "passed"},
+  "fixtures/d.rs": {"path": "fixtures/d.rs", "title": "d",
+    "source": {"kind": "seed"}, "status": "pending"}
+}"#,
+        )
+        .unwrap();
+        let index = crate::exercise::index::ExerciseIndex::load_from(path);
+        let h = GenHistory::from_index(&index);
+        let t1 = h.get("t1").unwrap();
+        assert_eq!(t1.times, 2);
+        assert!(!t1.all_passed, "one failed attempt → not all passed");
+        assert_eq!(t1.prev_slot_values.len(), 1);
+        assert!(h.get("t2").is_none());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     fn reply(content: &str) -> LlmReply {

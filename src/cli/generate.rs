@@ -90,9 +90,15 @@ pub(crate) fn cmd_generate(
         "  正在生成分层出题：模板直配 → 模板改编 → 自由生成（每题过三重校验）…"
     );
     let paths = generator::Paths::from_root(Path::new("."));
-    match generator::generate(
+    // M4.10: past generations steer the pick (unused first, variants).
+    let history = {
+        let index = index::ExerciseIndex::load(&ctx.root);
+        generator::GenHistory::from_index(&index)
+    };
+    match generator::generate_with_history(
         &topic,
         &paths,
+        &history,
         llm,
         Some(&mut |stage: generator::GenerateStage| {
             match &stage.note {
@@ -117,6 +123,9 @@ pub(crate) fn cmd_generate(
                 out.difficulty.name_cn()
             );
             println!("    来源 {} ｜ 概念 {}", out.tier.label_cn(), out.concepts.join("、"));
+            if out.variant {
+                println!("    ⚠ 同模板变式（此前已出过该模板的题，本次轮换了槽位）");
+            }
             if slots.is_empty() {
                 println!("    槽位 无");
             } else {
@@ -143,6 +152,7 @@ pub(crate) fn cmd_generate(
                 session.map(|(id, _)| id),
                 Some(&trigger),
                 &out.hints,
+                &out.slots,
             ) {
                 Ok(_) => {}
                 Err(e) => println!("  （index 登记失败：{e:#}）"),
