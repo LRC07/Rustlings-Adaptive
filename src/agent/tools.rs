@@ -508,7 +508,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             root.join("templates/mini.toml"),
-            "id = \"mini\"\ntitle = \"迷你\"\nconcepts = [\"t.c\"]\nerror_codes = [\"E0308\"]\ndifficulty = \"easy\"\n\nbody = '''\n// 说明行。\n// 说明行二。\n// 说明行三。\n// 说明行四。\n// 说明行五。\n// 说明行六。\nfn add(a: i32, b: i32) -> i32 {\n    todo!()\n}\n// I AM NOT DONE\n'''\n\ntests = '''\n#[cfg(test)]\nmod tests {\n    use super::*;\n    #[test]\n    fn t() {\n        assert_eq!(add(1, 2), 3);\n    }\n}\n'''\n\nreference = '''\nfn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n'''\n",
+            "id = \"mini\"\ntitle = \"迷你\"\nconcepts = [\"t.c\"]\nerror_codes = [\"E0308\"]\ndifficulty = \"easy\"\nconfusion = \"初学者以为函数传参总是复制\"\n\nbody = '''\n// 说明行。\n// 说明行二。\n// 说明行三。\n// 说明行四。\n// 说明行五。\n// 说明行六。\nfn add(a: i32, b: i32) -> i32 {\n    todo!()\n}\n// I AM NOT DONE\n'''\n\ntests = '''\n#[cfg(test)]\nmod tests {\n    use super::*;\n    #[test]\n    fn t() {\n        assert_eq!(add(1, 2), 3);\n    }\n}\n'''\n\nreference = '''\nfn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n'''\n",
         )
         .unwrap();
         std::fs::write(root.join("exercises/lib.rs"), "//! fixture\n").unwrap();

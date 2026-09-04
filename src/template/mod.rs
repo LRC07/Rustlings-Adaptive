@@ -129,6 +129,16 @@ pub struct Template {
     /// via `constraints::Constraint::from_spec`.
     #[serde(default)]
     pub constraints: Vec<String>,
+    /// The language-transfer intuition that leads into this trap
+    /// (M4.5b, spec C3: "from which language's which habit"). Required
+    /// — a template without a confusion story is rarely worth keeping.
+    #[allow(dead_code)] // consumed by the M5 review gate / prompt rubric
+    pub confusion: String,
+    /// Expected non-idiomatic "solutions" this exercise should force
+    /// away (spec C4; compared by the M5 review gate).
+    #[allow(dead_code)] // consumed by the M5 review gate
+    #[serde(default)]
+    pub anti_patterns: Vec<String>,
     #[allow(dead_code)] // consumed by the M5 review gate
     #[serde(default)]
     pub review_hints: Option<ReviewHints>,
@@ -207,6 +217,9 @@ pub fn load_file(path: &Path) -> Result<Template> {
         std::fs::read_to_string(path).with_context(|| format!("读取 {} 失败", path.display()))?;
     let t: Template =
         toml::from_str(&text).with_context(|| format!("TOML 解析失败（{}）", path.display()))?;
+    if t.confusion.trim().is_empty() {
+        bail!("模板 '{}' 缺少 confusion 字段（规格 C3：注明源语言直觉 → 掉坑路径）", t.id);
+    }
     let violations = rule_filter(&t);
     if !violations.is_empty() {
         bail!("规则过滤未通过:\n  - {}", violations.join("\n  - "));
@@ -217,9 +230,34 @@ pub fn load_file(path: &Path) -> Result<Template> {
     Ok(t)
 }
 
+/// Quality gate, spec C1 machine-checkable part (docs/出题规划_M4.5.md
+/// §2, M4.5b): whenever the *unfinished* template fails to COMPILE, the
+/// first error code must be one of the declared `error_codes` — this
+/// catches "claims to teach E0382, actually fails with E0308"
+/// mismatches and structurally broken bodies. Templates whose body
+/// compiles and fails via tests (`todo!()` style) carry no compile
+/// error, so the check is vacuously satisfied there.
+pub fn first_error_matches(t: &Template, report: &crate::verifier::VerifyReport) -> Result<()> {
+    let Some(code) = &report.first_error_code else {
+        return Ok(());
+    };
+    if t.error_codes.is_empty() {
+        bail!(
+            "未完成模板编译报 {code}，但模板未声明 error_codes：编译失败型题目必须声明首错误码"
+        );
+    }
+    if t.error_codes.contains(code) {
+        Ok(())
+    } else {
+        bail!(
+            "未完成模板的首错误码 {code} 不在声明的 error_codes {:?} 中（题目声称的坑与真实报错不一致）",
+            t.error_codes
+        )
+    }
+}
+
 /// Parsed constraints of a template (spec strings → `Constraint`).
-pub fn constraints_of(t: &Template) -> Result<Vec<Constraint>> {
-    let mut out = Vec::new();
+pub fn constraints_of(t: &Template) -> Result<Vec<Constraint>> {    let mut out = Vec::new();
     for spec in &t.constraints {
         let c = Constraint::from_spec(spec)
             .with_context(|| format!("模板 '{}' 的约束 '{}' 无法解析", t.id, spec))?;
@@ -474,6 +512,7 @@ concepts = ["ownership.move"]
 error_codes = ["E0382"]
 difficulty = "easy"
 constraints = ["no-clone", "max-lines=30"]
+confusion = "Python/Java 的赋值是引用语义，初学者以为把 String 传进函数后原变量仍可用"
 
 body = '''
 // 把一个 String 交给 summarize，之后再使用它会触发 E0382。
@@ -683,6 +722,66 @@ misconceptions = ["以为 String 赋值会深拷贝"]
         assert_eq!(Difficulty::Hard.name_cn(), "困难");
         let t: Template = toml::from_str(SAMPLE).unwrap();
         assert_eq!(t.difficulty, Difficulty::Easy);
+        // Schema v2 (M4.5b): confusion is required, anti_patterns default.
+        assert!(t.confusion.contains("引用语义"));
+        assert!(t.anti_patterns.is_empty());
+    }
+
+    fn sample_template() -> Template {
+        toml::from_str(SAMPLE).unwrap()
+    }
+
+    #[test]
+    fn first_error_gate_accepts_declared_codes() {
+        let t = sample_template(); // declares E0382
+        let ok = crate::verifier::VerifyReport {
+            first_error_code: Some("E0382".into()),
+            ..Default::default()
+        };
+        assert!(first_error_matches(&t, &ok).is_ok());
+
+        let mismatch = crate::verifier::VerifyReport {
+            first_error_code: Some("E0308".into()),
+            ..Default::default()
+        };
+        let err = first_error_matches(&t, &mismatch).unwrap_err().to_string();
+        assert!(err.contains("E0308"), "{err}");
+        assert!(err.contains("不一致"), "{err}");
+    }
+
+    #[test]
+    fn first_error_gate_requires_codes_when_compile_fails() {
+        let t = sample_template();
+        // Empty codes + a compile error → must declare them instead.
+        let mut no_codes = t.clone();
+        no_codes.error_codes = vec![];
+        let report = crate::verifier::VerifyReport {
+            first_error_code: Some("E0382".into()),
+            ..Default::default()
+        };
+        let err = first_error_matches(&no_codes, &report).unwrap_err().to_string();
+        assert!(err.contains("必须声明首错误码"), "{err}");
+
+        // Test-failure-shaped template (todo!() style) → no compile
+        // error, gate vacuously satisfied regardless of codes.
+        let todo_report = crate::verifier::VerifyReport::default();
+        assert!(first_error_matches(&t, &todo_report).is_ok());
+        assert!(first_error_matches(&no_codes, &todo_report).is_ok());
+    }
+
+    #[test]
+    fn missing_confusion_rejected_at_load() {
+        let stripped = SAMPLE.replace(
+            "confusion = \"Python/Java 的赋值是引用语义，初学者以为把 String 传进函数后原变量仍可用\"\n",
+            "",
+        );
+        let dir = std::env::temp_dir().join(format!("rs_tpl_cf_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("broken.toml");
+        std::fs::write(&p, &stripped).unwrap();
+        let err = format!("{:#}", load_file(&p).unwrap_err());
+        assert!(err.contains("confusion"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Repo-level fixture test: the whole hand-written template library
@@ -756,6 +855,11 @@ misconceptions = ["以为 String 赋值会深拷贝"]
                 "模板 {} 未通过三重校验: {report:?}",
                 t.id
             );
+
+            // Gate C1 (M4.5b): the unfinished template's first compile
+            // error must be one of the declared error codes.
+            first_error_matches(t, &report)
+                .unwrap_or_else(|e| panic!("模板 {} 首错误码不一致: {e:#}", t.id));
         }
         let _ = std::fs::remove_dir_all(&wd);
     }

@@ -5,6 +5,8 @@ concepts = ["errors.custom", "errors.propagation"]
 error_codes = ["E0277"]
 difficulty = "medium"
 constraints = ["no-unwrap"]
+confusion = "Python/Java 的异常是运行时继承体系（raise/throw 即可）；初学者不习惯“错误是一个普通类型”，必须手动实现 Display/Error 才能被打印、被 ? 传播"
+anti_patterns = ["unwrap-escape-hatch", "string-as-error"]
 
 body = '''
 // 自定义错误类型：ConfigError 要能被打印（Display）、能当错误用

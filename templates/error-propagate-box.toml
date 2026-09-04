@@ -5,6 +5,8 @@ concepts = ["errors.propagation", "errors.box-dyn"]
 error_codes = ["E0308", "E0277"]
 difficulty = "medium"
 constraints = ["no-unwrap", "max-lines=32"]
+confusion = "Python 的 try/except 让任意异常沿调用栈自动冒泡；初学者不知道 ? 只做一次 From 转换，&str 与 ParseIntError 想共用一个返回类型时必须统一擦除成 Box<dyn Error>"
+anti_patterns = ["match-boilerplate", "unwrap-ladder"]
 
 body = '''
 // 把 "3,5" 这样的输入解析成两个 i32 并求和，错误统一用

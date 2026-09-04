@@ -5,6 +5,8 @@ concepts = ["lifetimes.annotations"]
 error_codes = ["E0106"]
 difficulty = "easy"
 constraints = ["no-clone", "max-lines=28"]
+confusion = "GC 语言里返回引用隐形且永远安全；初学者不知道返回引用的寿命必须写进签名与某个输入绑定，两个输入都可能被返回时编译器无法独断"
+anti_patterns = ["to-owned-escape", "leak-static"]
 
 body = '''
 // longest 返回两个 &str 中较长的那个。两个输入引用都可能被返回，

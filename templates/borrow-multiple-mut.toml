@@ -5,6 +5,8 @@ concepts = ["borrowing.multiple-mut"]
 error_codes = ["E0499"]
 difficulty = "medium"
 constraints = ["no-clone", "max-lines=35"]
+confusion = "Java/Python 边遍历边修改集合（list.append）是惯用法甚至默认；初学者意识不到 iter_mut() 已借走整个 Vec 的独占借用并存活到循环结束"
+anti_patterns = ["clone-then-append"]
 
 body = '''
 // 给所有低于 pass 的分数加 10 分，返回被加分的人数。

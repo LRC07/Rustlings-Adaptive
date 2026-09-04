@@ -2,9 +2,11 @@
 id = "trait-bounds"
 title = "trait 约束：泛型函数必须声明它需要的能力"
 concepts = ["traits.bounds"]
-error_codes = ["E0277"]
+error_codes = ["E0277", "E0599"]
 difficulty = "easy"
 constraints = ["no-clone", "max-lines=38"]
+confusion = "Python 鸭子类型运行时才检查“有没有这个方法”；初学者不理解 Rust 在编译期就要在签名上声明能力（T: Summary），以为泛型天然能调用任意方法"
+anti_patterns = ["hardcode-per-type", "downcast-dynamic"]
 
 body = '''
 // summaries 想对"任何能自我描述的类型"工作 —— 但泛型参数 T 没有声明

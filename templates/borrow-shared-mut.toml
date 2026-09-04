@@ -5,6 +5,8 @@ concepts = ["borrowing.shared-mut"]
 error_codes = ["E0502"]
 difficulty = "medium"
 constraints = ["no-clone", "max-lines=35"]
+confusion = "初学者把“读”当成瞬时完成、不持有任何东西（C++/Python 直觉）；Rust 的共享借用存活到最后一次使用，与“作用域结束才释放”的旧模型都对不上"
+anti_patterns = ["clone-log-before-mutate"]
 
 body = '''
 struct Ledger {

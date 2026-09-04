@@ -5,6 +5,8 @@ concepts = ["generics.inference", "generics.functions"]
 error_codes = ["E0308", "E0277"]
 difficulty = "medium"
 constraints = ["iterator-only", "no-clone", "max-lines=26"]
+confusion = "Python 的 sum() 对任何数值序列直接工作（运行时鸭子类型）；初学者不知道泛型函数必须显式声明能力（T: Copy + Sum），以为泛型天然能参与运算"
+anti_patterns = ["hardcode-i32", "manual-loop"]
 
 body = '''
 // total 想对 &[T] 求和。直接在 for 循环里写 sum = sum + *x 会撞上

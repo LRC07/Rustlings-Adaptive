@@ -5,6 +5,8 @@ concepts = ["lifetimes.struct-holders"]
 error_codes = ["E0106", "E0597"]
 difficulty = "medium"
 constraints = ["no-clone", "max-lines=34"]
+confusion = "Java/Python 对象字段存引用天经地义、GC 保活；初学者不知道结构体持有 &str 要声明 'a，且实例不能活得比被借的数据更久"
+anti_patterns = ["clone-into-owned-fields"]
 
 body = '''
 // Excerpt（摘录）保存一段借来的文本与出处 —— 结构体持有引用时，

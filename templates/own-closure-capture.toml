@@ -5,6 +5,8 @@ concepts = ["ownership.move"]
 error_codes = ["E0373"]
 difficulty = "medium"
 constraints = ["no-clone"]
+confusion = "JS/Python 的闭包捕获由 GC 保活、随外层环境存活；初学者不知道 Rust 闭包默认只借用捕获变量，被返回的闭包会带着对局部变量的借用悬垂（E0373）"
+anti_patterns = ["clone-into-closure"]
 
 body = '''
 // 闭包默认只"借用"捕获的变量；但被返回的闭包可能活得比函数更久，

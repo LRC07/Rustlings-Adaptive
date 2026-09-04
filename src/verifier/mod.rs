@@ -279,6 +279,12 @@ pub struct VerifyReport {
     pub ref_solution_passes: bool,
     /// Template must NOT pass (compile error or test failure).
     pub template_fails: bool,
+    /// First error-level code the *unfinished* template produced
+    /// (M4.5b quality gate C1: must be one of the declared
+    /// `error_codes` whenever the template fails to compile). None
+    /// when the template compiles but its tests fail (the
+    /// `todo!()`-style failure shape).
+    pub first_error_code: Option<String>,
     pub template: Option<CompileRun>,
     pub reference: Option<CompileRun>,
 }
@@ -334,10 +340,16 @@ pub fn run_test_flow(source: &str, workdir: &Path, name: &str) -> Result<Compile
 pub fn verify_exercise(template_code: &str, reference_code: &str, workdir: &Path) -> Result<VerifyReport> {
     let t = run_test_flow(template_code, workdir, "template")?;
     let r = run_test_flow(reference_code, workdir, "reference")?;
+    let first_error_code = t
+        .diagnostics
+        .iter()
+        .find(|d| d.is_error())
+        .and_then(|d| d.code.clone());
     let report = VerifyReport {
         compiles: r.compiled,
         ref_solution_passes: r.compiled && r.test.as_ref().is_some_and(|t| t.ok),
         template_fails: !(t.compiled && t.test.as_ref().is_some_and(|t| t.ok)),
+        first_error_code,
         template: Some(t),
         reference: Some(r),
     };
@@ -433,6 +445,15 @@ mod tests {
         let t = run_test_flow(&traits1, &wd, "traits1").unwrap();
         assert!(!t.compiled, "unsolved traits1 should not compile");
         assert!(t.diagnostics.iter().any(|d| d.is_error()));
+        // M4.5b C1: the first error-level code is extractable (the
+        // fixtures are development samples, not templates — the exact
+        // code is whatever the unfinished body happens to hit).
+        let first = t
+            .diagnostics
+            .iter()
+            .find(|d| d.is_error())
+            .and_then(|d| d.code.clone());
+        assert!(matches!(first, Some(ref c) if c.starts_with('E')), "got {first:?}");
 
         let g = run_test_flow(&generics1, &wd, "generics1").unwrap();
         assert!(g.compiled);

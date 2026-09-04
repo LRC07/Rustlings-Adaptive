@@ -2,9 +2,11 @@
 id = "generic-struct-swap"
 title = "泛型结构体：不复制数据完成交换"
 concepts = ["generics.structs"]
-error_codes = ["E0308", "E0507"]
+error_codes = ["E0599", "E0507", "E0308"]
 difficulty = "easy"
 constraints = ["no-clone", "max-lines=30"]
+confusion = "Python/JS 的 self.a, self.b = self.b, self.a 元组交换随手就来；初学者意识不到 &self 拿不到所有权，返回副本要么 T: Clone、要么改 &mut self 原地交换"
+anti_patterns = ["derive-clone-just-for-this", "clone-pair-copy"]
 
 body = '''
 // Pair<T> 持有两个同类型的值。swapped 想返回"交换后的副本"：

@@ -235,6 +235,13 @@ pub fn generate(
         };
         let _ = fs::remove_dir_all(&workdir);
 
+        // Quality gate C1 (M4.5b): the unfinished template's first
+        // compile error must be one of the declared error codes.
+        if let Err(e) = template::first_error_matches(&t, &report) {
+            last_fail = e.to_string();
+            continue;
+        }
+
         if report.all_pass() {
             let name = write_exercise(paths, &t, &rendered)?;
             return Ok(Outcome {
@@ -602,6 +609,7 @@ concepts = ["test.concept"]
 error_codes = ["E0308"]
 difficulty = "easy"
 constraints = ["no-clone"]
+confusion = "Python/JS 的 + 对数字字符串自动转换，初学者以为 i32 加法不挑类型"
 
 body = '''
 // 两个 i32 相加的小练习。

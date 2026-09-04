@@ -494,7 +494,7 @@ mod tests {
     fn template(id: &str) -> Template {
         // Difficulty defaults to Medium; serde parse a tiny TOML.
         toml::from_str(&format!(
-            "id = \"{id}\"\ntitle = \"T\"\nconcepts = [\"c.one\"]\nerror_codes = [\"E0308\"]\ndifficulty = \"easy\"\n\nbody = '''\n// a\n'''\n\ntests = '''\n#[cfg(test)]\nmod t {{\n}}\n'''\n\nreference = '''\nfn x() {{}}\n'''\n"
+            "id = \"{id}\"\ntitle = \"T\"\nconcepts = [\"c.one\"]\nerror_codes = [\"E0308\"]\ndifficulty = \"easy\"\nconfusion = \"初学者以为 x\"\n\nbody = '''\n// a\n'''\n\ntests = '''\n#[cfg(test)]\nmod t {{\n}}\n'''\n\nreference = '''\nfn x() {{}}\n'''\n"
         ))
         .unwrap()
     }

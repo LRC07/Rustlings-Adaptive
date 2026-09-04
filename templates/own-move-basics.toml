@@ -2,9 +2,11 @@
 id = "own-move-basics"
 title = "所有权移动：函数拿走所有权后原值不可再用"
 concepts = ["ownership.move"]
-error_codes = ["E0382"]
+error_codes = ["E0382", "E0308"]
 difficulty = "easy"
 constraints = ["no-clone", "max-lines=30"]
+confusion = "Python/Java/Go 传参是对象引用语义，从不“交出”原变量；初学者不会预期 String 按值传参即被移动，以为 shout(title) 之后 title 还能用"
+anti_patterns = ["clone-everywhere"]
 
 body = '''
 // `shout` 和 `measure` 都按值接收 String —— 一旦调用，`title` 就
