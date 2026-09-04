@@ -269,12 +269,7 @@ fn render_board(board: &Board, mode: &Mode) -> Vec<usize> {
     }
     println!("{}", render::cyan("── 做题模式 ──"));
     let (done, total) = progress(board);
-    println!(
-        "  进度 {}  ｜ 已做 {}/{}",
-        render::progress_bar(done, total, 20),
-        done,
-        total
-    );
+    println!("  进度 {}", render::progress_bar(done, total, 20));
     println!();
     match mode {
         Mode::Home => {
@@ -496,7 +491,7 @@ fn repaint_exercise(ex: &Exercise, meta: Option<&crate::exercise::index::Exercis
     if render::ansi_enabled() {
         render::clear_viewport();
     }
-    println!("--- {} ---", render::cyan(&format!("《{}》", ex.title)));
+    println!("{}", render::cyan(&format!("── 《{}》 ──", ex.title)));
     if let Some(m) = meta {
         let mut parts: Vec<String> = Vec::new();
         if !m.concepts.is_empty() {

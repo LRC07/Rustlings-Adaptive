@@ -207,6 +207,16 @@ pub(crate) fn progress_bar(done: usize, total: usize, bar_width: usize) -> Strin
     format!("[{bar}] {done}/{total} ({pct}%)")
 }
 
+/// Left-align `s` in `width` display cells (CJK-aware), so table
+/// columns with mixed Chinese/ASCII line up.
+pub(crate) fn pad_display(s: &str, width: usize) -> String {
+    let w = s.width();
+    if w >= width {
+        return s.to_string();
+    }
+    format!("{s}{}", " ".repeat(width - w))
+}
+
 /// Nearest known command for a mistyped one (Damerau-ish Levenshtein
 /// without transposition is enough here), only when close enough.
 pub(crate) fn suggest_command(raw: &str, known: &[&str]) -> Option<String> {
@@ -334,6 +344,14 @@ mod tests {
         assert_eq!(progress_bar(6, 12, 6), "[███░░░] 6/12 (50%)");
         assert_eq!(progress_bar(12, 12, 6), "[██████] 12/12 (100%)");
         assert_eq!(progress_bar(3, 0, 4), "[████] 3/1 (300%)"); // degenerate total, no panic
+    }
+
+    #[test]
+    fn pad_display_is_cjk_aware() {
+        assert_eq!(pad_display("ab", 5), "ab   ");
+        assert_eq!(pad_display("中文", 6), "中文  ");
+        assert_eq!(pad_display("toolong", 4), "toolong");
+        assert_eq!(pad_display("", 3), "   ");
     }
 
     #[test]

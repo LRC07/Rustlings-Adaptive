@@ -17,6 +17,8 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use unicode_width::UnicodeWidthStr;
+
 use crate::agent::{self, session::Session, AgentEnv};
 use crate::config::ModelConfig;
 use crate::llm::LlmClient;
@@ -160,9 +162,9 @@ pub(crate) fn run() {
             }
             Cmd::Usage => print_usage(&cfg, &tracker),
             Cmd::Model(arg) => {
+                // Result page (M4.2 convention): prints inline and must
+                // NOT be wiped by a viewport repaint right after.
                 handle_model(arg, &mut cfg, &mut client);
-                practice_ctx.editor = cfg.editor.clone();
-                repaint_chat(&session, &cfg, &tracker);
             }
             Cmd::Config => {
                 cmd_config(&mut cfg, &mut client);
@@ -226,12 +228,16 @@ fn handle_model(arg: Option<&str>, cfg: &mut ModelConfig, client: &mut Option<Ll
     let Some(name) = arg else {
         println!();
         println!("{}", render::cyan("── 模型档案 ──"));
+        // Column widths from actual content (display cells, CJK-aware)
+        // so mixed Chinese/ASCII rows line up.
+        let name_w = cfg.models.iter().map(|m| m.name.width()).max().unwrap_or(4).max(4);
+        let model_w = cfg.models.iter().map(|m| m.model.width()).max().unwrap_or(5).max(5);
         for m in &cfg.models {
             let mark = if cfg.is_active_profile(m) { render::green("*") } else { " ".to_string() };
             println!(
-                "  {mark} {:<10} {} ｜ {}",
-                m.name,
-                m.model,
+                "  {mark} {}  {}  {}",
+                render::pad_display(&m.name, name_w),
+                render::pad_display(&m.model, model_w),
                 host_of(&m.endpoint)
             );
         }
