@@ -13,3 +13,6 @@
 # Course slides (user-provided teaching material, not project artifacts)
 /slides/
 rustlings_official/
+
+# Course OJ practice pages (user-provided material)
+/practice/
