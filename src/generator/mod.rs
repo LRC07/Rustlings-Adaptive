@@ -1100,7 +1100,10 @@ fn choose_template<'a>(
                     // A focused free-text request the picker rejected:
                     // serving the keyword fallback would ignore the
                     // learner's specific technique.
-                    bail!("没有训练「{focus:?}」的模板；转为改编/自由生成");
+                    bail!(
+                        "没有训练「{}」的模板；转为改编/自由生成",
+                        focus.unwrap_or_default()
+                    );
                 }
             }
             let ids = keyword_candidates(templates, graph, text);
