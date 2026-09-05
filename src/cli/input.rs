@@ -22,11 +22,14 @@
 //!   `PASTE_GAP_MS` is a paste stream, not a human — the editor
 //!   switches to paste mode until a short silence (`BURST_SILENCE_MS`).
 //!
-//! Typed multi-line input: Enter (CR) submits, soft newlines come from
-//! Alt+Enter (Meta-Enter, native on every terminal) or Ctrl+J; terminals
-//! speaking the kitty CSI-u / xterm modifyOtherKeys protocols get
-//! Ctrl/Shift+Enter recognized too. A soft newline is a plain '\n' in
-//! the buffer; backspacing across it joins the lines.
+//! Typed multi-line input: Enter (CR) submits; soft newlines come from
+//! Ctrl+J (LF — native on every terminal, the DOCUMENTED way) plus
+//! silent aliases that work where the terminal does not eat them:
+//! Alt+Enter (Meta-Enter; some desktops bind it to fullscreen), and
+//! Ctrl/Shift+Enter on terminals speaking the kitty CSI-u / xterm
+//! modifyOtherKeys protocols. User-facing copy names ONLY Ctrl+J.
+//! A soft newline is a plain '\n' in the buffer; backspacing across it
+//! joins the lines (column math accounts for the prompt width).
 //!
 //! The buffer is therefore multi-line; on submit it is handed over as
 //! a single string. Off-tty (pipes/tests) or off-unix it falls back to
@@ -49,7 +52,7 @@ pub(crate) fn read_line(prompt: &str) -> Line {
     let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     #[cfg(unix)]
     if tty {
-        return read_line_raw();
+        return read_line_raw(prompt);
     }
     read_line_fallback()
 }
@@ -84,7 +87,7 @@ const PASTE_GAP_MS: i32 = 10;
 const BURST_SILENCE_MS: i32 = 40;
 
 #[cfg(unix)]
-fn read_line_raw() -> Line {
+fn read_line_raw(prompt: &str) -> Line {
     let term = match RawGuard::new() {
         Ok(t) => t,
         Err(_) => return read_line_fallback(),
@@ -93,7 +96,13 @@ fn read_line_raw() -> Line {
     // restores the terminal).
     let _guard = term;
 
-    let mut ed = Editor::default();
+    let mut ed = Editor {
+        // Display columns the prompt occupies: absolute repositioning
+        // after joining lines must land PAST the prompt, or the wipe
+        // eats it ("你> " disappearing while backspacing, 9.5 实测).
+        prompt_cols: unicode_width::UnicodeWidthStr::width(prompt),
+        ..Default::default()
+    };
     let mut buf = [0u8; 256];
     // Heuristic paste in progress (terminal without bracketed paste).
     let mut burst = false;
@@ -179,6 +188,9 @@ struct Editor {
     line: String,
     asm: CharAssembler,
     warned_encoding: bool,
+    /// Display width of the active prompt ("你> " = 4). Needed because
+    /// joining a wrapped line repositions absolutely from column 0.
+    prompt_cols: usize,
     /// Paste mode: newlines are content, not submit (bracketed paste
     /// or burst heuristic).
     paste: bool,
@@ -359,11 +371,12 @@ impl Editor {
 
     /// The cursor always sits at the end of the buffer, so the removed
     /// '\n' was followed by an empty last line: move up one row and to
-    /// the end of the (now last) line. Wrapped long lines are handled
-    /// by column math (col = width % term_width).
+    /// the end of the (now last) line. The prompt width is part of the
+    /// first row's content, so the absolute column includes it; wrapped
+    /// long lines are handled by column math (col = width % term_width).
     fn erase_newline(&mut self) {
         let last = self.line.lines().last().unwrap_or("");
-        let w = unicode_width::UnicodeWidthStr::width(last);
+        let w = unicode_width::UnicodeWidthStr::width(last) + self.prompt_cols;
         let tw = crate::cli::render::term_width().max(1);
         let col = w % tw;
         print!("\x1b[1A\r\x1b[{col}C\x1b[0K");
@@ -420,7 +433,11 @@ impl Editor {
             println!();
             println!("  提示：检测到无法解码的输入字节——你的终端编码可能不是 UTF-8。");
             println!("  该字符已按占位符保留；建议将终端编码切到 UTF-8（export LANG=C.UTF-8）。");
-            print!("  当前输入回显> {}", self.line);
+            let prefix = "  当前输入回显> ";
+            print!("{prefix}{}", self.line);
+            // The buffer is now visually re-prefixed: keep absolute
+            // repositioning (line joins) consistent with the new row.
+            self.prompt_cols = unicode_width::UnicodeWidthStr::width(prefix);
             let _ = std::io::stdout().flush();
         }
     }

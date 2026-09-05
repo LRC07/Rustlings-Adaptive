@@ -371,7 +371,7 @@ fn print_banner(
     }
     if first_run {
         println!("{}", render::dim("  试试：直接提问（如「什么是所有权」）、贴一段报错代码、"));
-        println!("{}", render::dim("  或说「来一道 E0382 的题」。Enter 发送；Alt+Enter（或 Ctrl+J）换行；"));
+        println!("{}", render::dim("  或说「来一道 E0382 的题」。Enter 发送；Ctrl+J 换行；"));
         println!("{}", render::dim("  多行代码直接粘贴，自动并为一条消息。"));
     }
 }
@@ -431,12 +431,11 @@ fn parse_command(line: &str) -> Cmd<'_> {
 
 fn print_help() {
     println!();
-    println!("  对话：直接输入问题 / 贴报错或代码。Enter 发送；Alt+Enter（或");
-    println!("        Ctrl+J）换行；多行粘贴自动并为一条消息，也可以用两行 ```");
-    println!("        围住（围栏结束后可继续补充问题，回车发送）。教练会锚定错误");
-    println!("        码与概念，需要时本地编译你的代码取证（check_code），或生成");
-    println!("        一道可开练的小练习（generate_exercise）。任务执行中可随时");
-    println!("        Ctrl-C 打断。");
+    println!("  对话：直接输入问题 / 贴报错或代码。Enter 发送；Ctrl+J 换行；");
+    println!("        多行粘贴自动并为一条消息，也可以用两行 ``` 围住（围栏结束");
+    println!("        后可继续补充问题，回车发送）。教练会锚定错误码与概念，需要");
+    println!("        时本地编译你的代码取证（check_code），或生成一道可开练的");
+    println!("        小练习（generate_exercise）。任务执行中可随时 Ctrl-C 打断。");
     println!("  命令：");
     println!("    /new        开启新会话（旧会话落盘可回看）");
     println!("    /clear      清屏（/clear all 连同回滚缓冲区一起清）");
