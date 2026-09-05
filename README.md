@@ -37,7 +37,7 @@
 可在 WSL 中完整使用（见文末"已知限制"）。
 
 ```bash
-git clone <仓库地址> rustlings-adaptive
+git clone https://git.tsinghua.edu.cn/rust-course/2026/agent/agent-lrc25.git rustlings-adaptive
 cd rustlings-adaptive
 cargo run --release     # 首次编译需几分钟；日常用 cargo run 即可
 ```
@@ -45,7 +45,7 @@ cargo run --release     # 首次编译需几分钟；日常用 cargo run 即可
 或者装成全局命令：
 
 ```bash
-cargo install --git <仓库地址>
+cargo install --git https://git.tsinghua.edu.cn/rust-course/2026/agent/agent-lrc25.git
 rustlings-adaptive      # 注意：仍需在项目根目录（含 exercises/ 与 templates/）执行
 ```
 
