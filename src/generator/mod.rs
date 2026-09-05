@@ -1411,6 +1411,14 @@ fn write_exercise(
 const WIRING_HEADER: &str = "\
 //! Auto-generated exercise wiring — maintained by the generator (M3).
 //! Gitignored: references user-local generated exercises only.
+//!
+//! The mods here are intentionally NOT gated by `#[cfg(rust_analyzer)]`:
+//! cargo (and thus rust-analyzer's flycheck on save) must see the
+//! learner's unsolved exercises so borrow-checker errors (E0499/E0382/
+//! E0502) — which rust-analyzer cannot produce on its own — show up
+//! inline. The `exercises` member is not in `default-members`, so plain
+//! `cargo build` / `cargo test` / `cargo run` on the repo root are
+//! unaffected; only `cargo check`-ing this crate surfaces the errors.
 ";
 
 /// Rebuild the IDE-only wiring file from the `category` directory
@@ -1440,12 +1448,26 @@ pub fn wire_lib_rs(wiring_rs: &Path, module: &str, category: &str) -> Result<()>
     let mut content = String::from(WIRING_HEADER);
     content.push('\n');
     for name in &names {
+        // No `#[cfg(rust_analyzer)]` gate here (see WIRING_HEADER): the
+        // whole point is for cargo check to see the unsolved exercises.
         content.push_str(&format!(
-            "\n#[cfg(rust_analyzer)]\n#[path = \"{category}/{name}.rs\"]\nmod {name};\n"
+            "\n#[path = \"{category}/{name}.rs\"]\nmod {name};\n"
         ));
     }
     fs::write(wiring_rs, content)
         .with_context(|| format!("写入 {} 失败", wiring_rs.display()))
+}
+
+/// Ensure the wiring file exists (fresh clones have none — it's
+/// gitignored). Called at REPL startup so an ungated
+/// `mod lib_generated;` in exercises/lib.rs never resolves to a
+/// missing file. Idempotent.
+pub fn ensure_wiring_file(wiring_rs: &Path) {
+    if !wiring_rs.exists()
+        && let Err(e) = fs::write(wiring_rs, format!("{WIRING_HEADER}\n"))
+    {
+        eprintln!("  （接线文件创建失败：{e}）");
+    }
 }
 
 fn failure_reason(report: &verifier::VerifyReport) -> String {
@@ -2009,6 +2031,10 @@ fn add(a: i32, b: i32) -> i32 {
         assert!(content.contains("mod live;"), "{content}");
         assert!(!content.contains("mod dead;"), "stale entry pruned: {content}");
         assert!(content.contains("Auto-generated exercise wiring"), "header kept: {content}");
+        // Generated exercises are UNGATED so cargo check / flycheck can
+        // surface borrow-checker errors to the editor (9.5).
+        assert!(!content.contains("
+#[cfg(rust_analyzer)]"), "ungated mods: {content}");
 
         // Idempotent: rewriting changes nothing (module list is sorted).
         wire_lib_rs(&paths.wiring_rs, "live", OUT_CATEGORY).unwrap();

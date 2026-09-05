@@ -2,12 +2,12 @@
 //! rust-analyzer gives full type inference / completion / go-to-def while
 //! editing them in VS Code.
 //!
-//! Every `mod` below is gated with `#[cfg(rust_analyzer)]`. rust-analyzer
-//! sets that cfg during analysis, so it sees (and analyzes) all exercises.
-//! `cargo` does NOT set it, so to cargo this crate is an empty library —
-//! meaning the intentionally-broken exercise templates never break
-//! `cargo build` / `cargo test` / `cargo run`. The CLI itself compiles each
-//! exercise directly with `rustc --test`, independent of this crate.
+//! Seed fixtures below are gated with `#[cfg(rust_analyzer)]`:
+//! rust-analyzer sets that cfg during analysis (they get full IDE
+//! support), cargo does not (they never break `cargo build` — and as
+//! permanently-unsolved samples they must not: see `已知限制`).
+//! Generated exercises are wired UNGATED from `lib_generated.rs` so
+//! cargo check surfaces borrow-checker errors to the editor (9.5).
 //!
 //! M4.5a: the eight seed exercises are development fixtures and live
 //! under `exercises/fixtures/`; the CLI's default discovery excludes
@@ -47,10 +47,15 @@ mod traits3;
 #[path = "fixtures/traits/traits4.rs"]
 mod traits4;
 
-// Generated exercises are wired from `lib_generated.rs` (gitignored —
-// maintained by the generator at runtime, user-local only). Before the
-// first `g` generation this file does not exist yet, which shows up as
-// a cosmetic "unresolved module" hint in rust-analyzer only.
-#[cfg(rust_analyzer)]
+// Generated exercises (the learner content) are wired from
+// `lib_generated.rs` — gitignored, maintained by the generator at
+// runtime (the CLI ensures the file exists at startup). Deliberately
+// UNGATED: cargo check (and rust-analyzer's flycheck-on-save) must see
+// unsolved exercises so borrow-checker errors show up inline, which
+// rust-analyzer's own analysis cannot produce. The `exercises` member
+// is not in `default-members`, so plain `cargo build` / `cargo test` /
+// `cargo run` on the repo root are unaffected. An unsolved exercise
+// therefore makes `cargo check -p rustlings-adaptive-exercises` red —
+// that is the intended "rustlings experience".
 #[path = "lib_generated.rs"]
 mod lib_generated;

@@ -87,6 +87,13 @@ pub(crate) fn run() {
     // untracked exercises, recovering template provenance) and consume
     // the legacy `.progress` file once.
     {
+        // Generated exercises are wired UNGATED into exercises/lib.rs
+        // (9.5: cargo check / flycheck must see them to surface
+        // borrowck errors) — on a fresh clone the gitignored wiring
+        // file doesn't exist yet, which would be an E0583.
+        crate::generator::ensure_wiring_file(
+            &root.join("exercises").join("lib_generated.rs"),
+        );
         let mut index = crate::exercise::index::ExerciseIndex::load(&practice_ctx.root);
         let discovered = crate::exercise::discover_all(&practice_ctx.root);
         let templates = crate::template::load_dir(&root.join("templates")).unwrap_or_default();
