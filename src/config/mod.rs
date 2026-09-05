@@ -453,9 +453,11 @@ usd = 2.5
             std::env::set_var("RUSTLINGS_TESTX_API_KEY", "env-key-123");
             std::env::set_var("RUSTLINGS_TESTX_MODEL", "env-model");
         }
-        let mut cfg = ModelConfig::default();
-        cfg.api_key = "file-key".to_string();
-        cfg.key_source = KeySource::ConfigFile;
+        let mut cfg = ModelConfig {
+            api_key: "file-key".to_string(),
+            key_source: KeySource::ConfigFile,
+            ..Default::default()
+        };
         cfg.apply_env_overrides("RUSTLINGS_TESTX_");
         unsafe {
             std::env::remove_var("RUSTLINGS_TESTX_API_KEY");

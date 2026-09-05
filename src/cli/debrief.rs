@@ -238,7 +238,10 @@ pub(crate) fn after_pass(
 
     let caller = make_caller(deps);
     let input2 = input.clone();
-    let outcome = run_with_spinner("评审：准备…", |progress| {
+    // 9.5 实测：the gate's LLM call can run for minutes on slow
+    // endpoints — set the expectation up front.
+    println!("  （评审门需要模型评审解答，端点慢时可能需要 1–2 分钟）");
+    let outcome = run_with_spinner("评审：模型评审解答…", |progress| {
         review::run_gate(caller, input2, progress)
     })?;
     render_gate(&outcome);
@@ -416,7 +419,7 @@ fn step1_explanation_check(
 
     let input2 = input.clone();
     let lf = last_fail.map(str::to_string);
-    let quiz = run_with_spinner("复盘：生成理解校核题…", move |progress| {
+    let quiz = run_with_spinner("复盘：生成理解校核题（LLM，可能较慢）…", move |progress| {
         progress("生成校核题…");
         review::llm_quiz(&mut *caller, &input2, lf.as_deref())
     });
@@ -606,7 +609,7 @@ fn step3_comparison(deps: &DebriefDeps, input: &review::ReviewInput) {
     let llm_cmp: Option<review::LlmComparison> = make_caller(deps).and_then(|mut caller| {
         let input2 = input.clone();
         let m = machine.clone();
-        run_with_spinner("对比：LLM 四维评审…", move |progress| {
+        run_with_spinner("对比：LLM 四维评审（可能较慢）…", move |progress| {
             progress("四维评审…");
             review::llm_comparison(&mut *caller, &input2, &m)
         })

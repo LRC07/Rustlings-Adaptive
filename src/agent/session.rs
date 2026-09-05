@@ -89,10 +89,31 @@ impl Session {
 
     /// Persist to the session file (called after every turn; save
     /// failures degrade to a printed warning but never crash the
-    /// REPL). Also derives the list title on first save.
+    /// REPL). Also derives the list title on first save. Empty
+    /// sessions are never written: a start-and-quit cycle must not
+    /// litter the list with 0-message files (9.5 实测反馈).
     pub fn save(&mut self) -> Result<()> {
+        if self.messages.is_empty() {
+            return Ok(());
+        }
         if self.title.is_none() {
-            self.title = self.messages.iter().find(|m| m.role == "user").and_then(|m| m.content.as_ref())
+            // The title skips stray keystrokes that ended up as chat
+            // messages ("exit", "q", "export" …) and summarizes the
+            // first real question instead.
+            let stray = |c: &str| {
+                let t = c.trim();
+                t.starts_with('/')
+                    || (t.len() <= 6
+                        && !t.is_empty()
+                        && t.chars().all(|ch| ch.is_ascii_alphanumeric()))
+            };
+            self.title = self
+                .messages
+                .iter()
+                .filter(|m| m.role == "user")
+                .find(|m| m.content.as_deref().map(|c| !stray(c)).unwrap_or(false))
+                .or_else(|| self.messages.iter().find(|m| m.role == "user"))
+                .and_then(|m| m.content.as_ref())
                 .map(|c| {
                     let t: String = c.chars().take(30).collect();
                     let count = c.chars().count();
@@ -269,6 +290,47 @@ mod tests {
         s.save().unwrap();
         let t = s.title.as_deref().unwrap();
         assert!(t.chars().count() == 31 && t.ends_with('…'), "{t}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn title_skips_stray_command_messages() {
+        let dir = std::env::temp_dir().join(format!("rs_sessions_stray_{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let mut s = Session {
+            id: "session_stray".into(),
+            started_at: Utc::now(),
+            model: "m".into(),
+            title: None,
+            exercises: Vec::new(),
+            messages: vec![
+                ChatMessage::user("exit"),
+                ChatMessage::assistant("…"),
+                ChatMessage::user("为什么报 E0382？"),
+            ],
+            path: dir.join("session_stray.json"),
+        };
+        s.save().unwrap();
+        assert_eq!(s.title.as_deref(), Some("为什么报 E0382？"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_skips_empty_sessions() {
+        let dir = std::env::temp_dir().join(format!("rs_sessions_empty_{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("session_empty.json");
+        let mut s = Session {
+            id: "session_empty".into(),
+            started_at: Utc::now(),
+            model: "m".into(),
+            title: None,
+            exercises: Vec::new(),
+            messages: vec![],
+            path: path.clone(),
+        };
+        s.save().unwrap();
+        assert!(!path.exists(), "empty session must not reach disk");
         let _ = fs::remove_dir_all(&dir);
     }
 

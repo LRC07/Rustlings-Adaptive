@@ -97,8 +97,14 @@ pub(crate) fn enter(ctx: &PracticeCtx, opts: EnterOpts, debrief: Option<&Debrief
             return None;
         }
         match line.as_str() {
-            "h" | "home" => mode = Mode::Home,
-            "a" | "all" => mode = Mode::All,
+            "h" | "home" => {
+                mode = Mode::Home;
+                println!("  （已切回主列表）");
+            }
+            "a" | "all" => {
+                mode = Mode::All;
+                println!("  （已切换到全库视图）");
+            }
             "t" => {
                 list_topics(&board);
                 continue;
@@ -134,6 +140,12 @@ pub(crate) fn enter(ctx: &PracticeCtx, opts: EnterOpts, debrief: Option<&Debrief
                             return Some(msg);
                         }
                     }
+                    // Out-of-range numbers get their own hint — "unknown
+                    // command: 3" told the learner nothing (9.5 实测).
+                    Ok(_) => println!(
+                        "  序号超出范围：本视图共 {} 题（数字选题 / n 下一题 / t 主题 / a 全库 / b 返回）",
+                        visible.len()
+                    ),
                     _ => println!("未知命令: {other}（数字选题 / n 下一题 / t 主题 / a 全库 / b 返回）"),
                 }
             }
@@ -463,6 +475,7 @@ fn run_exercise(
     let mut cur = idx;
     let mut hint_idx = 0usize; // one more hint revealed per [h]
     let mut last_fail: Option<String> = None; // session-local failure snapshot (debrief Step 1)
+    let mut last_run_code: Option<String> = None; // content of the previous run
     loop {
         let item = &items[cur];
         let key = item.key.clone();
@@ -473,17 +486,33 @@ fn run_exercise(
                 .get(&key)
                 .map(|m| matches!(m.status, crate::exercise::index::Status::Passed))
                 .unwrap_or(false);
+            // Attempt semantics (9.5 实测反馈): only a run of CHANGED
+            // code counts as an attempt — menu round-trips, hint (`h`)
+            // and feedback (`f`) pages re-entering the loop must not
+            // inflate attempt/failure counts. Unchanged code still
+            // updates pass state, but as a verification run.
+            let code_now =
+                std::fs::read_to_string(&item.ex.path).unwrap_or_else(|_| String::new());
+            let counts_as_attempt = last_run_code.as_deref() != Some(code_now.as_str());
             let res = exercise::compile_and_run(&item.ex);
-            index.record_attempt(&key, res.passed, res.first_error.as_deref());
-            // M6.2: feed the learner profile (both tracks) + persist.
-            let tap_concepts: Vec<String> =
-                index.get(&key).map(|m| m.concepts.clone()).unwrap_or_default();
-            crate::profile::ProfileStore::load_or_create().record_attempt(
-                &tap_concepts,
-                res.first_error.as_deref(),
-                res.passed,
-            );
-            if !res.passed && let Some(code) = &res.first_error {
+            if counts_as_attempt {
+                index.record_attempt(&key, res.passed, res.first_error.as_deref());
+                // M6.2: feed the learner profile (both tracks) + persist.
+                let tap_concepts: Vec<String> =
+                    index.get(&key).map(|m| m.concepts.clone()).unwrap_or_default();
+                crate::profile::ProfileStore::load_or_create().record_attempt(
+                    &tap_concepts,
+                    res.first_error.as_deref(),
+                    res.passed,
+                );
+            } else {
+                index.record_run(&key, res.passed, res.first_error.as_deref());
+            }
+            last_run_code = Some(code_now);
+            if !res.passed
+                && counts_as_attempt
+                && let Some(code) = &res.first_error
+            {
                 last_fail = Some(code.clone());
                 // M6.4: after two accumulated failures on this concept,
                 // proactively point at the debrief / variant path.
@@ -503,7 +532,10 @@ fn run_exercise(
             let meta = index.get(&key).cloned();
             if res.passed {
                 println!();
-                println!("  练习 '{}' 完成 - 已标记。", item.ex.name);
+                println!(
+                    "  练习 '{}' 完成 - 已标记（通过即自动完成，无需手动删除 I AM NOT DONE 标记）。",
+                    item.ex.name
+                );
                 // M5.2: review gate on the first pass (seed fixtures and
                 // gateless entries keep the plain flow).
                 if !was_passed_before
@@ -691,14 +723,10 @@ fn verify_all(items: &[Item], index: &mut ExerciseIndex, include_fixtures: bool)
         println!();
         println!("[{}/{}] {} - {}", k + 1, total, it.ex.name, it.ex.title);
         let res = exercise::compile_and_run(&it.ex);
-        index.record_attempt(&it.key, res.passed, res.first_error.as_deref());
-        let tap_concepts: Vec<String> =
-            index.get(&it.key).map(|m| m.concepts.clone()).unwrap_or_default();
-        crate::profile::ProfileStore::load_or_create().record_attempt(
-            &tap_concepts,
-            res.first_error.as_deref(),
-            res.passed,
-        );
+        // Batch verify = "check the current state", not a solve
+        // attempt: update pass state, never the attempt/failure
+        // counts or the learner profile.
+        index.record_run(&it.key, res.passed, res.first_error.as_deref());
         if res.passed {
             pass += 1;
             println!("  {}", render::green("✓ 通过"));

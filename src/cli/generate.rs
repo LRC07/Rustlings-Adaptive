@@ -13,7 +13,7 @@ use crate::generator;
 use crate::llm::LlmClient;
 use crate::usage::UsageTracker;
 
-use super::{practice, read_line_or_leave};
+use super::{practice, read_line_or_leave, render};
 
 /// `g` / `/generate` — generate an exercise from a topic. `arg` may
 /// carry the topic directly (`/g E0382`); otherwise it is prompted.
@@ -240,8 +240,10 @@ pub(crate) fn cmd_generate(
         }
         Err(e) => {
             println!();
-            println!("  生成失败：{e:#}");
-            println!("  可换一个主题重试，或检查 templates/ 与 taxonomy/ 的内容。");
+            println!("  生成失败：已自动重试多次，生成的内容仍未通过本地质量校验");
+            println!("  （题目必须能编译、能判分才给出，宁缺毋滥）。");
+            println!("  可换一个主题重试，或稍后再试。");
+            println!("{}", render::dim(&format!("  技术详情：{e:#}")));
             println!("  提示：自由生成依赖 LLM 长输出；端点慢时可在 /config 调高");
             println!("  llm_timeout_secs（或换更快的模型）。");
             None

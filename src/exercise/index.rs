@@ -38,6 +38,25 @@ pub fn key_for(exercises_dir: &Path, ex_path: &Path) -> Option<String> {
     Some(rel.to_string_lossy().replace('\\', "/"))
 }
 
+/// Shared status transition of a recorded run/attempt: a pass marks
+/// the exercise Passed (sticky) and clears last_error; a failure only
+/// counts up on non-Passed entries.
+fn apply_result(meta: &mut ExerciseMeta, passed: bool, first_error: Option<&str>) {
+    if passed {
+        meta.status = Status::Passed;
+        meta.last_error = None;
+    } else if meta.status != Status::Passed {
+        let times = match meta.status {
+            Status::Failed { times } => times + 1,
+            _ => 1,
+        };
+        meta.status = Status::Failed { times };
+        if let Some(code) = first_error {
+            meta.last_error = Some(code.to_string());
+        }
+    }
+}
+
 /// Where a tracked exercise came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
@@ -248,25 +267,24 @@ impl ExerciseIndex {
     pub fn record_attempt(&mut self, key: &str, passed: bool, first_error: Option<&str>) {
         let Some(meta) = self.entries.get_mut(key) else { return };
         meta.attempts += 1;
-        if passed {
-            meta.status = Status::Passed;
-            meta.last_error = None;
-        } else if meta.status != Status::Passed {
-            let times = match meta.status {
-                Status::Failed { times } => times + 1,
-                _ => 1,
-            };
-            meta.status = Status::Failed { times };
-            if let Some(code) = first_error {
-                meta.last_error = Some(code.to_string());
-            }
-        }
+        apply_result(meta, passed, first_error);
+        self.save();
+    }
+
+    /// Record a verification run of UNCHANGED code: status and
+    /// last_error transition exactly like an attempt, but `attempts`
+    /// is not bumped — re-running the same code (menu round-trips,
+    /// hint/feedback pages, re-checks) must not inflate the
+    /// attempt/failure counts that feed the profile and the debrief
+    /// follow-up decision (9.5 实测反馈：一次通过的题显示"失败 7 次").
+    pub fn record_run(&mut self, key: &str, passed: bool, first_error: Option<&str>) {
+        let Some(meta) = self.entries.get_mut(key) else { return };
+        apply_result(meta, passed, first_error);
         self.save();
     }
 
     /// Set the quality feedback for `key`; returns false when unknown.
-    pub fn set_feedback(&mut self, key: &str, f: Feedback) -> bool {
-        match self.entries.get_mut(key) {
+    pub fn set_feedback(&mut self, key: &str, f: Feedback) -> bool {        match self.entries.get_mut(key) {
             Some(meta) => {
                 meta.feedback = Some(f);
                 self.save();
@@ -621,6 +639,44 @@ mod tests {
         // Unknown keys are silently ignored.
         idx.record_attempt("generated/nope.rs", true, None);
         assert!(idx.get("generated/nope.rs").is_none());
+    }
+
+    #[test]
+    fn record_run_updates_state_without_counting_attempts() {
+        let mut idx = ExerciseIndex::load_from(temp_dir("runs").join("index.json"));
+        idx.upsert(ExerciseMeta {
+            path: "generated/r.rs".into(),
+            title: "r".into(),
+            concepts: vec![],
+            error_codes: vec![],
+            difficulty: None,
+            source: Source::Free,
+            session_id: None,
+            trigger: None,
+            created_at: None,
+            attempts: 0,
+            status: Status::Pending,
+            last_error: None,
+            hints: Vec::new(),
+            feedback: None,
+            slots: Default::default(),
+            reference: None,
+            constraints: Vec::new(),
+            review_verdict: None,
+        });
+        // Verification runs of unchanged code: state transitions, but
+        // attempts never move (the "失败 7 次" regression).
+        idx.record_run("generated/r.rs", false, Some("E0382"));
+        assert_eq!(idx.get("generated/r.rs").unwrap().status, Status::Failed { times: 1 });
+        assert_eq!(idx.get("generated/r.rs").unwrap().attempts, 0);
+        idx.record_run("generated/r.rs", false, Some("E0382"));
+        assert_eq!(idx.get("generated/r.rs").unwrap().attempts, 0);
+        idx.record_run("generated/r.rs", true, None);
+        assert_eq!(idx.get("generated/r.rs").unwrap().status, Status::Passed);
+        assert_eq!(idx.get("generated/r.rs").unwrap().attempts, 0);
+        // A real attempt after edits still counts, from any state.
+        idx.record_attempt("generated/r.rs", true, None);
+        assert_eq!(idx.get("generated/r.rs").unwrap().attempts, 1);
     }
 
     #[test]

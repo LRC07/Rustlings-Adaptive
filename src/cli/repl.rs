@@ -82,6 +82,9 @@ pub(crate) fn run() {
     println!();
 
     let mut practice_ctx = practice::PracticeCtx::new(&root.join("exercises"), cfg.editor.clone());
+    // Open code threads: how many turns have surfaced one (footer/
+    // context repetition is capped — see agent_turn).
+    let mut open_loop_seen = 0usize;
 
     // M4.5a: reconcile the exercise index with disk (adds entries for
     // untracked exercises, recovering template provenance) and consume
@@ -120,6 +123,11 @@ pub(crate) fn run() {
         let line = line.trim();
         if line.is_empty() {
             continue;
+        }
+        // Muscle-memory exits from the practice page / other REPLs:
+        // a bare q/quit/exit is never worth a model round-trip.
+        if matches!(line, "q" | "quit" | "exit" | "退出") {
+            break;
         }
         // ```-fence paste mode: lines between two ``` lines become ONE
         // message. Only a SINGLE-line ``` opens the interactive fence
@@ -163,7 +171,7 @@ pub(crate) fn run() {
                     Some(msg) => {
                         repaint_chat(&session, &cfg, &tracker);
                         println!("{} [问教练] 把练习代码带回对话", super::render::bold("你>"));
-                        agent_turn(&mut session, &msg, &cfg, &tracker, &client, &practice_ctx);
+                        agent_turn(&mut session, &msg, &cfg, &tracker, &client, &practice_ctx, &mut open_loop_seen);
                     }
                     None => repaint_chat(&session, &cfg, &tracker),
                 }
@@ -207,7 +215,7 @@ pub(crate) fn run() {
                 // of the last entries, then the echoed input.
                 repaint_chat(&session, &cfg, &tracker);
                 println!("{} {}", super::render::bold("你>"), line);
-                agent_turn(&mut session, &line, &cfg, &tracker, &client, &practice_ctx);
+                agent_turn(&mut session, &line, &cfg, &tracker, &client, &practice_ctx, &mut open_loop_seen);
             }
         }
     }
@@ -215,6 +223,7 @@ pub(crate) fn run() {
     if let Err(e) = session.save() {
         eprintln!("会话保存失败：{e:#}");
     }
+    println!("  再见——会话已保存，随时回来继续（/sessions 可回看历史）。");
 }
 
 // ---------------------------------------------------------------------------
@@ -362,7 +371,8 @@ fn print_banner(
     }
     if first_run {
         println!("{}", render::dim("  试试：直接提问（如「什么是所有权」）、贴一段报错代码、"));
-        println!("{}", render::dim("  或说「来一道 E0382 的题」；多行代码直接粘贴（自动并为一条消息）。"));
+        println!("{}", render::dim("  或说「来一道 E0382 的题」。Enter 发送；Alt+Enter（或 Ctrl+J）换行；"));
+        println!("{}", render::dim("  多行代码直接粘贴，自动并为一条消息。"));
     }
 }
 
@@ -421,10 +431,12 @@ fn parse_command(line: &str) -> Cmd<'_> {
 
 fn print_help() {
     println!();
-    println!("  对话：直接输入问题 / 贴报错或代码（多行直接粘贴即可，自动并为一条");
-    println!("        消息；也可以用两行 ``` 围住）。教练会锚定错误码与概念，需要时");
-    println!("        本地编译你的代码取证（check_code），或生成一道可开练的小练习");
-    println!("        （generate_exercise）。任务执行中可随时 Ctrl-C 打断。");
+    println!("  对话：直接输入问题 / 贴报错或代码。Enter 发送；Alt+Enter（或");
+    println!("        Ctrl+J）换行；多行粘贴自动并为一条消息，也可以用两行 ```");
+    println!("        围住（围栏结束后可继续补充问题，回车发送）。教练会锚定错误");
+    println!("        码与概念，需要时本地编译你的代码取证（check_code），或生成");
+    println!("        一道可开练的小练习（generate_exercise）。任务执行中可随时");
+    println!("        Ctrl-C 打断。");
     println!("  命令：");
     println!("    /new        开启新会话（旧会话落盘可回看）");
     println!("    /clear      清屏（/clear all 连同回滚缓冲区一起清）");
@@ -449,10 +461,16 @@ fn print_help() {
 // ---------------------------------------------------------------------------
 
 /// Detect unresolved code threads (M5, retro §6.3): a user message with
-/// a fenced code block, followed by a coach reply proposing changes
-/// (also fenced), and no later user code paste that could have carried
-/// the verification. Injected as a per-turn note so the coach asks
-/// about pending verification instead of silently dropping it.
+/// a fenced code block that FAILED to compile locally, followed by a
+/// coach reply proposing changes (also fenced), and no later user code
+/// paste that could have carried the verification. Injected as a
+/// per-turn note so the coach asks about pending verification instead
+/// of silently dropping it.
+///
+/// 9.5 实测校准：a compiling paste is usually a "why does this work?"
+/// question — nagging about verification there was reported as
+/// bottomless fatigue (the thread can never resolve), so a failed
+/// check_code run is REQUIRED evidence for an open thread.
 fn open_loop_note(messages: &[ChatMessage]) -> Option<String> {
     // User code messages: pasted code arrives AGGREGATED without fence
     // markers (M4.9), so fall back to a code-shape heuristic; typed
@@ -477,6 +495,19 @@ fn open_loop_note(messages: &[ChatMessage]) -> Option<String> {
     // user code paste after it".
     let mut last: Option<(usize, String)> = None;
     for &ui in user_code_turns.iter().rev().take(2) {
+        // The paste must have failed a local compile before any fix
+        // proposal; everything up to the next user message counts
+        // (check_code may run after some coach prose).
+        let failed_compile = messages[ui + 1..]
+            .iter()
+            .take_while(|m| m.role != "user")
+            .any(|m| {
+                m.role == "tool"
+                    && m.content.as_deref().map(|c| c.contains("\"compiles\":false")).unwrap_or(false)
+            });
+        if !failed_compile {
+            continue;
+        }
         let Some(aj) = (ui + 1..messages.len()).rfind(|&i| {
             messages[i].role == "assistant"
                 && messages[i].content.as_deref().map(|c| c.contains("```")).unwrap_or(false)
@@ -578,6 +609,7 @@ fn agent_turn(
     tracker: &Arc<Mutex<UsageTracker>>,
     client: &Option<LlmClient>,
     practice_ctx: &practice::PracticeCtx,
+    open_loop_seen: &mut usize,
 ) {
     let Some(cl) = client else {
         println!();
@@ -604,8 +636,17 @@ fn agent_turn(
         )
     };
     // M5 (retro §6.3): pending code threads the coach should follow up.
-    let open_loop_note = open_loop_note(&session.messages);
-    let has_open_loop = open_loop_note.is_some();
+    // 9.5 实测校准：inject the thread into the model context only on
+    // the FIRST detection and show the footer reminder at most twice —
+    // every-turn repetition made the coach itself nag in each reply,
+    // which testers reported as fatigue with no way to silence it.
+    let detected_note = open_loop_note(&session.messages);
+    if detected_note.is_some() {
+        *open_loop_seen += 1;
+    }
+    let open_loop_note = if *open_loop_seen == 1 { detected_note.clone() } else { None };
+    let remind_in_footer = detected_note.is_some() && *open_loop_seen <= 2;
+    drop(detected_note);
     let env = AgentEnv {
         caller: Arc::new(cl.clone()),
         tracker: tracker.clone(),
@@ -692,12 +733,13 @@ fn agent_turn(
             }
             // M5 deterministic open-thread reminder (retro §6.3): the
             // model-side note is best-effort (adherence varies by
-            // model), so the CLI guarantees the thread is never lost.
+            // model), so the CLI guarantees the thread is never lost —
+            // but only for the first two turns (limitation 9.5 实测).
             // Hidden when this turn itself pasted code (likely the
             // verification paste).
-            if has_open_loop && !input_had_code {
+            if remind_in_footer && !input_had_code {
                 println!(
-                    "  {} 之前贴的代码改动还没验证过——把改好的代码贴回来我帮你跑 check_code。",
+                    "  {} 之前贴的代码改动还没验证过——把改好的代码贴回来我帮你跑 check_code。（若这条消息与代码无关，忽略即可）",
                     render::dim("↻")
                 );
             }
@@ -736,7 +778,7 @@ fn agent_turn(
                             if let Some(msg) = practice::enter_at(practice_ctx, &offer.path, opts, Some(&deps)) {
                                 repaint_chat(session, cfg, tracker);
                                 println!("{} [问教练] 把练习代码带回对话", super::render::bold("你>"));
-                                agent_turn(session, &msg, cfg, tracker, client, practice_ctx);
+                                agent_turn(session, &msg, cfg, tracker, client, practice_ctx, open_loop_seen);
                                 return;
                             }
                             repaint_chat(session, cfg, tracker);
@@ -813,7 +855,7 @@ fn print_stats(practice_ctx: &practice::PracticeCtx, arg: Option<&str>) {
     if let Some(rest) = arg.and_then(|a| a.strip_prefix("wrong").map(str::trim)) {
         let index = crate::exercise::index::ExerciseIndex::load(&practice_ctx.root);
         let nb = crate::profile::notebook_from_index(&index, Some(rest));
-        println!("  错题本（{} 题，过滤「{rest}」）：", nb.len());
+        println!("  复习队列（{} 题，过滤「{rest}」）：", nb.len());
         if nb.is_empty() {
             println!("    （没有匹配的错题）");
         }
@@ -849,10 +891,12 @@ fn print_stats(practice_ctx: &practice::PracticeCtx, arg: Option<&str>) {
     let weak = profile.weakest(5);
     if weak.is_empty() {
         println!("    （还没有失败记录，状态不错）");
+    } else {
+        println!("{}", render::dim("    （强度 = SM-2 的 EF 值，1.3–2.5，越高记得越牢；复习 = 下次到期日）"));
     }
     for (c, fails, attempts) in &weak {
         let s = profile.concepts.get(c);
-        let ef = s.map(|s| format!("EF {:.1}", s.sm2.ef)).unwrap_or_default();
+        let ef = s.map(|s| format!("强度 {:.1}", s.sm2.ef)).unwrap_or_default();
         let due_str =
             s.and_then(|s| s.sm2.due.as_deref()).map(due_cn).unwrap_or_else(|| "—".into());
         println!("    {} ｜ 失败 {fails}/{attempts} ｜ {ef} ｜ 复习 {due_str}", cname(c));
@@ -868,7 +912,10 @@ fn print_stats(practice_ctx: &practice::PracticeCtx, arg: Option<&str>) {
     // Wrong-answer notebook.
     let index = crate::exercise::index::ExerciseIndex::load(&practice_ctx.root);
     let nb = crate::profile::notebook_from_index(&index, None);
-    println!("  错题本（{} 题有过失败；/stats wrong <概念|错误码> 过滤）：", nb.len());
+    println!(
+        "  复习队列（{} 题，含已通过 ✓——过了的也留着巩固；/stats wrong <概念|错误码> 过滤）：",
+        nb.len()
+    );
     for e in nb.iter().take(8) {
         print_notebook_row(e);
     }
@@ -1074,7 +1121,9 @@ fn handle_sessions(arg: Option<&str>, session: &mut Session, cfg: &ModelConfig, 
             }
         }
         _ => {
-            // Bare number = view the trajectory read-only.
+            // Bare number = view the trajectory read-only, then stay
+            // inside the sessions UI (9.5 实测：回看后直接回主对话，
+            // 用户随手键入的 export/load/b 被当消息发给模型).
             match arg.parse::<usize>() {
                 Ok(n) if n >= 1 && n <= infos.len() => match Session::load(&infos[n - 1].path) {
                     Ok(s) => {
@@ -1088,6 +1137,9 @@ fn handle_sessions(arg: Option<&str>, session: &mut Session, cfg: &ModelConfig, 
                         );
                         print!("{}", agent::session::trajectory_text(&s.messages, 500));
                         println!();
+                        if read_line_or_leave("  回车返回会话列表 > ").is_some() {
+                            sessions_list(session, cfg, tracker);
+                        }
                     }
                     Err(e) => println!("  读取会话失败：{e:#}"),
                 },
@@ -1218,6 +1270,12 @@ fn sessions_list(
                                                     agent::session::trajectory_text(&s.messages, 500)
                                                 );
                                                 println!();
+                                                // Hold the trajectory on screen until
+                                                // the learner acknowledges — the loop
+                                                // redraw would wipe it immediately.
+                                                if read_line_or_leave("  回车返回列表 > ").is_none() {
+                                                    break;
+                                                }
                                             }
                                             Err(e) => println!("  读取会话失败：{e:#}"),
                                         }
@@ -1287,13 +1345,25 @@ fn install_ctrlc() {
 }
 
 /// Multi-line paste mode: collect lines until the closing ``` line.
+/// After the fence closes, keep reading until an empty line: the
+/// learner usually wants to add a question with the code (9.5 实测：
+/// 围栏结束即提交，把追问拆成两条消息，多烧一次调用). Ctrl-C/EOF
+/// cancels the whole message.
 fn read_paste() -> Option<String> {
     println!("  ─ 粘贴模式：继续粘贴代码，单独一行 ``` 结束 ─");
     let mut buf = String::new();
     loop {
         let l = read_line_or_leave("")?;
         if l.trim() == "```" {
-            return Some(buf);
+            println!("  （代码已收下；可继续补充问题，直接回车发送）");
+            loop {
+                let l = read_line_or_leave("")?;
+                if l.trim().is_empty() {
+                    return Some(buf);
+                }
+                buf.push_str(&l);
+                buf.push('\n');
+            }
         }
         buf.push_str(&l);
         buf.push('\n');
@@ -1311,18 +1381,36 @@ mod tests {
     fn assistant(text: &str) -> ChatMessage {
         ChatMessage::assistant(text.to_string())
     }
+    /// check_code round that FAILED (the evidence an open fix-verify
+    /// thread requires).
+    fn failed_check(code: &str) -> Vec<ChatMessage> {
+        vec![
+            ChatMessage::assistant_with_calls(vec![crate::llm::ToolCall {
+                id: "check_code_0".into(),
+                name: "check_code".into(),
+                arguments: format!("{{\"code\":\"{code}\"}}"),
+            }]),
+            ChatMessage::tool_result(
+                "check_code_0",
+                "{\"compiles\":false,\"error_codes\":[\"E0382\"]}",
+            ),
+        ]
+    }
 
     #[test]
     fn open_loop_detects_unverified_rewrite() {
         // Pasted code arrives WITHOUT fence markers (M4.9 aggregation).
-        let msgs = vec![
+        let mut msgs = vec![
             user("什么是所有权"),
             assistant("解释…"),
             user("fn main() {\n    let s = String::from(\"a\");\n    let t = s;\n    println!(\"{}\", s);\n}"),
+        ];
+        msgs.extend(failed_check("fn main() {}"));
+        msgs.extend([
             assistant("本地编译报 E0382…"),
             assistant("方案：\n```rust\nlet t = s.clone();\n```"),
             user("顺便问，String 和 &str 有什么区别"),
-        ];
+        ]);
         let note = open_loop_note(&msgs).expect("should detect the open thread");
         assert!(note.contains("[Open code threads"), "{note}");
         assert!(note.contains("NEVER re-verified"), "{note}");
@@ -1332,15 +1420,38 @@ mod tests {
     #[test]
     fn open_loop_detects_rewrite_after_followup_questions() {
         // 贴码 → 教练思路（无码）→ 用户追问（无码）→ 教练方案（有码）→ 用户转话题
-        let msgs = vec![
+        let mut msgs = vec![
             user("fn main() {\n    let s = String::from(\"a\");\n    let t = s;\n    println!(\"{}\", s);\n}"),
+        ];
+        msgs.extend(failed_check("fn main() {}"));
+        msgs.extend([
             assistant("本地编译报 E0382；修复思路有三种……"),
             user("直接给我最小改动"),
             assistant("最小改动：\n```rust\nlet t = s.clone();\n```"),
             user("顺便问，String 和 &str 有什么区别"),
-        ];
+        ]);
         let note = open_loop_note(&msgs).expect("rewrite two turns later still counts");
         assert!(note.contains("NEVER re-verified"), "{note}");
+    }
+
+    #[test]
+    fn open_loop_none_when_paste_compiled_clean() {
+        // 9.5 实测校准：a COMPILING paste is a "why does this work?"
+        // question — no verification nagging. (Regression for the
+        // bottomless ↻ reminder fatigue.)
+        let mut msgs = vec![
+            user("fn main() {\n    let s = String::from(\"a\");\n    let t = &s;\n    println!(\"{}\", s);\n}"),
+            ChatMessage::assistant_with_calls(vec![crate::llm::ToolCall {
+                id: "check_code_0".into(),
+                name: "check_code".into(),
+                arguments: "{\"code\":\"fn main() {}\"}".into(),
+            }]),
+            ChatMessage::tool_result("check_code_0", "{\"compiles\":true,\"error_codes\":[]}"),
+            assistant("这段能编译通过 ✅\n```rust\nlet t = &s;\n```"),
+            user("顺便问，String 和 &str 有什么区别"),
+        ];
+        let _ = &mut msgs;
+        assert!(open_loop_note(&msgs).is_none());
     }
 
     #[test]

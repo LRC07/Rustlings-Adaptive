@@ -48,6 +48,11 @@ impl Spinner {
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
+        // The long task is over: keys typed while it held the
+        // foreground (spinner phase) must not leak into the next
+        // prompt — 9.5 实测反馈：等待期键入的 `r` 被当成复盘答案.
+        // tcflush is a harmless ENOTTY no-op on pipes.
+        super::flush_stdin();
     }
 }
 

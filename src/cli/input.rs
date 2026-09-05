@@ -22,6 +22,12 @@
 //!   `PASTE_GAP_MS` is a paste stream, not a human — the editor
 //!   switches to paste mode until a short silence (`BURST_SILENCE_MS`).
 //!
+//! Typed multi-line input: Enter (CR) submits, soft newlines come from
+//! Alt+Enter (Meta-Enter, native on every terminal) or Ctrl+J; terminals
+//! speaking the kitty CSI-u / xterm modifyOtherKeys protocols get
+//! Ctrl/Shift+Enter recognized too. A soft newline is a plain '\n' in
+//! the buffer; backspacing across it joins the lines.
+//!
 //! The buffer is therefore multi-line; on submit it is handed over as
 //! a single string. Off-tty (pipes/tests) or off-unix it falls back to
 //! plain `read_line`, preserving machine-driven behavior.
@@ -221,6 +227,7 @@ impl CharAssembler {
 }
 
 #[cfg(unix)]
+#[derive(Debug)]
 enum Feed {
     Keep,
     Submit,
@@ -246,7 +253,14 @@ impl Editor {
             return self.feed_paste(b);
         }
         match b {
-            b'\r' | b'\n' => Feed::Submit,
+            // CR = Enter = submit; LF (Ctrl-J) = soft newline. Every
+            // terminal sends CR for the Enter key, so the two never
+            // collide in practice.
+            b'\r' => Feed::Submit,
+            b'\n' => {
+                self.push_char('\n');
+                Feed::Keep
+            }
             0x03 => Feed::Interrupted, // Ctrl-C
             0x04 => {
                 if self.line.is_empty() {
@@ -375,12 +389,27 @@ impl Editor {
     }
 
     /// End of an escape sequence (bytes after ESC, final byte last).
-    /// Only the bracketed-paste markers change state; everything else
-    /// (arrows, SS3, stray CSI) is swallowed.
+    /// Paste markers switch paste mode; Enter-with-modifier sequences
+    /// become soft newlines; everything else (arrows, SS3, stray CSI,
+    /// Meta+key) is swallowed.
     fn end_escape(&mut self, seq: &[u8]) {
         match seq {
             b"[200~" => self.paste = true,
             b"[201~" => self.paste = false,
+            // Meta-Enter (ESC then CR): soft newline. This encoding is
+            // sent natively by every terminal (macOS Terminal.app needs
+            // "Use Option as Meta Key"), so it is THE documented way to
+            // insert a line break.
+            [b'\r'] => self.push_char('\n'),
+            // Ctrl/Shift/Alt+Enter as spoken by terminals with the
+            // kitty keyboard protocol (CSI-u) or xterm
+            // modifyOtherKeys: same soft newline, silently — ordinary
+            // terminals never send Enter in these forms, so accepting
+            // them here costs nothing and needs no user-facing
+            // "which terminal are you on" caveats.
+            b"[13;2u" | b"[13;3u" | b"[13;5u" | b"[27;2;13~" | b"[27;5;13~" => {
+                self.push_char('\n')
+            }
             _ => {}
         }
     }
@@ -595,12 +624,65 @@ mod tests {
         }
         assert_eq!(ed.line, "");
         assert!(!ed.paste, "arrow-like sequences must not enter paste mode");
-        // A lone ESC (Meta) swallows exactly one following byte, so
-        // Meta-Enter is not a submit — documented readline-ish
-        // behavior; a real Enter after Esc just needs a second press.
+        // Meta-Enter inserts a soft newline (never a submit); the next
+        // plain Enter submits the multi-line buffer.
         ed.feed(0x1b);
         assert!(matches!(ed.feed(b'\r'), Feed::Keep));
         assert!(matches!(ed.feed(b'\r'), Feed::Submit));
+    }
+
+    #[test]
+    fn meta_enter_is_soft_newline() {
+        let mut ed = Editor::default();
+        ed.feed(b'x');
+        ed.feed(0x1b);
+        assert!(matches!(ed.feed(b'\r'), Feed::Keep));
+        assert_eq!(ed.line, "x\n");
+        assert!(matches!(ed.feed(b'\r'), Feed::Submit));
+        // Submit trims the buffer ends — the trailing soft newline goes
+        // with it (same as paste/fence paths), interior ones survive.
+        assert_eq!(ed.line.trim(), "x");
+    }
+
+    #[test]
+    fn ctrl_j_is_soft_newline_enter_is_submit() {
+        let mut ed = Editor::default();
+        ed.feed(b'a');
+        assert!(matches!(ed.feed(b'\n'), Feed::Keep));
+        assert_eq!(ed.line, "a\n");
+        assert!(matches!(ed.feed(b'\r'), Feed::Submit));
+    }
+
+    #[test]
+    fn csi_u_and_modify_other_keys_enters_are_soft_newlines() {
+        // kitty CSI-u (Ctrl/Shift/Alt+Enter) and xterm
+        // modifyOtherKeys variants — silent enhancement for terminals
+        // that speak them.
+        for seq in [
+            [0x1b, b'[', b'1', b'3', b';', b'5', b'u'].as_slice(),
+            &[0x1b, b'[', b'1', b'3', b';', b'2', b'u'][..],
+            &[0x1b, b'[', b'1', b'3', b';', b'3', b'u'][..],
+            &[0x1b, b'[', b'2', b'7', b';', b'5', b';', b'1', b'3', b'~'][..],
+            &[0x1b, b'[', b'2', b'7', b';', b'2', b';', b'1', b'3', b'~'][..],
+        ] {
+            let mut ed = Editor::default();
+            for &b in seq {
+                assert!(matches!(ed.feed(b), Feed::Keep), "seq {seq:?}");
+            }
+            assert_eq!(ed.line, "\n", "seq {seq:?}");
+        }
+    }
+
+    #[test]
+    fn soft_newline_then_backspace_joins_lines() {
+        let mut ed = Editor::default();
+        ed.feed(b'a');
+        ed.feed(b'\n'); // Ctrl-J soft newline
+        ed.feed(b'b');
+        assert_eq!(ed.line, "a\nb");
+        ed.erase_last(); // b
+        ed.erase_last(); // the newline itself
+        assert_eq!(ed.line, "a");
     }
 
     #[test]
@@ -625,8 +707,7 @@ mod tests {
         // The heuristic itself polls the fd (I/O, not unit-testable);
         // the state it drives is: paste on → newlines are content →
         // paste off → Enter submits.
-        let mut ed = Editor::default();
-        ed.paste = true;
+        let mut ed = Editor { paste: true, ..Default::default() };
         for b in "let x = 1;\r\nlet y = 2;\r\n".bytes() {
             assert!(matches!(ed.feed(b), Feed::Keep));
         }
