@@ -1038,7 +1038,7 @@ fn handle_sessions(arg: Option<&str>, session: &mut Session, cfg: &ModelConfig, 
         return;
     }
     let Some(arg) = arg else {
-        sessions_list(&infos);
+        sessions_list(session, cfg, tracker);
         return;
     };
     let mut words = arg.split_whitespace();
@@ -1102,21 +1102,140 @@ fn parse_index(word: Option<&str>, len: usize) -> Option<usize> {
     (n >= 1 && n <= len).then_some(n)
 }
 
-fn sessions_list(infos: &[agent::session::SessionInfo]) {
-    println!();
-    println!("{}", render::cyan("── 会话列表（load 切换 / export 导出 / 序号 回看）──"));
-    for (i, info) in infos.iter().enumerate() {
-        let title = info.title.clone().unwrap_or_else(|| "—".to_string());
+/// `/sessions` with no argument: paged interactive list. Global
+/// numbering (1..=N) stays stable so `/sessions <n>` / `load` / `export`
+/// keep working from anywhere; the view defaults to the LAST page (the
+/// newest sessions are what the user usually wants).
+fn sessions_list(
+    session: &mut Session,
+    cfg: &ModelConfig,
+    tracker: &Arc<Mutex<UsageTracker>>,
+) {
+    let infos = Session::list();
+    if infos.is_empty() {
+        println!("  还没有会话记录（对话后自动保存在 ~/.rustlings_adaptive/sessions/）。");
+        return;
+    }
+    const PAGE: usize = 10;
+    let total_pages = infos.len().div_ceil(PAGE);
+    let mut page = total_pages.saturating_sub(1);
+    loop {
+        if render::ansi_enabled() {
+            clear_viewport();
+        }
+        println!();
         println!(
-            "  {:>2}. {} ｜ {} 条消息 ｜ 「{}」 ｜ 开始 {}",
-            i + 1,
-            info.id,
-            info.messages,
-            title,
-            info.started_at.with_timezone(&chrono::Local).format("%m-%d %H:%M")
+            "{} 第 {}/{} 页 ｜ 共 {} 条（全局序号可直接用于 /sessions <n> / load / export）",
+            render::cyan("── 会话列表 ──"),
+            page + 1,
+            total_pages,
+            infos.len()
         );
+        let start = page * PAGE;
+        for (i, info) in infos
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(PAGE)
+        {
+            let title = info.title.clone().unwrap_or_else(|| "—".to_string());
+            println!(
+                "  {:>2}. {} ｜ {} 条消息 ｜ 「{}」 ｜ 开始 {}",
+                i + 1,
+                info.id,
+                info.messages,
+                title,
+                info.started_at.with_timezone(&chrono::Local).format("%m-%d %H:%M")
+            );
+        }
+        println!();
+        println!(
+            "  [n] 更晚 ｜ [p] 更早 ｜ [数字] 回看 ｜ [load n] 切换 ｜ [export n] 导出 ｜ [q] 返回"
+        );
+        match read_line("会话> ") {
+            Line::Text(s) => {
+                let t = s.trim();
+                match t {
+                    "n" | "N" => {
+                        page = (page + 1).min(total_pages - 1);
+                    }
+                    "p" | "P" => {
+                        page = page.saturating_sub(1);
+                    }
+                    "q" | "b" | "back" | "" => break,
+                    _ => {
+                        // Inline handlers reuse the same semantics as
+                        // `/sessions load|export|<n>`; view then redraw.
+                        let words: Vec<&str> = t.split_whitespace().collect();
+                        match words.first().copied().unwrap_or("") {
+                            "load" => {
+                                if let Some(n) = parse_index(words.get(1).copied(), infos.len()) {
+                                    match Session::load(&infos[n - 1].path) {
+                                        Ok(loaded) => {
+                                            let _ = session.save();
+                                            *session = loaded;
+                                            println!(
+                                                "  已切换到会话 {}（{} 条消息；继续对话即可延续该上下文）",
+                                                render::cyan(&session.id),
+                                                session.messages.len()
+                                            );
+                                            repaint_chat(session, cfg, tracker);
+                                            return;
+                                        }
+                                        Err(e) => println!("  读取会话失败：{e:#}"),
+                                    }
+                                } else {
+                                    println!("  用法：load <序号>（1..={}）", infos.len());
+                                }
+                            }
+                            "export" => {
+                                if let Some(n) = parse_index(words.get(1).copied(), infos.len())
+                                    && let Ok(s) = Session::load(&infos[n - 1].path)
+                                {
+                                    match s.export_markdown() {
+                                        Ok(path) => println!("  已导出：{}", path.display()),
+                                        Err(e) => println!("  导出失败：{e:#}"),
+                                    }
+                                } else {
+                                    println!("  用法：export <序号>（1..={}）", infos.len());
+                                }
+                            }
+                                _ => match t.parse::<usize>() {
+                                    Ok(n) if n >= 1 && n <= infos.len() => {
+                                        match Session::load(&infos[n - 1].path) {
+                                            Ok(s) => {
+                                                println!();
+                                                println!(
+                                                    "── 会话 {}（{} 条消息，开始于 {}；/sessions load {n} 可切换）──",
+                                                    render::cyan(&s.id),
+                                                    s.messages.len(),
+                                                    s.started_at
+                                                        .with_timezone(&chrono::Local)
+                                                        .format("%Y-%m-%d %H:%M:%S"),
+                                                );
+                                                print!(
+                                                    "{}",
+                                                    agent::session::trajectory_text(&s.messages, 500)
+                                                );
+                                                println!();
+                                            }
+                                            Err(e) => println!("  读取会话失败：{e:#}"),
+                                        }
+                                    }
+                                    _ => println!("  未知输入：数字回看 / load n / export n / n / p / q"),
+                                },
+                        }
+                    }
+                }
+            }
+            Line::Interrupted => {
+                println!("  ^C 已取消本行输入");
+            }
+            Line::Eof => break,
+        }
     }
 }
+
 
 /// `/ui` — switch rendering mode (M4.2): view = repaint viewport per
 /// turn, scroll = plain transcript. Persisted to config.toml.
