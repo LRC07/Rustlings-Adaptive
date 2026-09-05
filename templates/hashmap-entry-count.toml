@@ -1,0 +1,73 @@
+id = "hashmap-entry-count"
+title = "entry：一次定位完成查改"
+concepts = ["collections.hashmap", "borrowing.shared-mut"]
+error_codes = ["E0502"]
+difficulty = "medium"
+confusion = "Python 的 dict 可以 d[k] = d.get(k, 0) + 1 随便写，运行时顶多慢一点；初学者不知道 Rust 里 get 返回的引用存活期间 insert 是被禁止的——双查找不只是慢，在这里根本编不过"
+anti_patterns = ["contains_key/get + insert 双查找（两次哈希两次定位）", "clone 一份值或整个 map 绕开借用冲突"]
+
+body = '''
+use std::collections::HashMap;
+
+// 统计每个单词出现的次数。
+// 场景：日志关键词频度分析。你最初写的是「先 get 再 insert」，
+// 但那会对每个词做两次哈希定位，而且持有引用时插入会撞上借用冲突。
+// TODO: 用 entry 完成计数：键不存在则置 0，然后 +1。
+// 要求：循环体只做一次哈希定位，且不 clone 任何东西。
+pub fn counts(words: Vec<String>) -> HashMap<String, usize> {
+    let mut m = HashMap::new();
+    for w in words {
+        todo!();
+    }
+    m
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counts_repeated_words() {
+        let words = vec![
+            "log".into(), "warn".into(), "log".into(), "log".into(),
+        ];
+        let m = counts(words);
+        assert_eq!(m.get("log"), Some(&3));
+        assert_eq!(m.get("warn"), Some(&1));
+    }
+
+    #[test]
+    fn empty_input_yields_empty_map() {
+        assert!(counts(Vec::new()).is_empty());
+    }
+}
+'''
+
+reference = '''
+use std::collections::HashMap;
+
+pub fn counts(words: Vec<String>) -> HashMap<String, usize> {
+    let mut m = HashMap::new();
+    for w in words {
+        *m.entry(w).or_insert(0) += 1;
+    }
+    m
+}
+'''
+
+constraints = ["no-clone", "no-unwrap", "max-lines=40"]
+hints = ["能不能把「查」和「改」合并成一次哈希定位？", "entry(key) 返回的 Entry 有 or_insert(默认值)，它给出的是值的可变引用。", "*m.entry(w).or_insert(0) += 1 的形态。"]
+
+[review_hints]
+root_cause = [
+    "HashMap::get 返回的引用在整个使用期间借用 m，期间对 m 的任何可变访问都被拒绝；entry 把「查找」和「修改」合并到同一个句柄上，只哈希一次也不存在借用冲突",
+    "or_insert(0) 在键不存在时插入默认值并返回其可变引用，键已存在时直接返回现有值的可变引用——两种情况都只定位一次",
+]
+misconceptions = [
+    "以为把 get 换成 get_mut 就能修（同样是可变借用，下一行 insert 依然冲突）",
+    "以为要先 clone 键或值再绕开冲突（多余分配，且违背 no-clone）",
+    "以为用 contains_key 先判断再插入更稳（还是两次哈希，if 分支里的借用冲突依旧）",
+]

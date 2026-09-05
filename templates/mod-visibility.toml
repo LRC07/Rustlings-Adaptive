@@ -1,0 +1,85 @@
+id = "mod-visibility"
+title = "可见性：最小公开"
+concepts = ["modules.visibility"]
+error_codes = ["E0624"]
+difficulty = "easy"
+confusion = "Java/Python 的包可见性粒度很粗；初学者不知道 Rust 的 pub 是逐条目声明的（每个字段/方法/模块各自声明），默认全部私有"
+anti_patterns = ["把字段全部 pub（封装泄漏，外部可以绕过不变量）", "把 impl 里所有方法一把梭全 pub（最小可见性原则）"]
+
+body = '''
+// 场景：配置库把数据库连接收进子模块。外部只需要两件事：
+// 能构造它、能拿到摘要。结构体已经是 pub 的了，但编译还是不过。
+// TODO: 用最小的可见性改动修好它——字段一个都不要公开。
+mod config {
+    pub struct Database {
+        url: String,
+        max_conn: u32,
+    }
+
+    impl Database {
+        fn new(url: String, max_conn: u32) -> Self {
+            Database { url, max_conn }
+        }
+
+        pub fn summary(&self) -> String {
+            format!("{}x{}", self.url, self.max_conn)
+        }
+    }
+}
+
+fn main_flow() -> String {
+    let db = config::Database::new(String::from("postgres://local"), 8);
+    db.summary()
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summary_contains_url_and_conns() {
+        assert_eq!(main_flow(), "postgres://localx8");
+    }
+}
+'''
+
+reference = '''
+mod config {
+    pub struct Database {
+        url: String,
+        max_conn: u32,
+    }
+
+    impl Database {
+        pub fn new(url: String, max_conn: u32) -> Self {
+            Database { url, max_conn }
+        }
+
+        pub fn summary(&self) -> String {
+            format!("{}x{}", self.url, self.max_conn)
+        }
+    }
+}
+
+fn main_flow() -> String {
+    let db = config::Database::new(String::from("postgres://local"), 8);
+    db.summary()
+}
+'''
+
+constraints = ["max-lines=35"]
+hints = ["报错指向的是哪一个名字？它现在对子模块外可见吗？", "只需要在构造器前加一个关键字——字段一个都不动，封装反而更完整。", "pub fn new。"]
+
+[review_hints]
+root_cause = [
+    "Rust 默认一切私有：跨模块调用的构造器也要显式 pub；字段保持私有、通过公开方法暴露能力，是把封装做完整的正解",
+    "E0624 报的是「方法私有」，E0603 才是模块/路径私有——看错误码就知道该改哪个条目",
+]
+misconceptions = [
+    "以为 pub struct 就万事大吉（字段与方法仍然各自私有）",
+    "以为必须把字段全部 pub 外部才能用（公开构造器与方法才是封装正解）",
+    "以为单文件没有模块可见性问题（mod 块本身就是模块边界）",
+]

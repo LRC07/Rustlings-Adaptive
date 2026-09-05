@@ -1,0 +1,108 @@
+id = "closure-fn-kinds"
+title = "闭包三态：按捕获选 trait"
+concepts = ["closures.traits"]
+error_codes = ["E0277"]
+difficulty = "medium"
+confusion = "JS/Python 的闭包随便改外部变量；初学者不知道捕获方式（借用/可变借用/转移）决定闭包实现的是 Fn/FnMut/FnOnce 中的哪一个，而它决定这个闭包能传给什么参数"
+anti_patterns = ["所有闭包无脑加 move（Fn 场景白白转移所有权）", "用 Cell/RefCell 包一切来回避 FnMut bound"]
+
+body = '''
+// 场景：发布订阅。总线依次调用三种处理器：
+// reader 只读配置（可反复调用）；counter 反复累计自己的状态；
+// one_shot 只允许调用一次，并把捕获的告别语带走。
+// reader 已给出——看它的捕获方式，体会为什么它满足 Fn。
+// TODO: 补全 counter 与 one_shot 两个闭包，让 main_flow 返回
+// (true, 3, "bye")：计数在两次调用间要累积，告别语要被带走。
+
+struct Bus;
+
+impl Bus {
+    fn run(
+        reader: impl Fn(&str) -> bool,
+        mut counter: impl FnMut() -> u32,
+        one_shot: impl FnOnce() -> String,
+    ) -> (bool, u32, String) {
+        let ok = reader("verbose");
+        let first = counter();
+        let second = counter();
+        (ok, first + second, one_shot())
+    }
+}
+
+fn main_flow() -> (bool, u32, String) {
+    let min_level = String::from("verbose");
+    let reader = |level: &str| level == min_level;
+    let mut dropped = 0u32;
+    let counter = todo!();
+    let farewell = String::from("bye");
+    let one_shot = todo!();
+    let result = Bus::run(reader, counter, one_shot);
+    assert_eq!(min_level, "verbose"); // reader 只应借走它
+    result
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pipeline_shape() {
+        assert_eq!(main_flow(), (true, 3, String::from("bye")));
+    }
+
+    #[test]
+    fn counter_accumulates_across_calls() {
+        // first + second == 3 只在「同一个计数闭包被连续调用两次」时成立
+        assert_eq!(main_flow().1, 3);
+    }
+}
+'''
+
+reference = '''
+struct Bus;
+
+impl Bus {
+    fn run(
+        reader: impl Fn(&str) -> bool,
+        mut counter: impl FnMut() -> u32,
+        one_shot: impl FnOnce() -> String,
+    ) -> (bool, u32, String) {
+        let ok = reader("verbose");
+        let first = counter();
+        let second = counter();
+        (ok, first + second, one_shot())
+    }
+}
+
+fn main_flow() -> (bool, u32, String) {
+    let min_level = String::from("verbose");
+    let reader = |level: &str| level == min_level;
+    let mut dropped = 0u32;
+    let counter = || {
+        dropped += 1;
+        dropped
+    };
+    let farewell = String::from("bye");
+    let one_shot = || farewell;
+    let result = Bus::run(reader, counter, one_shot);
+    assert_eq!(min_level, "verbose");
+    result
+}
+'''
+
+constraints = ["no-clone", "max-lines=45"]
+hints = ["看签名里每个参数的 trait——它约束的是闭包对环境的捕获与调用次数。", "counter 要在多次调用间保持计数：捕获 &mut 的闭包才是 FnMut。", "one_shot 用一次就完：让闭包把 farewell 移出去（函数体直接写变量名）。"]
+
+[review_hints]
+root_cause = [
+    "闭包实现的 trait 由它对环境的捕获方式决定：只读借用 → Fn，可变借用 → FnMut，转移所有权 → FnOnce；签名 bound 就是在约束捕获方式",
+    "FnOnce 是 FnMut 的父特型、FnMut 是 Fn 的父特型——要求 FnMut 的参数也接受 Fn，反之不行；move 关键字强制转移，会改变闭包实现的 trait",
+]
+misconceptions = [
+    "以为加不加 move 只是风格（move 强制转移所有权，随之改变实现的 trait）",
+    "以为 FnMut 不能多次调用（恰恰相反，FnOnce 才只能调用一次）",
+    "以为参数 bound 约束的是返回值类型（它约束的是对环境的捕获与调用次数）",
+]

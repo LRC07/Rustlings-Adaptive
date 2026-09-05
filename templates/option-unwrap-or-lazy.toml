@@ -1,0 +1,87 @@
+id = "option-unwrap-or-lazy"
+title = "unwrap_or：急切与惰性"
+concepts = ["types.option-result"]
+error_codes = ["E0308"]
+difficulty = "medium"
+confusion = "Python 的 dict.get(k, expensive()) 同样急切，但几乎没人注意到；初学者把组合子当语法糖，不知道 *_or 与 *_else 的求值时机是有语义差异的契约"
+anti_patterns = ["在 unwrap_or 的参数里做重计算或有副作用的调用", "为回避急切求值把默认值提前算好存起来"]
+
+body = '''
+use std::cell::Cell;
+
+// 场景：读取站点主题色；缺失时回退到 default_color()。
+// default_color 很贵（要重建整张调色板），测试用计数器盯着它：
+// 只要有主题色，它就绝不允许被调用。
+// TODO: 补全 theme_color——unwrap_or 的参数是立刻求值的，
+// 选一个惰性的写法，让两个测试同时成立。
+#[derive(Debug)]
+struct Theme {
+    color: Option<String>,
+}
+
+fn default_color(calls: &Cell<u32>) -> String {
+    calls.set(calls.get() + 1); // 探针：被调用一次就 +1
+    String::from("#888888")
+}
+
+pub fn theme_color(theme: &Theme, calls: &Cell<u32>) -> String {
+    todo!()
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn present_color_never_touches_default() {
+        let calls = Cell::new(0);
+        let t = Theme { color: Some(String::from("#3B82F6")) };
+        assert_eq!(theme_color(&t, &calls), "#3B82F6");
+        assert_eq!(calls.get(), 0, "有主题色时 default_color 不应被调用");
+    }
+
+    #[test]
+    fn missing_color_calls_default_once() {
+        let calls = Cell::new(0);
+        let t = Theme { color: None };
+        assert_eq!(theme_color(&t, &calls), "#888888");
+        assert_eq!(calls.get(), 1);
+    }
+}
+'''
+
+reference = '''
+use std::cell::Cell;
+
+#[derive(Debug)]
+struct Theme {
+    color: Option<String>,
+}
+
+fn default_color(calls: &Cell<u32>) -> String {
+    calls.set(calls.get() + 1);
+    String::from("#888888")
+}
+
+pub fn theme_color(theme: &Theme, calls: &Cell<u32>) -> String {
+    theme.color.clone().unwrap_or_else(|| default_color(calls))
+}
+'''
+
+constraints = ["no-unwrap", "max-lines=40"]
+hints = ["测试在盯着 default_color 的调用次数——先想清楚 unwrap_or 的参数什么时候被算出来。", "把默认值包进一个无参闭包，交给 *_else 变体；map_or_else(default_fn, |c| c) 也行。", "theme.color.clone().unwrap_or_else(|| default_color(calls)) 的形态。"]
+
+[review_hints]
+root_cause = [
+    "unwrap_or(default) 的参数在调用前就会求值——无论 Some 还是 None，重计算都会发生；unwrap_or_else/map_or_else 接受闭包，只在 None 时才执行",
+    "计数器断言把「急切 vs 惰性」变成了可观察的行为差异：Some 分支多算一次默认值就是 bug",
+]
+misconceptions = [
+    "以为 unwrap_or 和 unwrap_or_else 只是写法风格差异",
+    "以为编译器会优化掉未使用的急切求值（调用带副作用时不可能）",
+    "以为把默认值提前算好存起来更安全（正是白分配，也改变副作用次数）",
+]

@@ -1,0 +1,66 @@
+id = "result-option-nesting"
+title = "剥层：Result<Option<_>>"
+concepts = ["errors.propagation", "types.option-result"]
+error_codes = ["E0599"]
+difficulty = "hard"
+confusion = "链式调用的语言里 None 与异常随便串；初学者在 Option 上调 Result 的方法，不知道两层包装要先用 ok_or 统一成一个层级，组合子与 ? 才接得上"
+anti_patterns = ["手写双层 match 展开（可行但冗长）", "unwrap 两层（引入 panic 路径）"]
+
+body = '''
+// 场景：配置扫描器——从一行文本里取出第一个词，把它解析成端口号。
+// 「没有词」是一种错误（空输入），「词不是数字」是另一种错误，
+// 两者都要归到 Result<u32, String> 的 Err 侧。
+// TODO: 补全 first_number——直接在 Option 上调 parse 会编译失败，
+// 先把 Option 统一成 Result，再把 parse 的错误串进来。
+pub fn first_number(text: &str) -> Result<u32, String> {
+    let token = text.split_whitespace().next();
+    token.parse::<u32>().map_err(|e| e.to_string())
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_first_token() {
+        assert_eq!(first_number("8080 http"), Ok(8080));
+    }
+
+    #[test]
+    fn empty_input_is_an_error() {
+        let e = first_number("   ").unwrap_err();
+        assert!(!e.is_empty(), "空输入要给出可读的错误信息");
+    }
+
+    #[test]
+    fn non_numeric_token_is_an_error() {
+        assert!(first_number("abc def").is_err());
+    }
+}
+'''
+
+reference = '''
+pub fn first_number(text: &str) -> Result<u32, String> {
+    text.split_whitespace()
+        .next()
+        .ok_or_else(|| String::from("empty input"))
+        .and_then(|tok| tok.parse::<u32>().map_err(|e| e.to_string()))
+}
+'''
+
+constraints = ["no-unwrap", "no-clone", "max-lines=30"]
+hints = ["两种失败要进同一个 Result：先把「没有词」提升为 Err。", "ok_or_else 把 Some(x)/None 变成 Ok(x)/Err(…)——层级就统一了。", "之后 and_then 串接 parse，用 map_err 把它的错误换成 String。"]
+
+[review_hints]
+root_cause = [
+    "Option 与 Result 是两层不同的包装：先 ok_or_else 把「没有词」提升为 Result 的错误，再 and_then 串接可能失败的 parse——层级归一后组合子与 ? 才能工作",
+    "map_err 只改错误侧的类型、Ok 侧保持不变；两种错误来源用 String 统一表达",
+]
+misconceptions = [
+    "以为 ? 能在 Option 上解出值接着 parse（函数返回 Result，None 要先变成什么错误？）",
+    "以为 and_then 只属于 Option（Result 也有同名组合子，语义一致）",
+    "以为要 collect 成 Vec 或写双层 match（层级归一后一行链式即可）",
+]

@@ -123,7 +123,7 @@ fix_patterns = ["use-static-str", "to-owned"]
 id = "lifetimes.scopes"
 name = "作用域与 NLL"
 parents = ["lifetimes", "borrowing"]
-error_codes = ["E0597", "E0502"]
+error_codes = ["E0597", "E0502", "E0506"]
 fix_patterns = ["shrink-scope"]
 
 [[concept]]
@@ -338,5 +338,5 @@ name = "模块与可见性"
 id = "modules.visibility"
 name = "pub 可见性与路径"
 parents = ["modules"]
-error_codes = ["E0603"]
+error_codes = ["E0603", "E0624"]
 fix_patterns = ["widen-visibility"]

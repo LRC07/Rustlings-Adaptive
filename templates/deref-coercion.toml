@@ -1,0 +1,65 @@
+id = "deref-coercion"
+title = "Deref 强转：宽容的签名"
+concepts = ["pointers.deref"]
+error_codes = ["E0308"]
+difficulty = "easy"
+confusion = "Java 的 String 只有一种；初学者不理解为什么签名写 &String 会把字符串字面量挡在门外——不知道 deref 强转是一扇自动的单向门"
+anti_patterns = ["函数签名收 &String（把调用方锁死在 owned 上）", "调用处 to_string() 迁就签名（白白分配）"]
+
+body = '''
+// 场景：用户名校验函数。签名写死了 &String，
+// 但调用方一半传 String、一半传字面量（&str）——编译器只放行前者。
+// TODO: 把签名改成最宽容的形态（函数体应该一字不用改），
+// 让两个调用都能编译通过。
+fn validate(name: &String) -> bool {
+    !name.is_empty() && name.len() <= 20
+}
+
+fn main_flow() -> [bool; 2] {
+    let owned = String::from("alice");
+    [validate(&owned), validate("bob")]
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_both_owned_and_literal() {
+        assert_eq!(main_flow(), [true, true]);
+    }
+
+    #[test]
+    fn rejects_empty_name() {
+        assert!(!validate(""));
+    }
+}
+'''
+
+reference = '''
+fn validate(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 20
+}
+
+fn main_flow() -> [bool; 2] {
+    let owned = String::from("alice");
+    [validate(&owned), validate("bob")]
+}
+'''
+
+constraints = ["max-lines=30"]
+hints = ["自动强转只有一个方向：从「借来的视图」到……还是反过来？想一想字面量本来是什么类型。", "函数体用的 is_empty / len 在更宽的类型上照样可用——放心放宽签名。", "把参数类型里的 owned 影子去掉：&str。"]
+
+[review_hints]
+root_cause = [
+    "Deref 强转是单向的：需要 &str 的地方可以自动接受 &String，反过来 &str 变不成 &String——所以宽容的函数签名应该收 &str",
+    "is_empty/len 等 str 方法在 &str 上照常工作，放宽签名不损失任何能力，反而让字面量与 String 都能传入",
+]
+misconceptions = [
+    "以为收 &String 更具体更安全（恰恰把调用方锁死在 owned 堆分配上）",
+    "以为要写两个重载分别收 &str 与 &String（Rust 没有重载，deref 强转就是为这设计的）",
+    "以为调用处必须手动写 &owned[..] 或 as_str() 才能转（直接 &owned 即可）",
+]

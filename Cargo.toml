@@ -25,5 +25,5 @@ libc = "0.2"
 # rust-analyzer gets full analysis of every exercise file. It is excluded
 # from default cargo commands so it never interferes with the CLI.
 [workspace]
-members = ["exercises", "rustlings_official/rustlings"]
+members = ["exercises"]
 default-members = ["."]

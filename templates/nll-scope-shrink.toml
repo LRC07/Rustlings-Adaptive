@@ -1,0 +1,77 @@
+id = "nll-scope-shrink"
+title = "NLL：让借用早点结束"
+concepts = ["lifetimes.scopes"]
+error_codes = ["E0506"]
+difficulty = "medium"
+confusion = "C++ 里先拿引用再改值完全正常；初学者不知道 Rust 的借用冲突取决于「最后一次使用出现在哪」——语句顺序本身就是语义"
+anti_patterns = ["删掉快照逻辑绕开冲突（改变了功能）", "clone 一份 Stats 或字段来回避借用（违背 no-clone）"]
+
+body = '''
+// 场景：统计面板——先取当前命中数做快照，再累加命中，最后把
+// 「快照 + 刷新次数」作为本次增量返回。
+// 编译器说：快照的借用还活着，s.hits += 1 进不来。
+// TODO: 不改变返回值语义，让编译通过。两条常规思路任选：
+// 把需要的值先读出来，或者用块作用域让快照的借用早点结束。
+#[derive(Debug)]
+struct Stats {
+    hits: u32,
+    refreshes: u32,
+}
+
+fn bump(s: &mut Stats) -> u32 {
+    let snapshot = &s.hits;
+    s.hits += 1;
+    *snapshot + s.refreshes
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bump_counts_snapshot_plus_refresh() {
+        let mut s = Stats { hits: 5, refreshes: 2 };
+        // 快照取的是累加前的 5，加的是 refreshes=2
+        assert_eq!(bump(&mut s), 7);
+        assert_eq!(s.hits, 6);
+        assert_eq!(s.refreshes, 2);
+    }
+
+    #[test]
+    fn empty_stats_start_from_zero() {
+        let mut s = Stats { hits: 0, refreshes: 0 };
+        assert_eq!(bump(&mut s), 0);
+    }
+}
+'''
+
+reference = '''
+#[derive(Debug)]
+struct Stats {
+    hits: u32,
+    refreshes: u32,
+}
+
+fn bump(s: &mut Stats) -> u32 {
+    let snapshot = s.hits;
+    s.hits += 1;
+    snapshot + s.refreshes
+}
+'''
+
+constraints = ["no-clone", "max-lines=30"]
+hints = ["快照的借用最后一次使用在哪一行？编译器认为它活到了哪一行？", "u32 是 Copy：把值直接读出来，借用就地结束；或者用 {} 块把借用圈起来。", "let snapshot = s.hits;（去掉 &）之后，s.hits 随便改。"]
+
+[review_hints]
+root_cause = [
+    "NLL 下借用活到它的「最后一次使用」而不是作用域结束；当最后一次使用排在可变操作之后，两者冲突——用重排（先读后写）或块作用域把借用提前结束",
+    "u32 等 Copy 类型读出即拷贝，快照不再背负对 s 的借用，冲突自然消失",
+]
+misconceptions = [
+    "以为借用一定活到花括号结束（NLL 已经按最后一次使用收窄）",
+    "以为必须删掉刷新逻辑或整体重构（读出值 / 收紧作用域就够了）",
+    "以为加显式生命周期标注能解决（这是使用顺序问题，不是标注问题）",
+]

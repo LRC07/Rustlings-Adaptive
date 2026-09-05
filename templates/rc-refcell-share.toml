@@ -1,0 +1,85 @@
+id = "rc-refcell-share"
+title = "Rc<RefCell<T>>：共享可变"
+concepts = ["pointers.rc-refcell"]
+error_codes = ["E0382"]
+difficulty = "medium"
+confusion = "Python/Java 里两个变量指向同一个对象天经地义，随时改；初学者不知道 Rust 默认赋值是 move，旧名字直接作废——「共享」与「共享下可改」都要显式选择工具"
+anti_patterns = ["clone 出两份独立的 Sensor（失去共享语义，读数不再一致）", "把状态放进 static 全局量（单线程场景杀鸡用牛刀）"]
+
+body = '''
+use std::cell::RefCell;
+use std::rc::Rc;
+
+// 场景：温度面板与记录器要共享同一份传感器读数：
+// 各自持有一个所有者句柄，都能修正偏差，且看到的是同一份数据。
+// TODO: 让两个句柄真正共享 sensor（错误就出在第二次绑定），
+// 并在不声明 &mut 的情况下完成两次修正。
+#[derive(Debug)]
+struct Sensor {
+    celsius: i32,
+}
+
+fn main_flow() -> (i32, i32) {
+    let sensor = Sensor { celsius: 21 };
+    let panel = sensor;
+    let recorder = sensor;
+    panel.celsius += 1;
+    recorder.celsius -= 1;
+    (panel.celsius, recorder.celsius)
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_readings_stay_consistent() {
+        // 同一份数据：面板 +1、记录器 -1，两边应读到同一个最终值
+        assert_eq!(main_flow(), (21, 21));
+    }
+
+    #[test]
+    fn corrections_land_on_one_shared_sensor() {
+        // 若是两份独立数据，面板读 22、记录器读 20，差值是 2；
+        // 只有共享同一份，两个句柄的读数才永远相等。
+        let (panel, recorder) = main_flow();
+        assert_eq!(panel, recorder, "两个句柄读的必须是同一个 Sensor");
+    }
+}
+'''
+
+reference = '''
+use std::cell::RefCell;
+use std::rc::Rc;
+
+#[derive(Debug)]
+struct Sensor {
+    celsius: i32,
+}
+
+fn main_flow() -> (i32, i32) {
+    let sensor = Rc::new(RefCell::new(Sensor { celsius: 21 }));
+    let panel = Rc::clone(&sensor);
+    let recorder = Rc::clone(&sensor);
+    panel.borrow_mut().celsius += 1;
+    recorder.borrow_mut().celsius -= 1;
+    (panel.borrow().celsius, recorder.borrow().celsius)
+}
+'''
+
+constraints = ["no-clone", "max-lines=40"]
+hints = ["错误出在第二次绑定：值已经被 move 走了。所有权的句柄可以不止一个——什么指针专门干这个？", "Rc 是只读共享；要在共享下修改，内层包一层 RefCell。", "Rc::clone(&sensor) 建新句柄；panel.borrow_mut() 修正读数。"]
+
+[review_hints]
+root_cause = [
+    "同一份数据要被多个所有者共享用 Rc（引用计数）；Rc 只提供共享只读，要在共享下修改需要把内层包进 RefCell 获得内部可变性",
+    "Rc::clone 只增加引用计数（不是深拷贝），两个句柄指向同一个 Sensor——一处修正另一处可见",
+]
+misconceptions = [
+    "以为 Rc 本身可以可变借用修改内部值（Rc<T> 只提供共享只读）",
+    "以为给 Sensor 实现 Copy 或 clone 出两份就能修（那不是共享，读数不再一致）",
+    "以为 RefCell 的 borrow 与普通借用规则相同（运行时借用标志冲突会 panic）",
+]
