@@ -133,7 +133,7 @@ pub struct RunResult {
 /// Compile the exercise with `rustc --test` and run its test binary.
 /// Prints rustc stderr / test output as-is.
 pub fn compile_and_run(ex: &Exercise) -> RunResult {
-    let tmp = format!("/tmp/my_rustlings_{}", ex.name);
+    let tmp = format!("/tmp/rustlings-adaptive_{}", ex.name);
     let _ = fs::remove_file(&tmp);
     let depinfo = format!("{tmp}.d");
     let _ = fs::remove_file(&depinfo);

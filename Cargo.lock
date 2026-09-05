@@ -745,27 +745,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "my_rustlings"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "ctrlc",
- "dotenvy",
- "libc",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "toml",
- "unicode-width",
-]
-
-[[package]]
-name = "my_rustlings_exercises"
-version = "0.1.0"
-
-[[package]]
 name = "nix"
 version = "0.31.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1017,6 +996,27 @@ checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
 dependencies = [
  "semver",
 ]
+
+[[package]]
+name = "rustlings-adaptive"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "ctrlc",
+ "dotenvy",
+ "libc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+ "unicode-width",
+]
+
+[[package]]
+name = "rustlings-adaptive-exercises"
+version = "0.1.0"
 
 [[package]]
 name = "rustls"

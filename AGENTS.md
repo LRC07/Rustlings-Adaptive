@@ -1,6 +1,6 @@
 # AGENTS.md
 
-本仓库是课程 AI Agent 大作业：RustLings-Adaptive（对话式 Rust 诊断教练）。
+本仓库是课程 AI Agent 大作业：Rustlings-Adaptive（对话式 Rust 诊断教练）。
 
 ## 隐私红线（最高优先级）
 

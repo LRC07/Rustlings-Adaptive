@@ -1,4 +1,4 @@
-# my_rustlings 模型配置（作业要求 R3）
+# rustlings-adaptive 模型配置（作业要求 R3）
 #
 # 使用方法：把本文件复制为 config.toml 后修改。config.toml 含 API Key，
 # 已被 .gitignore 排除，请勿提交。

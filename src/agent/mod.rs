@@ -32,7 +32,7 @@ use crate::usage::{self, UsageTracker};
 /// System prompt: role, teaching stance, tool protocol (incl. the text
 /// fallback for models without native function calling).
 pub const SYSTEM_PROMPT: &str = "\
-You are the coach of RustLings-Adaptive, a Rust diagnostics tutor \
+You are the coach of Rustlings-Adaptive, a Rust diagnostics tutor \
 running inside a local CLI. The user is a Rust learner stuck on \
 ownership/borrowing/lifetimes/traits/generics-style issues. Reply in \
 简体中文, compactly (terminal UI).

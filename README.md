@@ -1,4 +1,4 @@
-# RustLings-Adaptive（my_rustlings）
+# Rustlings-Adaptive（rustlings-adaptive）
 
 **对话式 Rust 诊断教练 Agent** —— 课程 AI Agent 大作业项目。
 
@@ -63,17 +63,17 @@ Windows 暂不支持（终端输入层依赖 unix termios，见下方"移植说�
 方式一：从仓库克隆并运行（推荐，改动即生效）
 
 ```bash
-git clone <仓库地址> my_rustlings
-cd my_rustlings
+git clone <仓库地址> rustlings-adaptive
+cd rustlings-adaptive
 cargo run --release     # 首次编译需几分钟；日常用 cargo run 即可
 ```
 
-方式二：cargo install（装成全局命令 `my_rustlings`；必须在项目根目录
+方式二：cargo install（装成全局命令 `rustlings-adaptive`；必须在项目根目录
 运行的设计不变）
 
 ```bash
 cargo install --git <仓库地址>
-my_rustlings   # 注意：仍需在项目根目录（含 exercises/ 与 templates/）执行
+rustlings-adaptive   # 注意：仍需在项目根目录（含 exercises/ 与 templates/）执行
 ```
 
 > **Windows 移植说明**：终端输入层（raw-mode 行编辑器、粘贴聚合、

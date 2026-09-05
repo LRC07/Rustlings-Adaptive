@@ -345,7 +345,7 @@ fn print_banner(
     if render::ansi_enabled() && cfg.ui.mode_view() {
         clear_viewport();
     }
-    println!("{}", render::cyan("  欢迎使用 my_rustlings —— 对话式 Rust 诊断教练"));
+    println!("{}", render::cyan("  欢迎使用 Rustlings-Adaptive —— 对话式 Rust 诊断教练"));
     println!(
         "  模型：{} ｜ /help 查看全部命令",
         if has_key { cfg.model.as_str() } else { "未配置（/config 填 API Key）" }

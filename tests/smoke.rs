@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::io::Write;
 
 fn run_repl(input: &str) -> String {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_my_rustlings"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rustlings-adaptive"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -25,7 +25,7 @@ fn run_repl(input: &str) -> String {
 #[test]
 fn repl_offline_pages_render() {
     let out = run_repl("/help\n/topics\n/usage\n/exit\n");
-    assert!(out.contains("欢迎使用 my_rustlings"), "banner missing: {out}");
+    assert!(out.contains("欢迎使用 Rustlings-Adaptive"), "banner missing: {out}");
     assert!(out.contains("对话：直接输入问题"), "help missing");
     assert!(out.contains("概念图谱"), "topics page missing");
     assert!(out.contains("用量与花费"), "usage page missing");
