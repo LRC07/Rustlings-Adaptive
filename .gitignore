@@ -16,3 +16,9 @@ rustlings_official/
 
 # Course OJ practice pages (user-provided material)
 /practice/
+
+# Dev-process materials (kept local; design-doc PDF & AI history go to
+# the course platform, not the repo — see assignment deliverables)
+/agent/
+/docs/
+/AGENTS.md

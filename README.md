@@ -1,66 +1,40 @@
-# Rustlings-Adaptive（rustlings-adaptive）
+# Rustlings-Adaptive
 
-**对话式 Rust 诊断教练 Agent** —— 课程 AI Agent 大作业项目。
+**对话式 Rust 诊断教练** —— 把 rustlings 式"填空小练习"当作对话里的即时诊断工具：
 
-把 rustlings 式"填空小练习"作为对话中的即时诊断工具：用户提问/贴报错 →
-Agent 解释并锚定知识点（细分概念图谱 + rustc 错误码双轨）→ 出一道经本地
-三重校验的小片段题 → 用户做题 → 解答评审门 + 交互式复盘（原理解释、
-更优解对比）→ 归档进错误画像与错题本，定向巩固。
+你提问或贴报错 → 教练锚定错误码与知识点（必要时本地 `rustc` 编译取证）→
+生成一道经过**本地三重校验**的 10–40 行填空题 → 你在编辑器里补全 →
+**解答评审门**（静态检查 + LLM 逻辑评审 + 存疑自动加测）→ **交互式复盘**
+（原理解释校核、更优解挑战、双维度对比表）→ 归档进错误画像与错题本，
+定向巩固。
 
-核心理念（小片段主义）：把复杂场景规约到一个个 10–40 行的可控片段，
-质量易把握，便于针对性指导与统计数据。
+核心理念是"小片段主义"：把复杂场景规约到一个个 10–40 行的可控片段，
+质量容易把握，便于针对性指导与统计。
 
-## 当前开发状态
+## 功能亮点
 
-> 设计阶段已收敛，进入实现。**每完成一个里程碑更新此表。**
-> M0–M8 全部完成（2026-09-05 凌晨，M5–M8 由 AI session 自主推进，
-> 决策点清单见 `docs/复盘_M5.md` / `docs/复盘_M6.md`）。
-
-| 里程碑 | 内容 | 对应硬要求 | 状态 |
-|---|---|---|---|
-| M0 | CLI 骨架 + 8 道种子练习 + IDE 子 crate + rustc --test 跑练习 | — | ✅ 完成 |
-| M1 | 模块拆分 + LLM 接入 + 模型配置 + token 计费 | R1/R3/R6 | ✅ 完成 |
-| M2 | 验证器：rustc --json 解析 + 三重校验 + 约束静态检查 | R1 | ✅ 完成 |
-| M3 | 模板库（TOML）+ 概念图谱（concepts.toml）+ 填槽生成 | — | ✅ 完成 |
-| M4 | 对话 REPL + Agent 工具环 + 进度/打断 + 会话历史 | R2/R4/R5 | ✅ 完成 |
-| M4.2 | 界面体验打磨：视口重绘清屏策略 + 宽字符折行 + 页面化 | — | ✅ 完成 |
-| M4.3 | MD 渲染 + 会话切换/导出 + context_len 接线 + 输入层加固 | R3/R5 | ✅ 完成 |
-| M4.5a | 题目组织：index.json 元数据 + 做题界面三层分区 + fixture 化 + 对话耦合（见 docs/出题规划_M4.5.md §3） | — | ✅ 完成 |
-| M4.5b | 题目规格七条约束 + 质量门升级（首错误码匹配）+ 模板 schema v2 | — | ✅ 完成 |
-| M4.5c | 分层出题：模板改编 + 自由生成（同一质量门收口，§7.5） | — | ✅ 完成 |
-| M4.5d | 模板扩容批次一（12 主题 × 2 档 = 24 个，全轮转过三重校验）+ taxonomy 扩容 | — | ✅ 完成 |
-| M4.6 | 多模型档案：config `[[models]]` + `/model <名>` 一键切换（R3 增强）；结果页不再被清屏、列表列对齐 | R3 | ✅ 完成 |
-| M4.7 | 出题可靠性：draft max_tokens 硬限 + 修复环耗时预算 + 失败 fallback 收口 + mode 收回程序 | — | ✅ 完成 |
-| M4.8 | 活跃配置自动入册；提示分级：36 模板题面去技术提示 + hints 字段 + 做题页 [h] | — | ✅ 完成 |
-| M4.9 | 粘贴聚合：bracketed paste + 零停顿启发兜底（多行粘贴合并为一条消息）；修复转义序列参数字节漏进输入（方向键遗留 bug）与 ICRNL 致粘贴双换行 | — | ✅ 完成 |
-| M4.10 | 出题历史感知：index 感知已出模板 → 未用过优先；重复命中走变式（轮转偏移 + LLM 换值提示 + variant 带出）；无槽位且已出 → 让位 L2/L3；LLM 选模板 prompt 收紧精度判据（§6.2） | — | ✅ 完成 |
-| M4.11 | 真实端点冒烟修复：/g 路径 max_tokens cap 旁路（裸闭包忽略 call_bounded）；L2/L3 draft prompt 补 hints 要求（原缺 → 永远为空）；删 LlmClient::chat 死代码 | — | ✅ 完成 |
-| M4.12 | **思考模式接线（R3 收尾）+ 推理 token 可见化**：think_mode 三态（auto/on/off，兼容旧 bool）→ 请求体 `thinking` 参数；usage 解析 reasoning_tokens 并在 footer//usage/出题行显示；探测定案：V4 思考链不受 max_tokens 约束 | R3 | ✅ 完成 |
-| M4.13 | 推理档位实验（off 成功率~1/3；on+low 全过 = 平衡点）+ spinner 超宽折行刷屏修复 | — | ✅ 完成 |
-| M4.14 | 用户实测修复：/model 表头；`generate_exercise` 恢复受限 mode（auto/free，尊重"不用模板"的明确要求）；工具轮次耗尽强制收尾回答（不再无结论硬切）；[[models]] 档案级 think_mode/effort（三模型档位各异） | — | ✅ 完成 |
-| M4.15 | 实机三模型横评（答疑+mode=free 出题）：kimi-k3@low 最优（$0.0019/题、题面干净）、deepseek@low 可用、glm@high 自由生成全败建议改 low；GLM-5.3 档位查证修正（low/high/max 默认 max）；结果与 M5 交接入复盘 §4.8-4.10/§七 | — | ✅ 完成 |
-| M5 | 解答评审门（静态层 todo!/约束/clippy + LLM JSON 评审 + suspicious 加测 probe）+ 交互式复盘（理解校核/更优解挑战/双维度对比表/follow-up 决策）+ open-loop 注入（详见 docs/复盘_M5.md） | — | ✅ 完成 |
-
-> M4.7/M4.8/M4.10 已过真实端点冒烟（9.4 晚，$0.043）：L1 4.5s ✓、L3 修复环
-> 拒因反馈→第 2 轮通过 ✓、hints L1/L3 均产出 ✓、无 120s 网关超时；新发现
-> 该端点**忽略 max_tokens**（cap 请求发出后仍回 19.5k tok，疑为隐藏推理
-> token，详见复盘 §4.5）——分步生成的价值需重新评估。
-| M6 | 双轨画像（错误码 + 概念 SM-2）+ 错题本（/stats 页 + 主动提示 + learner_profile 工具） | R5 | ✅ 完成 |
-| M7 | 借用检查器假设实验室（`borrowlab` 工具：假设改动双向 rustc 取证 + 错误码 diff，教练解读） | — | ✅ 完成 |
-| M8 | 收尾：README 定稿、集成 smoke 测试、演示脚本、文档对齐、开销表 | — | ✅ 完成 |
-| M4.16 | 考察点精度（focus）+ 模板体系 v2——generate_exercise 加 focus 参数（三分支精度审查 + L2/L3 prompt + 遥测）；批次二 8 模板落地（44 个，含 entry★实证），覆盖矩阵见 docs/模板体系规划_v2.md | — | ✅ 完成 |
-
-关键时间节点：**9.6 公开展示**（设计文档摘要 + 项目链接，需基本功能）、
-9.8 前试用 3 位同学作品、**9.10 课堂展示**（5 分钟演示 + 提问）。
+- **对话即诊断**：贴报错或代码，教练先让本地 `rustc` 说话，再解释——
+  不臆测；还能对"如果我改成 X 会怎样"做**假设实验室**（双向编译 + 错误码 diff）。
+- **三层出题 + 单一质量门**：模板直配 → 模板改编 → 自由生成，每道题都过
+  「能编译 / 参考解全绿 / 未完成模板必失败」三重校验与约束检查；点名具体
+  手法（如 entry API）会走**考察点精准匹配**。
+- **解答评审门**：测试全绿不代表地道——todo! 残留、约束违例、clippy、
+  LLM 逻辑评审三态判定，存疑自动加测验证。
+- **交互式复盘**：解释校核（选择题/自由输入）、更优解挑战（只给方向）、
+  机器实测 + LLM 四维对比表、下一步练习决策。
+- **学习画像**：错误码计数 + 概念 SM-2 间隔复习 + 错题本；同概念反复
+  失败会收到主动提示，教练可随时查询画像定向出题。
+- **R6 计费**：每次调用按 phase（对话/出题/评审/复盘）分相记账，预算
+  到顶自动拦截。
+- **多模型**：OpenAI 兼容端点皆可（OpenAI / DeepSeek / Kimi / 本地
+  Ollama / vLLM…），`/model` 多档案一键切换，思考模式与推理强度可配。
 
 ## 安装与运行
 
-要求：**Rust 1.85+**（edition 2024，`rustup` 一行装好）、本机装有 `rustc`
-（练习用它编译运行，随 rustup 一起到位）。系统支持：**Linux**（开发与
-实测环境）、**macOS**（同为 unix，终端机制一致，预期可用、欢迎反馈）、
-Windows 暂不支持（终端输入层依赖 unix termios，见下方"移植说明"）。
-
-方式一：从仓库克隆并运行（推荐，改动即生效）
+要求：**Rust 1.85+**（edition 2024，`rustup` 一行装好，`rustc` 随之到位，
+练习用它编译运行）。系统支持：**Linux**（开发与实测环境）、**macOS**
+（同为 unix，终端机制一致，预期可用、欢迎反馈）；Windows 暂不支持
+（终端输入层依赖 unix termios，见文末"移植说明"）。
 
 ```bash
 git clone <仓库地址> rustlings-adaptive
@@ -68,204 +42,111 @@ cd rustlings-adaptive
 cargo run --release     # 首次编译需几分钟；日常用 cargo run 即可
 ```
 
-方式二：cargo install（装成全局命令 `rustlings-adaptive`；必须在项目根目录
-运行的设计不变）
+或者装成全局命令：
 
 ```bash
 cargo install --git <仓库地址>
-rustlings-adaptive   # 注意：仍需在项目根目录（含 exercises/ 与 templates/）执行
+rustlings-adaptive      # 注意：仍需在项目根目录（含 exercises/ 与 templates/）执行
 ```
 
-> **Windows 移植说明**：终端输入层（raw-mode 行编辑器、粘贴聚合、
-> Ctrl-C 打断）基于 unix termios/poll 实现。移植需要用 Windows Console
-> API 等价重写，工作量约 1-2 天并需实机调试；当前版本在 WSL 中即可
-> 完整使用（WSL 是 Linux 环境）。
+## 配置
 
-## 配置（R3/R6）
-
-模型调用需要一个 OpenAI 兼容的 endpoint 与 API Key（支持 OpenAI、DeepSeek、
-本地 Ollama / vLLM 等任意兼容服务）。三种配置方式，任选其一：
+模型调用需要一个 **OpenAI 兼容的 endpoint 与 API Key**。三种方式任选：
 
 1. **配置文件（推荐）**：`cp config.example.toml config.toml`，然后编辑
-   `endpoint` / `api_key` / `model`，按需修改价格表 `[prices]` 与预算 `[budget]`；
-   可配置多组 `[[models]]` 档案，运行中 `/model <名>` 一键切换（M4.6）；
-   **思考模式 `think_mode` + `reasoning_effort`**（M4.12）：推理型模型
-   （如 DeepSeek V4）默认开思考且思维链按输出 token 计费、不受
-   max_tokens 约束。实测：off 快但出题成功率 ~1/3；`"on"` +
-   `reasoning_effort = "low"` 全过且平均最快——推荐组合（`/config` 选 6
-   改思考模式，effort 在 config.toml 中设置）；
-2. **环境变量**：在项目根目录建 `.env`，写 `RUSTLINGS_API_KEY=sk-...`
-   （也可用 `RUSTLINGS_ENDPOINT` / `RUSTLINGS_MODEL` 覆盖对应项，
-   优先级高于 config.toml）；
-3. **程序内配置页**：运行后按 `c`，交互修改 endpoint / model / api_key /
-   预算，修改会写回 config.toml。
+   `endpoint` / `api_key` / `model`；可配置多组 `[[models]]` 档案，运行中
+   `/model <名>` 一键切换；思考模式 `think_mode`（auto/on/off）与
+   `reasoning_effort` 可按端点调优（示例文件内有实测建议）；
+2. **环境变量**：项目根目录建 `.env`，写 `RUSTLINGS_API_KEY=sk-...`
+   （也可用 `RUSTLINGS_ENDPOINT` / `RUSTLINGS_MODEL` 覆盖，优先级更高）；
+3. **程序内配置页**：运行后 `/config`，交互修改 endpoint / model /
+   api_key / 预算 / 编辑器，写回 config.toml。
 
-> 注意：`config.toml` 与 `.env` 含 API Key，已被 `.gitignore` 排除，请勿提交。
-> 预算（R6）：累计花费达到 `[budget].usd` 后，后续模型调用会被自动拦截。
+> `config.toml` 与 `.env` 含 API Key，已被 `.gitignore` 排除，请勿提交。
+> 预算：累计花费达到 `[budget].usd` 后，后续模型调用被自动拦截。
+> **未配置 Key 也能玩**：做题与离线出题（模板直配）全程可用。
 
-## 运行
+## 使用
 
-```bash
-cargo run            # 必须在项目根目录运行
-```
+启动即进入**对话 REPL**：直接输入问题 / 贴报错或代码（多行代码直接
+粘贴，自动合并为一条消息）。说"来一道 XX 的题"即可生成可开练的练习。
 
-启动即进入**对话 REPL**（M4 默认首屏）：直接输入问题 / 贴报错或代码（多行
-代码用 ``` 围栏包裹，即两行 ``` 之间的内容合为一条消息）。教练会锚定
-错误码与概念、必要时本地编译取证；说"来一道 XX 的题"即可生成可开练的
-练习并进入做题。
-
-**回复渲染（M4.3）**：教练回复按 Markdown 渲染（粗体/行内代码/标题/
-列表/引用着色，代码块保持原样），按终端宽度折行；管道输出保持源码。
-**输入加固（M4.3/M4.9）**：raw-mode 行编辑器——中文退格一次删净（按显示
-宽度擦除）、转义序列整体吞掉（M4.9 起 CSI 参数字节正确解析，方向键不再
-漏字符）、非 UTF-8 终端输入只提示不退出（修复"输入中文问题直接退出"与
-"退格要删两次"）；**粘贴聚合（M4.9）**：多行代码直接粘贴即合并为一条
-消息（bracketed paste 识别 + 无包裹终端的零停顿启发兜底），不再逐行
-触发回合；Ctrl-C 取消本行；Ctrl-D 退出。
-
-**界面模式（M4.2）**：默认**视口重绘**——每回合开始清一次屏幕视口
-（仅 `ESC[2J`，终端回滚缓冲区原样保留，随时上滚可查历史），再渲染
-页眉（会话 · 模型 · 累计花费/预算）与最近几条对话摘要（dim），窗口
-永远只呈现当前语境，不被旧输出淹没；`/ui scroll` 可切回纯滚动，
-`/clear` 手动清屏（`/clear all` 连回滚缓冲区一起清）。中文/emoji 按
-显示宽度折行，代码块内不折行。管道输出（测试/录制）自动零 ANSI。
-
-REPL 命令（斜杠命令，输错有就近提示）：
+REPL 命令：
 
 ```
-  /new 新会话  /clear 清屏  /ui 界面模式  /topics 概念图谱  /practice 做题
-  /generate 出题  /model 模型档案切换  /usage 用量  /config 配置
-  /sessions 会话轨迹  /help /exit
+/new 新会话   /clear 清屏   /ui 界面模式   /topics 概念图谱
+/practice 做题   /generate 出题   /model 模型切换   /usage 用量
+/stats 学习画像   /config 配置   /sessions 会话轨迹   /help /exit
 ```
 
-- **做题子模式**（`/practice` 或对话出题后进入；`/practice all` 连种子
-  fixtures 一起显示）：三层分区视图——**本会话**（对话产出优先且有序）、
-  **按主题**（概念图谱聚合）、**全库**（`a`）；`<数字>` 选题 / `r` 重跑 /
-  `e` 编辑（编辑器解析链：$EDITOR → $VISUAL → config `editor` → 自动探测
-  `code --wait` → vi，`/config` 可改）/ `a` **问教练**（把当前代码与状态
-  带回对话）/ `f` 反馈（太简单/合适/太难/没意义）/ `n` 下一题 /
-  `v` 全部验证（✓/✗ 着色）/ `b` 返回对话。题目元数据与做题状态统一
-  存 `exercises/generated/index.json`（M4.5a；旧 `.progress` 首次运行
-  自动迁移），单题卡片显示概念/难度/来源/**触发语境**（"为什么出这题"）
-- **Agent 工具环**：教练可调用五个本地工具——`check_code`（rustc 真实
-  诊断取证）、`generate_exercise`（M3 生成管线 + 三重校验，出题后可直接
-  开练）、`list_concepts`（概念图谱查询）、`learner_profile`（学习画像：
-  薄弱概念/SM-2 到期/高频错误码/错题本，M6）、`borrowlab`（假设实验室：
-  假设改动双向 rustc 取证 + 错误码 diff，M7）；累计花费达到预算会被拦截
-- **进度与打断（R4）**：LLM 调用/生成/本地编译显示实时 spinner（含
-  耗时与"第 n/3 轮"进度），Ctrl-C 随时打断回合回到输入提示
-- **会话历史（R5）**：每回合（用户输入 / 教练回复 / 工具调用与结果）
-  落盘 `~/.rustlings_adaptive/sessions/`，重启自动恢复上次会话；
-  `/sessions <序号>` 回看完整轨迹，`/sessions load <序号>` **切换到
-  历史会话继续对话**，`/sessions export <序号>` 导出为 Markdown 轨迹
-- `/usage`：本次会话与历史累计的调用次数 / token / 花费 / 预算余量
-  （明细持久化在 `~/.rustlings_adaptive/usage.json`，按 phase 分相）
-- `/stats`：学习画像（M6）——SM-2 到期复习、概念弱项、高频错误码、
-  错题本（`/stats wrong <概念|错误码>` 过滤）；画像数据由做题与复盘
-  信号自动积累（`~/.rustlings_adaptive/profile.json`），教练可经
-  `learner_profile` 工具查询并据此定向出题
-- `/generate [主题]`：直接出题（**M4.5 分层**：模板直配 → 模板改编 →
-  自由生成，每题过同一质量门；未配置 Key 时仅模板直配可用）；覆盖不足
-  的主题自动逐级回退，每轮被拒原因实时显示。**M4.10 历史感知**：已出过
-  的模板不再无感重发——没用过的候选优先；重复命中自动变式（换槽位值）
-  并标注；无法变式时让位改编/自由生成（离线则明确告知）
+- **做题子模式**（`/practice`）：本会话 / 按主题 / 全库三层分区；
+  `<数字>` 选题、`e` 编辑（$EDITOR / VS Code 自动探测）、`r` 运行、
+  `h` 分级提示、`a` 问教练（代码+状态带回对话）、`f` 反馈难度、
+  `v` 全部验证；通过后自动进入**评审门 + 复盘**。
+- **进度与打断**：LLM 调用/生成/编译显示实时 spinner（含轮次与耗时），
+  Ctrl-C 随时打断。
+- **会话轨迹**：每回合落盘，重启自动恢复；`/sessions <n>` 回看、
+  `load` 切换、`export` 导出 Markdown。
+- **学习画像**：`/stats` 查看 SM-2 到期复习、概念弱项、高频错误码、
+  错题本（`/stats wrong <概念|错误码>` 过滤）。
 
 ## 演示用例
 
-1. **对话诊断与计费（R1/R2/R6）**：`cargo run` → 直接输入"用一句话解释
-   什么是所有权"→ 看到回复 + "本回合: N 次调用 ｜ 输入/输出 tok ｜
-   花费 $x ｜ 累计 $y"；
-2. **工具环取证（M4）**：贴一段会报 E0382 的代码（``` 围栏多行粘贴）→
-   教练调用 `check_code` 本地编译 → 基于真实诊断解释（轨迹行
-   "· 本地编译失败（E0382）"可见）；
-3. **对话出题并开练（M3/M4/M4.5a）**：输入"出一道 E0382 相关的练习"→
-   spinner 显示"生成练习：填槽+校验（第 n/3 轮）"→ 题卡（概念/难度/
-   触发语境"为什么出这题"）→ 回车进入做题 → `e` 编辑补全 → `r` 重跑 →
-   通过后自动触发**解答评审门**：静态层（todo! 残留/约束/clippy 具名
-   lint）+ LLM 逻辑评审（clean/suggestions/suspicious 三态，suspicious
-   自动加一道探测测试再验）→ **交互式复盘**：理解校核单选题（可自由
-   输入，miss 时给正确理解）→ 更优解挑战（方向性提示，[r] 改好重评审 /
-   [s] 看参考解）→ 双维度对比表（机器实测行数/clippy/编译与测试耗时/
-   约束 + LLM 惯用性/可读性/可维护性/设计习惯四维打分与具体改法）→
-   follow-up 决策（回车把复盘结论带回对话，教练自动安排下一题/变式）；
-   卡住时按 `a` 问教练（代码+状态带回对话，教练本地编译取证后解释），
-   `b` 返回对话；
-4. **会话轨迹回看（R5）**：`/sessions` 列表 → `/sessions <序号>` 回看
-   该会话的完整轨迹（用户/教练/工具调用与结果）；重启后自动恢复上次
-   会话；
-5. **进度与打断（R4）**：出题或问答进行中观察 spinner 的实时状态与
-   耗时 → Ctrl-C 打断回合，立即回到输入提示；
-6. **预算中断（R6）**：把 config.toml 的 `[budget].usd` 改成一个比累计
-   花费小的数（或 `/config` 改）→ 再发消息 → 提示"调用被拦截"；
-7. **假设实验室（M7）**：贴一段报错代码 → 问"如果我把 X 改成 Y 会怎样"
-   → 教练调用 `borrowlab` 双向 rustc 取证 → 报告错误码增减（"消除 E0382"）
-   并解释背后的所有权规则；
-8. **学习画像（M6）**：做几道题后输入 `/stats` → SM-2 到期复习、概念弱项、
-   高频错误码、错题本；对话中问"我哪里薄弱"→ 教练调 `learner_profile`
-   并给出定向巩固建议；同概念失败 ≥2 次时做题页出现 ⚠ 主动提示；
-9. **配置切换（R3/M4.6）**：在 config.toml 里配几组 `[[models]]` 档案 →
-   `/model` 列出 → `/model fast` 一键切换（endpoint/key/model/超时/价格
-   一起生效，写回 config.toml）；或 `/config` 逐项修改；
-10. **离线出题（M3）**：未配置 Key 时 `/generate Box<dyn Error>` →
-   默认填槽 → 三重校验 → 可立即开练。
+1. **对话问答与计费**：`cargo run` → 输入"用一句话解释什么是所有权" →
+   回复 + 本回合 token/花费 footer；
+2. **工具环取证**：贴一段会报 E0382 的代码（多行直接粘贴）→ 教练本地
+   编译 → 基于真实诊断解释；
+3. **出题并开练**：输入"出一道 E0382 相关的练习" → 题卡（概念/难度/
+   触发语境）→ 回车进入做题 → `e` 编辑补全 → `r` 运行 → 通过后自动进入
+   评审门（静态 + LLM 评审）→ 复盘（理解校核 → 更优解挑战 → 对比表）；
+4. **考察点精准出题**：先聊某个具体手法（如 entry API），再说
+   "我想多练练这个" → 题目正面训练该手法；
+5. **假设实验室**：贴代码后问"如果我把它改成 &s 会怎样" → 教练双向
+   rustc 取证，报告错误码增减并解读规则；
+6. **学习画像**：做几道题后 `/stats` → 到期复习/弱项/错题本；
+   问"我哪里薄弱" → 教练查询画像给建议；
+7. **会话轨迹**：`/sessions` 列表 → `<n>` 回看完整轨迹（含工具调用）；
+8. **进度与打断**：生成中观察 spinner → Ctrl-C 打断，回到输入提示；
+9. **预算中断**：把 config.toml 的 `[budget].usd` 改小 → 再发消息 →
+   提示"调用被拦截"；
+10. **离线出题**：不配 Key 时 `/generate Box<dyn Error>` → 默认填槽 →
+    三重校验 → 可立即开练。
 
-## 目录结构
+## 项目结构
 
 ```
-agent/                 作业要求与背景（requirements.md 是硬要求 R1-R6 的出处）
-docs/                  设计文档（v3 为当前基线，v1/v2 为历史）；选题各版本
-exercises/             练习仓 + IDE-only 子 crate（rust-analyzer 分析用，cargo 不编译）；
-                       种子题在 fixtures/（开发期样例，默认不进做题列表）
-src/main.rs            薄入口
-src/cli/               交互 CLI：对话 REPL（默认首屏）、渲染/MD/输入层基建、做题子模式（三层分区+题卡）、出题入口、评审门+复盘交互（debrief，M5）
-src/agent/             Agent 环：工具注册/调度、会话轨迹落盘与回看（M4）
-src/exercise/          练习发现（fixtures 过滤）、标题解析、rustc --test 运行器、题目索引 index.json（元数据+状态，M4.5a）
-src/config/            模型配置加载（config.toml + .env 覆盖，R3）
-src/llm/               OpenAI 兼容 chat 客户端 + 多轮/tool calling + usage 解析（R1）
-src/usage/             token/费用统计、预算拦截、JSON 持久化（R6）
-src/verifier/          rustc --json 诊断解析、三重校验、测试失败解析（M2）
-src/constraints/       抽象约束静态检查：no-clone 等（M2）
-src/taxonomy/          概念图谱加载、校验（无环）、错误码反查索引（M3）
-src/template/          模板库加载（TOML）、规则过滤、{{slot}} 填充渲染（M3）
-src/generator/         三层出题（模板直配/改编/自由生成，M4.5）+ 单一质量门 + 修复环
-src/review/            解答评审门逻辑：静态层（todo!/约束/clippy）+ LLM JSON 评审 + probe（M5）
-src/profile/           双轨画像：错误码计数 + 概念 SM-2 + 错题本蒸馏（M6）
-src/borrowlab/         假设实验室：双向 rustc 取证 + 错误码 diff（M7）
-config.example.toml    配置样例（复制为 config.toml 使用；后者已 gitignore）
-templates/             手写题目模板 ×36（M3+M3.1 首批 12；M4.5d 批次一扩容 24：迭代器/Option/错误转换/模式匹配/方法接收者/Box/部分移动/遮蔽/String&str/derive/泛型运算/生命周期）
-taxonomy/              概念图谱 concepts.toml（52 节点，M3+M3.1 首批 37；M4.5d 扩容迭代器/模式匹配/智能指针/闭包/集合/模块等分支）
+src/cli/        终端交互：对话 REPL、渲染、做题子模式、评审门+复盘交互
+src/agent/      Agent 工具环（对话教练可调用本地工具）、会话轨迹
+src/generator/  三层出题管线 + 单一质量门
+src/review/     解答评审门逻辑（静态层 / LLM 评审 / 探测测试）
+src/profile/    学习画像（错误码 + 概念 SM-2 + 错题本）
+src/borrowlab/  假设实验室（双向编译取证的错误码 diff）
+src/verifier/   rustc --json 诊断解析、三重校验
+src/template/   练习模板库（TOML）加载与渲染
+src/taxonomy/   概念图谱与错误码反查
+src/llm/        OpenAI 兼容客户端
+src/exercise/   练习发现、运行、题目索引
+src/config/     模型配置加载（R3）
+src/usage/      token/费用统计与预算拦截（R6）
+templates/      手写练习模板 ×44（TOML）
+taxonomy/       概念图谱定义
+exercises/      练习仓（fixtures 为内置样例；生成的题落在 generated/）
 ```
 
-`exercises/lib.rs` 用 `#[cfg(rust_analyzer)]` 接线所有种子练习：rust-analyzer
-能全量分析，cargo 视其为空 lib，故意写残的模板不影响构建。CLI 直接用
-`rustc --test` 编译运行每个练习，与该 crate 无关。`g` 生成的练习落在
-`exercises/generated/` 并接线到 gitignored 的 `exercises/lib_generated.rs`
-（均为用户本地运行时产物，不入库）。
+## 测试
 
-## 换一个 session 继续开发
+```bash
+cargo test    # 198 个单元测试 + 2 个端到端冒烟测试
+```
 
-1. **读本文件的状态表**，确定下一个里程碑（当前：M0–M8 全部完成；余量为试用反馈修复与新 session 决策点拍板）。
-2. 读 `docs/设计文档_v3.md`，尤其 §8 的对应里程碑（目标/产出/验收/
-   提示要点）与 §8.2 交接纪律。
-3. 硬要求对照：`agent/requirements.md` §三（R1–R6）。
-4. 开发纪律：一次一个里程碑；先接口与单测后实现；每步 `cargo check`
-   绿；完成后更新本表 + git commit（`M<n>: 摘要`）。
-5. 滑期先看 v3 §8.1 砍刀预案，降级顺序已排好。
+仓库内的 fixture 测试会对每个模板的全部槽位轮转执行完整质量门
+（真实 rustc 编译 + 运行），保证题库自洽。
 
-## 文档索引
+## 已知限制
 
-| 文件 | 说明 |
-|---|---|
-| `docs/设计文档_v3.md` | **当前设计基线**（双轨锚点 / 评审门 / 交互式复盘 / 约束 / 小片段主义） |
-| `docs/出题规划_M4.5.md` | **M4.5 实施规格**（题目四象 + 七条约束 / 题目组织 / 生产与筛选 / a-d 切分） |
-| `docs/模板主题规划.md` | 模板批量扩容 backlog（批次主题表；流程以出题规划为准） |
-| `docs/模板体系规划_v2.md` | **模板体系 v2**：五讲覆盖矩阵、批次二定稿、批次三候选池（miss_log 遥测驱动）、体验基准 |
-| `docs/复盘_M0-M3.md` | 开发复盘：决策得失、踩坑记录、目标对齐自检 |
-| `docs/复盘_M4.5-M4.8.md` | 出题域成果、★超时问题证据链与候选方案、M5 入口 |
-| `docs/复盘_M5.md` | 评审门+复盘成果、实测记录、D1–D8 决策点 |
-| `docs/复盘_M6.md` | **最新交接**：画像+错题本成果、工具化>prompt 注入的架构结论、D9–D12 决策点 |
-| `docs/设计文档_v2.md` | 历史版本（对话式诊断教练定位确立） |
-| `docs/设计文档_v1.md` | 历史版本（自适应出题器初版） |
-| `docs/选题发布版_v2.md` | 已发布到网络学堂的选题帖内容 |
-| `agent/requirements.md` | 作业硬要求（R1–R6）、提交物、评分标准、时间节点 |
-| `agent/quick-start.md` | 课程给的作业流程方法论 |
+- **Windows**：终端输入层依赖 unix termios，暂不支持；WSL 中可完整使用。
+  移植需用 Windows Console API 重写输入层（约 1-2 天）。
+- **模型端点差异**：分层出题的自由生成长输出对端点吞吐敏感；慢端点
+  可调高 `llm_timeout_secs`，或 `/model` 切换更快的模型。
+- 练习代码经本地 `rustc` 编译执行，与普通本地开发等同；请勿把服务
+  暴露给不受信任的网络环境。
