@@ -18,5 +18,13 @@ mod usage;
 mod verifier;
 
 fn main() {
-    cli::run();
+    // Stdout can disappear under us (SSH drop, closed pipe, terminal
+    // window closed while a turn is streaming) — println! then panics
+    // with EIO. Catch it here so the RAII terminal guards unwind
+    // cleanly and the process exits with the usual panic code instead
+    // of tearing down mid-render.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(cli::run));
+    if result.is_err() {
+        std::process::exit(101);
+    }
 }

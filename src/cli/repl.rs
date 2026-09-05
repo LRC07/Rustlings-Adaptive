@@ -653,6 +653,12 @@ fn agent_turn(
     match outcome {
         Some(Ok(turn)) => {
             session.messages = turn.history;
+            // Persist BEFORE rendering: if stdout dies mid-render (SSH
+            // drop), the turn's messages must not be lost (9.5 实测:
+            // pty 主端关闭 → println! EIO panic → 会话丢最后一回合).
+            if let Err(e) = session.save() {
+                println!("  会话保存失败：{e:#}");
+            }
             println!();
             if let Some(text) = &turn.reply {
                 // M4.3: markdown → ANSI (fenced code kept verbatim),
@@ -687,9 +693,6 @@ fn agent_turn(
                     "  {} 之前贴的代码改动还没验证过——把改好的代码贴回来我帮你跑 check_code。",
                     render::dim("↻")
                 );
-            }
-            if let Err(e) = session.save() {
-                println!("  会话保存失败：{e:#}");
             }
 
             // Practice offer from generate_exercise (M4.5a: card with
