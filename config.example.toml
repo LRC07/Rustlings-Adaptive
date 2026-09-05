@@ -1,75 +1,69 @@
 # rustlings-adaptive 模型配置
 #
-# 使用方法：把本文件复制为 config.toml 后修改。config.toml 含 API Key，
-# 已被 .gitignore 排除，请勿提交。
+# 快速开始：
+#   1. 把本文件复制为 config.toml（已 gitignore，不会泄露 Key）
+#   2. 填好下面"必填"三项
+#   3. cargo run，开始对话
 #
-# 两种替代方式：
-#   1. .env 文件（项目根目录）：RUSTLINGS_API_KEY / RUSTLINGS_ENDPOINT /
-#      RUSTLINGS_MODEL —— 环境变量优先级高于本文件；
-#   2. 运行程序后在主菜单按 [c] 进入配置页交互修改（写回 config.toml）。
+# 也可以用 .env（RUSTLINGS_API_KEY / RUSTLINGS_ENDPOINT / RUSTLINGS_MODEL，
+# 优先级更高），或运行后 /config 交互修改。
 
-# OpenAI 兼容 endpoint（以 /v1 结尾；本地模型示例：http://localhost:11434/v1）
+# ---- 必填：任意 OpenAI 兼容端点（OpenAI / DeepSeek / Kimi / Ollama / vLLM…）----
+
 endpoint = "https://api.openai.com/v1"
 
-# API Key（留空则尝试读环境变量 RUSTLINGS_API_KEY）
 api_key = ""
 
-# 模型名
 model = "gpt-4o-mini"
 
-# 上下文长度（tokens；预留字段，后续版本用于上下文管理）
-context_len = 128000
+# ---- 可选：都有合理默认，通常不用动 ----
 
-# 每次模型请求的超时秒数。慢端点/长输出（分层出题的自由生成）
-# 可调高；缺省 480。
+# 上下文窗口（tokens）
+# context_len = 128000
+
+# 每次请求超时秒数（默认 480）；出题的长输出在慢端点上可调高
 # llm_timeout_secs = 480
 
-# 思考模式。推理型模型（如 DeepSeek V4 系列）默认开思考
-# 且思维链按输出 token 计费、不受 max_tokens 约束——auto 时每次调用都在
-# 悄悄烧推理 token。off 可立刻数倍降低成本与延迟，质量由本地质量门兜底。
-#   "auto" = 不发送参数，沿用端点默认（兼容旧值 false）
-#   "on"   = 强制开思考（兼容旧值 true）
-#   "off"  = 强制关思考
-think_mode = "auto"
-
-# 推理强度（仅思考开启时有效）：low / high / max（缺省=端点默认 high）。
-# 实测参考：off 快但成功率低；"on" + "low" 是质量与成本的平衡点。
+# 思考模式与推理强度——质量与时间的权衡：越强越慢、越贵。
+#   think_mode        auto = 沿用端点默认（拿不准就用它）
+#                     on   = 强制开思考（解释更深，适合答疑）
+#                     off  = 强制关（最快，正确性由本地质量门兜底）
+#   reasoning_effort  low / high / max（仅思考开启时有效）
+# 建议先保持 auto 起步，嫌慢或贵再降档。
+# think_mode = "auto"
 # reasoning_effort = "low"
 
-# 价格：每 1M token 的美元单价（费用换算用）
+# ---- 费用：照抄模型商定价页，程序据此记账并在超预算时拦截 ----
+
 [prices]
-input = 0.15
-output = 0.60
+input = 0.15      # 每 1M 输入 token
+output = 0.60     # 每 1M 输出 token
 
-# 累计花费预算（USD）：达到后自动拦截后续模型调用。
-# 删除 [budget] 整段 = 不设预算。
 [budget]
-usd = 5.0
+usd = 5.0         # 累计花费达到即拦截；删掉整段 = 不设预算
 
-# 多模型档案：配置多组 endpoint/key/model，运行中用
-# `/model <名>` 一键切换（写回顶层配置，立即生效）。
-#   * api_key 留空 = 沿用当前 Key；
-#   * llm_timeout_secs / prices 留空 = 沿用当前值；
-#   * /model 无参数 = 列出全部档案（* 标记当前）。
+# ---- 推荐：常用模型各配一个档案，/model <名> 一键切换 ----
+# api_key 留空 = 沿用顶层 Key；llm_timeout_secs / prices 留空 = 沿用当前值。
+# /model 无参数 = 列出全部档案（* 标记当前）。
+
+[[models]]
+name = "openai"
+endpoint = "https://api.openai.com/v1"
+api_key = ""
+model = "gpt-4o-mini"
+
+[[models]]
+name = "local"
+endpoint = "http://localhost:11434/v1"
+model = "qwen2.5:7b"
+
+# 需要另一个云上模型时照这个样子加（示例 DeepSeek）：
 #
 # [[models]]
-# name = "fast"
+# name = "deepseek"
 # endpoint = "https://api.deepseek.com/v1"
 # api_key = "sk-..."
 # model = "deepseek-chat"
-# llm_timeout_secs = 120
-# # 按模型调推理档位（留空 = 沿用当前值）：
-# #   DeepSeek V4：thinking on/off × low/high/max（默认 on+high）
-# #   Kimi K3：恒开思考 × low/high/max（默认 max，最贵！）
-# #   GLM：on/off（无档位），reasoning_effort 对它无意义
-# # think_mode = "on"
-# # reasoning_effort = "low"
-#
 # [models.prices]
 # input = 0.27
 # output = 1.09
-#
-# [[models]]
-# name = "local"
-# endpoint = "http://localhost:11434/v1"
-# model = "qwen2.5:7b"
