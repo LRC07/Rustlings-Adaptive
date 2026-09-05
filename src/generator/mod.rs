@@ -520,6 +520,7 @@ fn log_generate_miss(paths: &Paths, topic: &Topic, focus: Option<&str>, err: &an
 }
 
 /// Tier 1: pick a template and fill its slots (the M3 pipeline).
+#[allow(clippy::too_many_arguments)]
 fn generate_matched(
     topic: &Topic,
     focus: Option<&str>,
@@ -761,6 +762,7 @@ pub const DRAFT_TIME_BUDGET: Duration = Duration::from_secs(420);
 
 /// The repair loop: prompt → parse → normalize → gate; failures (with
 /// the real rustc diagnostics) are fed back for the next round.
+#[allow(clippy::too_many_arguments)]
 fn llm_draft_loop(
     request: &str,
     focus: Option<&str>,
