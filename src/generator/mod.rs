@@ -1413,25 +1413,37 @@ const WIRING_HEADER: &str = "\
 //! Gitignored: references user-local generated exercises only.
 ";
 
-/// Append an IDE-only module entry for `module` to the generated
-/// exercises wiring file (idempotent). rust-analyzer then analyzes the
-/// generated exercise; cargo never compiles it (cfg-gated).
+/// Rebuild the IDE-only wiring file from the `category` directory
+/// (self-healing): every `*.rs` under `exercises/<category>/` gets a
+/// `#[cfg(rust_analyzer)] #[path] mod` block, sorted by module name.
+/// Files deleted out-of-band drop out automatically — the old
+/// append-only scheme accumulated stale entries whose missing files
+/// showed up as permanent E0583 red in rust-analyzer (9.5 试用发现).
 pub fn wire_lib_rs(wiring_rs: &Path, module: &str, category: &str) -> Result<()> {
-    let mut content = fs::read_to_string(wiring_rs).unwrap_or_default();
-    if content.is_empty() {
-        content.push_str(WIRING_HEADER);
-        content.push('\n');
+    let dir = wiring_rs
+        .parent()
+        .with_context(|| format!("wiring 文件 {} 没有父目录", wiring_rs.display()))?
+        .join(category);
+
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .with_context(|| format!("读取 {} 失败", dir.display()))?
+        .flatten()
+        .filter(|e| e.path().extension().and_then(|e| e.to_str()) == Some("rs"))
+        .filter_map(|e| e.path().file_stem().and_then(|s| s.to_str().map(str::to_string)))
+        .collect();
+    if !names.iter().any(|n| n == module) {
+        names.push(module.to_string());
     }
-    let marker = format!("mod {module};");
-    if content.lines().any(|l| l.trim() == marker) {
-        return Ok(());
+    names.sort();
+    names.dedup();
+
+    let mut content = String::from(WIRING_HEADER);
+    content.push('\n');
+    for name in &names {
+        content.push_str(&format!(
+            "\n#[cfg(rust_analyzer)]\n#[path = \"{category}/{name}.rs\"]\nmod {name};\n"
+        ));
     }
-    if !content.ends_with('\n') {
-        content.push('\n');
-    }
-    content.push_str(&format!(
-        "\n#[cfg(rust_analyzer)]\n#[path = \"{category}/{module}.rs\"]\nmod {module};\n"
-    ));
     fs::write(wiring_rs, content)
         .with_context(|| format!("写入 {} 失败", wiring_rs.display()))
 }
@@ -1974,15 +1986,33 @@ fn add(a: i32, b: i32) -> i32 {
     }
 
     #[test]
-    fn wire_lib_rs_is_idempotent() {
+    fn wire_lib_rs_is_idempotent_and_prunes_dead_entries() {
         let fx = Fixture::new();
         let paths = fx.paths();
-        wire_lib_rs(&paths.wiring_rs, "thing", OUT_CATEGORY).unwrap();
-        let once = fs::read_to_string(&paths.wiring_rs).unwrap();
-        wire_lib_rs(&paths.wiring_rs, "thing", OUT_CATEGORY).unwrap();
-        let twice = fs::read_to_string(&paths.wiring_rs).unwrap();
-        assert_eq!(once, twice);
-        assert_eq!(once.matches("mod thing;").count(), 1);
+        let gen_dir = paths.wiring_rs.parent().unwrap().join(OUT_CATEGORY);
+        fs::create_dir_all(&gen_dir).unwrap();
+        fs::write(gen_dir.join("live.rs"), "// 练习\n").unwrap();
+
+        // Pre-existing wiring with a STALE entry (file deleted out-of-band)
+        // must be pruned on rebuild; the live module must survive.
+        fs::write(
+            &paths.wiring_rs,
+            concat!(
+                "//! old header\n",
+                "\n#[cfg(rust_analyzer)]\n#[path = \"generated/dead.rs\"]\nmod dead;\n"
+            ),
+        )
+        .unwrap();
+
+        wire_lib_rs(&paths.wiring_rs, "live", OUT_CATEGORY).unwrap();
+        let content = fs::read_to_string(&paths.wiring_rs).unwrap();
+        assert!(content.contains("mod live;"), "{content}");
+        assert!(!content.contains("mod dead;"), "stale entry pruned: {content}");
+        assert!(content.contains("Auto-generated exercise wiring"), "header kept: {content}");
+
+        // Idempotent: rewriting changes nothing (module list is sorted).
+        wire_lib_rs(&paths.wiring_rs, "live", OUT_CATEGORY).unwrap();
+        assert_eq!(fs::read_to_string(&paths.wiring_rs).unwrap(), content);
     }
 
     #[test]
