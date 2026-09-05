@@ -64,6 +64,12 @@ pub fn tool_schemas() -> Vec<Tool> {
                         "description": "题目主题：概念 id（用 list_concepts 查询，如 borrow.move-semantics）、\
                                         rustc 错误码（如 E0382）或自由文本关键词"
                     },
+                    "focus": {
+                        "type": "string",
+                        "description": "要训练的具体手法/行为（可选，但用户点名具体技法时必填）：\
+                                        如「entry API 的 or_insert/and_modify 单次查找」、\
+                                        「unwrap_or_else 的惰性求值」。系统会保证题目正面训练它"
+                    },
                     "reason": {
                         "type": "string",
                         "description": "一句话说明为什么现在出这道题（结合对话语境，如「你贴的代码报 E0382」）；\
@@ -322,6 +328,15 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
         return Err(anyhow!("topic 不能为空"));
     }
     let topic = Topic::from_input(&topic_text);
+    // M4.16 (考察点精度): the SPECIFIC technique the learner named rides
+    // in `focus` — it steers the tier-1 pick (no_match → tiers 2/3) and
+    // the tier-2/3 draft prompts. The trigger stays user-facing.
+    let focus = args
+        .get("focus")
+        .and_then(|f| f.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     // M4.14: mode is a USER-INTENT relay, not a strategy pick — auto
     // stays the default (M4.7 decision); "free" only honours an
     // explicit no-template request, skipping tiers 1/2.
@@ -347,8 +362,9 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
         output_price: env.cfg.prices.output,
         acc: UsageAcc::default(),
     };
-    let outcome = match generator::generate_with_mode(
+    let outcome = match generator::generate_full(
         &topic,
+        focus.as_deref(),
         mode,
         &paths,
         &history,
@@ -397,6 +413,10 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| format!("对话请求：{topic_text}"));
+    let trigger = match &focus {
+        Some(f) => format!("{trigger}｜考察：{f}"),
+        None => trigger,
+    };
     let exercises_dir = env.root.join("exercises");
     if let Err(e) = crate::exercise::index::register_generated(
         &exercises_dir,

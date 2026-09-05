@@ -358,7 +358,41 @@ pub fn generate_with_history(
     llm: Option<&mut dyn LlmCaller>,
     progress: Option<&mut dyn FnMut(GenerateStage)>,
 ) -> Result<Outcome> {
-    generate_with_mode(topic, GenerateMode::Auto, paths, history, llm, progress)
+    generate_with_focus(topic, None, paths, history, llm, progress)
+}
+
+/// Focus-aware entry (考察点精度): `focus` carries the SPECIFIC
+/// technique the learner asked for ("entry API 的 or_insert/and_modify
+/// 单次查找"), while `topic` stays the domain anchor (concept id /
+/// error code / free text). When focus is present every tier treats
+/// the request as precision-sensitive: tier 1 must pick a template
+/// that trains exactly that technique (else no_match → tiers 2/3),
+/// and tiers 2/3 put it in the draft prompt.
+pub fn generate_with_focus(
+    topic: &Topic,
+    focus: Option<&str>,
+    paths: &Paths,
+    history: &GenHistory,
+    llm: Option<&mut dyn LlmCaller>,
+    progress: Option<&mut dyn FnMut(GenerateStage)>,
+) -> Result<Outcome> {
+    generate_with_mode(topic, focus, GenerateMode::Auto, paths, history, llm, progress)
+}
+
+/// Full-parameter entry for the agent tool: `mode` here is only the
+/// user-intent relay from M4.14 ("free" skips tiers 1/2 when the user
+/// explicitly asked for no-template generation); the strategy stays
+/// program-controlled otherwise.
+pub(crate) fn generate_full(
+    topic: &Topic,
+    focus: Option<&str>,
+    mode: GenerateMode,
+    paths: &Paths,
+    history: &GenHistory,
+    llm: Option<&mut dyn LlmCaller>,
+    progress: Option<&mut dyn FnMut(GenerateStage)>,
+) -> Result<Outcome> {
+    generate_with_mode(topic, focus, mode, paths, history, llm, progress)
 }
 
 /// Mode-parameterized entry — crate-internal (tests). The public
@@ -366,6 +400,7 @@ pub fn generate_with_history(
 /// coach model never pick the tier (M4.7 decision).
 pub(crate) fn generate_with_mode(
     topic: &Topic,
+    focus: Option<&str>,
     mode: GenerateMode,
     paths: &Paths,
     history: &GenHistory,
@@ -402,9 +437,23 @@ pub(crate) fn generate_with_mode(
             None => None,
         };
         stage!("选模板", 1, MAX_ATTEMPTS);
-        match generate_matched(topic, &templates, &graph, paths, history, sel_call, &mut progress) {
+        match generate_matched(
+            topic,
+            focus,
+            &templates,
+            &graph,
+            paths,
+            history,
+            sel_call,
+            &mut progress,
+        ) {
             Ok(o) => Ok(o),
             Err(tier1_err) => {
+                // Demand telemetry (§7.5 flywheel): a tier-1 miss with a
+                // focus means the library has no template training that
+                // SPECIFIC technique (or all candidates are exhausted)
+                // — batch planning reads this log.
+                log_generate_miss(paths, topic, focus, &tier1_err);
                 if matches!(mode, GenerateMode::Matched) {
                     Err(tier1_err)
                 } else {
@@ -414,11 +463,11 @@ pub(crate) fn generate_with_mode(
                     );
                 };
                 stage!("模板改编", 1, LLM_ATTEMPTS);
-                match generate_adapted(topic, &templates, &graph, paths, call, &mut progress) {
+                match generate_adapted(topic, focus, &templates, &graph, paths, call, &mut progress) {
                     Ok(o) => Ok(o),
                     Err(tier2_err) => {
                         stage!("自由生成", 1, LLM_ATTEMPTS);
-                        generate_free(topic, &graph, paths, call, &mut progress)
+                        generate_free(topic, focus, &graph, paths, call, &mut progress)
                             .map_err(|tier3_err| {
                                 anyhow!(
                                     "三层出题均失败。\n· 模板直配：{tier1_err:#}\n· 模板改编：{tier2_err:#}\n· 自由生成：{tier3_err:#}"
@@ -436,17 +485,44 @@ pub(crate) fn generate_with_mode(
         };
         if matches!(mode, GenerateMode::Adapted) {
             stage!("模板改编", 1, LLM_ATTEMPTS);
-            generate_adapted(topic, &templates, &graph, paths, call, &mut progress)
+            generate_adapted(topic, focus, &templates, &graph, paths, call, &mut progress)
         } else {
             stage!("自由生成", 1, LLM_ATTEMPTS);
-            generate_free(topic, &graph, paths, call, &mut progress)
+            generate_free(topic, focus, &graph, paths, call, &mut progress)
         }
+    }
+}
+
+/// Append a tier-1 miss to the miss log (best-effort). Two kinds:
+/// `template_no_match` (nothing trains the requested technique) and
+/// `template_exhausted` (all candidates served, no slot variation left).
+fn log_generate_miss(paths: &Paths, topic: &Topic, focus: Option<&str>, err: &anyhow::Error) {
+    let Some(path) = paths.miss_log.as_ref() else { return };
+    let kind = if format!("{err:#}").contains("都已出过") {
+        "template_exhausted"
+    } else {
+        "template_no_match"
+    };
+    let event = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "kind": kind,
+        "topic": topic.prompt_text(),
+        "focus": focus.unwrap_or_default(),
+        "error": err.to_string().chars().take(160).collect::<String>(),
+    });
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        use std::io::Write;
+        let _ = writeln!(f, "{event}");
     }
 }
 
 /// Tier 1: pick a template and fill its slots (the M3 pipeline).
 fn generate_matched(
     topic: &Topic,
+    focus: Option<&str>,
     templates: &[template::Template],
     graph: &ConceptGraph,
     paths: &Paths,
@@ -467,7 +543,7 @@ fn generate_matched(
         };
     }
 
-    let pick = choose_template(templates, graph, topic, history, sel_llm.as_deref_mut())?;
+    let pick = choose_template(templates, graph, topic, focus, history, sel_llm.as_deref_mut())?;
     let t = pick.t;
     // Variant of a previously-served template (M4.10): start the slot
     // rotation at the number of past generations so the fill — and
@@ -594,6 +670,7 @@ struct DraftResult {
 /// Tier 2: LLM rewrites a nearby template's skeleton to the user's topic.
 fn generate_adapted(
     topic: &Topic,
+    focus: Option<&str>,
     templates: &[template::Template],
     graph: &ConceptGraph,
     paths: &Paths,
@@ -603,6 +680,7 @@ fn generate_adapted(
     let base = nearest_template(templates, graph, topic)?;
     let DraftResult { draft, module_name, hints, attempts } = llm_draft_loop(
         &topic.prompt_text(),
+        focus,
         Some(base),
         graph,
         paths,
@@ -616,13 +694,14 @@ fn generate_adapted(
 /// Tier 3: LLM produces an exercise from scratch.
 fn generate_free(
     topic: &Topic,
+    focus: Option<&str>,
     graph: &ConceptGraph,
     paths: &Paths,
     call: &mut dyn LlmCaller,
     progress: &mut Option<&mut dyn FnMut(GenerateStage)>,
 ) -> Result<Outcome> {
     let DraftResult { draft, module_name, hints, attempts } =
-        llm_draft_loop(&topic.prompt_text(), None, graph, paths, call, progress, "自由生成")?;
+        llm_draft_loop(&topic.prompt_text(), focus, None, graph, paths, call, progress, "自由生成")?;
     finish_draft(paths, draft, Tier::Free, module_name, hints, attempts)
 }
 
@@ -684,6 +763,7 @@ pub const DRAFT_TIME_BUDGET: Duration = Duration::from_secs(420);
 /// the real rustc diagnostics) are fed back for the next round.
 fn llm_draft_loop(
     request: &str,
+    focus: Option<&str>,
     base: Option<&template::Template>,
     graph: &ConceptGraph,
     paths: &Paths,
@@ -713,7 +793,7 @@ fn llm_draft_loop(
             cb(GenerateStage { attempt, total_attempts: LLM_ATTEMPTS, stage: stage_label, note });
         }
 
-        let prompt = draft_prompt(request, base, &concept_ids, attempt, &last_fail);
+        let prompt = draft_prompt(request, focus, base, &concept_ids, attempt, &last_fail);
         let reply = call.call_bounded(&prompt, DRAFT_MAX_TOKENS).map_err(|e| anyhow!("LLM 调用失败：{e:#}"))?;
         if reply.finish_reason.as_deref() == Some("length") {
             last_fail = format!(
@@ -850,10 +930,11 @@ fn ensure_ban_constraints(d: &mut template::ExerciseDraft) {
     }
 }
 
-/// The draft prompt: request + rubric (spec C1–C7, compressed) + an
-/// optional reference skeleton (tier 2) + the retry feedback.
+/// The draft prompt: request + focus + rubric (spec C1–C7, compressed)
+/// + an optional reference skeleton (tier 2) + the retry feedback.
 fn draft_prompt(
     request: &str,
+    focus: Option<&str>,
     base: Option<&template::Template>,
     concept_ids: &[String],
     attempt: u32,
@@ -878,10 +959,21 @@ fn draft_prompt(
         String::new()
     };
     let ids = concept_ids.join(", ");
+    let focus_block = match focus {
+        Some(f) => format!(
+            "\n## Specific technique to train (the whole exercise must center on it)\n\
+             {f}\n\
+             The unfinished body must make the learner WRITE code that uses this exact \
+             technique; a scenario that merely shares the topic but trains something \
+             else is a failed draft.\n"
+        ),
+        None => String::new(),
+    };
     format!(
         "You are writing ONE small Rust practice exercise for a learner who already codes \
          (Python/Java/Go/C++) but is confused by Rust's ownership/borrowing/lifetimes/traits.\n\n\
-         Topic / user request: {request}\n\n\
+         Topic / user request: {request}\n\
+         {focus_block}\n\
          {skeleton}{retry}\n\
          ## Hard requirements (a local gate will REJECT the draft otherwise)\n\
          1. Single root cause: the exercise's UNFINISHED body must fail to COMPILE, and the \
@@ -933,6 +1025,7 @@ fn choose_template<'a>(
     templates: &'a [template::Template],
     graph: &ConceptGraph,
     topic: &Topic,
+    focus: Option<&str>,
     history: &GenHistory,
     llm: Option<&mut (dyn LlmCaller + '_)>,
 ) -> Result<Pick<'a>> {
@@ -944,6 +1037,17 @@ fn choose_template<'a>(
                     graph.ids().take(5).cloned().collect::<Vec<_>>().join("、")))?;
             let mut ids = BTreeSet::new();
             collect_concept_templates(graph, id, &mut ids);
+            // Precision-sensitive request (M4.16 focus): when the learner
+            // named a SPECIFIC technique, the domain's first candidate is
+            // NOT good enough — run the LLM picker with the focus so a
+            // same-domain-different-technique template is rejected
+            // (no_match → tiers 2/3). Without focus, keep the cheap path.
+            if let (Some(f), Some(call)) = (focus, llm) {
+                if let Some(p) = llm_pick_template(templates, &topic.prompt_text(), Some(f), history, call)? {
+                    return Ok(p);
+                }
+                bail!("概念「{id}」下没有训练「{f}」的模板；转为改编/自由生成");
+            }
             match pick_candidate(templates, &ids, history) {
                 Some(p) => Ok(p),
                 None if ids.is_empty() => {
@@ -966,6 +1070,12 @@ fn choose_template<'a>(
             for c in &concepts {
                 collect_concept_templates(graph, c, &mut ids);
             }
+            if let (Some(f), Some(call)) = (focus, llm) {
+                if let Some(p) = llm_pick_template(templates, &topic.prompt_text(), Some(f), history, call)? {
+                    return Ok(p);
+                }
+                bail!("错误码 {code} 相关模板没有训练「{f}」的；转为改编/自由生成");
+            }
             match pick_candidate(templates, &ids, history) {
                 Some(p) => Ok(p),
                 None if ids.is_empty() => {
@@ -980,10 +1090,16 @@ fn choose_template<'a>(
         Topic::FreeText(text) => {
             // LLM first (understands loose Chinese requests), then a
             // deterministic keyword score over taxonomy names + titles.
-            if let Some(call) = llm
-                && let Some(p) = llm_pick_template(templates, text, history, call)?
-            {
-                return Ok(p);
+            if let Some(call) = llm {
+                if let Some(p) = llm_pick_template(templates, text, focus, history, call)? {
+                    return Ok(p);
+                }
+                if focus.is_some() {
+                    // A focused free-text request the picker rejected:
+                    // serving the keyword fallback would ignore the
+                    // learner's specific technique.
+                    bail!("没有训练「{focus:?}」的模板；转为改编/自由生成");
+                }
             }
             let ids = keyword_candidates(templates, graph, text);
             pick_candidate(templates, &ids, history).ok_or_else(|| {
@@ -1077,6 +1193,7 @@ fn keyword_candidates(
 fn llm_pick_template<'a>(
     templates: &'a [template::Template],
     request: &str,
+    focus: Option<&str>,
     history: &GenHistory,
     call: &mut (dyn LlmCaller + '_),
 ) -> Result<Option<Pick<'a>>> {
@@ -1101,9 +1218,18 @@ fn llm_pick_template<'a>(
         })
         .collect::<Vec<_>>()
         .join("\n");
+    let focus_block = match focus {
+        Some(f) => format!(
+            "\n\nSpecific technique the learner wants to train: {f}\n\
+             Judge ONLY against this technique: a template that does not train \
+             exactly it is a WRONG answer even if it shares the concept domain — \
+             say no_match."
+        ),
+        None => String::new(),
+    };
     let prompt = format!(
         "You are choosing a Rust practice exercise template for a learner.\n\n\
-         User request: {request}\n\n\
+         User request: {request}{focus_block}\n\n\
          Available templates (id | title | concepts | error-codes | usage):\n{catalog}\n\n\
          Pick a template ONLY if it trains the SPECIFIC technique or behavior the request \
          asks for. A template that merely lives in the same concept domain while training \
@@ -1477,7 +1603,7 @@ fn add(a: i32, b: i32) -> i32 {
     #[test]
     fn error_code_routes_via_reverse_index() {
         let fx = Fixture::new();
-        let out = generate_with_mode(&Topic::ErrorCode("e0308".into()), GenerateMode::Auto, &fx.paths(), &GenHistory::default(), None, None).unwrap();
+        let out = generate_with_mode(&Topic::ErrorCode("e0308".into()), None, GenerateMode::Auto, &fx.paths(), &GenHistory::default(), None, None).unwrap();
         assert_eq!(out.tier, Tier::Matched { template_id: "mini-add".into() });
     }
 
@@ -1552,6 +1678,91 @@ fn add(a: i32, b: i32) -> i32 {
         assert_eq!(sanitize_module_name("---"), "ex_");
     }
 
+    // ---- focus (考察点精度, M4.16) ----
+
+    #[test]
+    fn draft_prompt_embeds_focus_block() {
+        let p = draft_prompt("collections.hashmap", Some("entry API 的 or_insert 单次查找"), None, &["test.concept".into()], 1, "");
+        assert!(p.contains("Specific technique to train"), "{p}");
+        assert!(p.contains("entry API 的 or_insert 单次查找"), "{p}");
+        let p2 = draft_prompt("test", None, None, &[], 1, "");
+        assert!(!p2.contains("Specific technique to train"), "{p2}");
+    }
+
+    #[test]
+    fn focus_concept_branch_runs_the_precision_picker() {
+        let fx = Fixture::new();
+        let paths = fx.paths();
+        // Picker sees the focus and rejects the only (domain-matching but
+        // technique-mismatched) template → tier 1 must bail → L2 kicks in.
+        let mut picker_calls = 0u32;
+        let mut call = |prompt: &str| -> Result<LlmReply> {
+            if prompt.contains("choosing a Rust practice") {
+                picker_calls += 1;
+                assert!(prompt.contains("Specific technique the learner wants to train"), "{prompt}");
+                assert!(prompt.contains("or_insert 单次查找"), "{prompt}");
+                Ok(reply(r#"{"no_match": true}"#))
+            } else {
+                Ok(reply(VALID_DRAFT_JSON))
+            }
+        };
+        let out = generate_with_focus(
+            &Topic::Concept("test.concept".into()),
+            Some("entry API 的 or_insert 单次查找"),
+            &paths,
+            &GenHistory::default(),
+            Some(&mut call),
+            None,
+        )
+        .unwrap();
+        assert_eq!(picker_calls, 1, "focus must route through the picker");
+        assert_eq!(out.tier, Tier::Adapted { base: "mini-add".into() });
+    }
+
+    #[test]
+    fn no_focus_keeps_the_cheap_path() {
+        let fx = Fixture::new();
+        let paths = fx.paths();
+        // Without focus the Concept branch must not call the picker at all.
+        let mut picker_calls = 0u32;
+        let mut call = |prompt: &str| -> Result<LlmReply> {
+            if prompt.contains("choosing a Rust practice") {
+                picker_calls += 1;
+            }
+            Ok(reply(VALID_DRAFT_JSON))
+        };
+        let out = generate(&Topic::Concept("test.concept".into()), &paths, Some(&mut call), None).unwrap();
+        assert_eq!(out.tier, Tier::Matched { template_id: "mini-add".into() });
+        assert_eq!(picker_calls, 0);
+    }
+
+    #[test]
+    fn tier1_miss_with_focus_is_logged_for_batch_planning() {
+        let fx = Fixture::new();
+        let mut paths = fx.paths();
+        let log_path = fx.root.join("miss_log.json");
+        paths.miss_log = Some(log_path.clone());
+        let mut call = |prompt: &str| -> Result<LlmReply> {
+            if prompt.contains("choosing a Rust practice") {
+                Ok(reply(r#"{"no_match": true}"#))
+            } else {
+                Ok(reply(VALID_DRAFT_JSON))
+            }
+        };
+        generate_with_focus(
+            &Topic::Concept("test.concept".into()),
+            Some("一个题库没有的手法"),
+            &paths,
+            &GenHistory::default(),
+            Some(&mut call),
+            None,
+        )
+        .unwrap();
+        let log = fs::read_to_string(&log_path).unwrap();
+        assert!(log.contains("template_no_match"), "{log}");
+        assert!(log.contains("一个题库没有的手法"), "{log}");
+    }
+
     /// A gate-passing draft JSON (compile-fails with E0308, reference
     /// passes both tests) used by the tier-2/3 e2e tests below.
     const VALID_DRAFT_JSON: &str = r##"{
@@ -1573,6 +1784,7 @@ fn add(a: i32, b: i32) -> i32 {
         let mut call = |_prompt: &str| -> Result<LlmReply> { Ok(reply(VALID_DRAFT_JSON)) };
         let out = generate_with_mode(
             &Topic::FreeText("出一道取余的题".into()),
+            None,
             GenerateMode::Free,
             &paths,
             &GenHistory::default(),
@@ -1598,6 +1810,7 @@ fn add(a: i32, b: i32) -> i32 {
         let mut call = |_prompt: &str| -> Result<LlmReply> { Ok(reply(VALID_DRAFT_JSON)) };
         let out = generate_with_mode(
             &Topic::FreeText("加法".into()),
+            None,
             GenerateMode::Adapted,
             &paths,
             &GenHistory::default(),
@@ -1623,6 +1836,7 @@ fn add(a: i32, b: i32) -> i32 {
         };
         let out = generate_with_mode(
             &Topic::FreeText("完全无关的主题词汇".into()),
+            None,
             GenerateMode::Auto,
             &paths,
             &GenHistory::default(),
@@ -1643,6 +1857,7 @@ fn add(a: i32, b: i32) -> i32 {
         let mut call = move |_prompt: &str| -> Result<LlmReply> { Ok(reply(&json)) };
         let out = generate_with_mode(
             &Topic::FreeText("任意".into()),
+            None,
             GenerateMode::Free,
             &paths,
             &GenHistory::default(),
@@ -1688,6 +1903,7 @@ fn add(a: i32, b: i32) -> i32 {
         let mut call = BoundedRecorder { rec, round: std::cell::Cell::new(0) };
         let out = generate_with_mode(
             &Topic::FreeText("取余".into()),
+            None,
             GenerateMode::Free,
             &paths,
             &GenHistory::default(),
@@ -1723,6 +1939,7 @@ fn add(a: i32, b: i32) -> i32 {
         };
         let out = generate_with_mode(
             &Topic::FreeText("取余".into()),
+            None,
             GenerateMode::Free,
             &paths,
             &GenHistory::default(),
@@ -1740,6 +1957,7 @@ fn add(a: i32, b: i32) -> i32 {
         let fx = Fixture::new();
         let err = generate_with_mode(
             &Topic::FreeText("取余".into()),
+            None,
             GenerateMode::Free,
             &fx.paths(),
             &GenHistory::default(),
@@ -2003,6 +2221,7 @@ fn add(a: i32, b: i32) -> i32 {
                 let t0 = Instant::now();
                 let result = generate_with_mode(
                     &topic,
+                    None,
                     GenerateMode::Free,
                     &paths,
                     &GenHistory::default(),
