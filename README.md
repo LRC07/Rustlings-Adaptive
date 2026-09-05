@@ -53,13 +53,33 @@ Agent 解释并锚定知识点（细分概念图谱 + rustc 错误码双轨）�
 关键时间节点：**9.6 公开展示**（设计文档摘要 + 项目链接，需基本功能）、
 9.8 前试用 3 位同学作品、**9.10 课堂展示**（5 分钟演示 + 提问）。
 
-## 编译
+## 安装与运行
 
-要求：Rust 1.85+（edition 2024），本机装有 `rustc`（练习用它编译运行）。
+要求：**Rust 1.85+**（edition 2024，`rustup` 一行装好）、本机装有 `rustc`
+（练习用它编译运行，随 rustup 一起到位）。系统支持：**Linux**（开发与
+实测环境）、**macOS**（同为 unix，终端机制一致，预期可用、欢迎反馈）、
+Windows 暂不支持（终端输入层依赖 unix termios，见下方"移植说明"）。
+
+方式一：从仓库克隆并运行（推荐，改动即生效）
 
 ```bash
-cargo build          # 或 cargo build --release
+git clone <仓库地址> my_rustlings
+cd my_rustlings
+cargo run --release     # 首次编译需几分钟；日常用 cargo run 即可
 ```
+
+方式二：cargo install（装成全局命令 `my_rustlings`；必须在项目根目录
+运行的设计不变）
+
+```bash
+cargo install --git <仓库地址>
+my_rustlings   # 注意：仍需在项目根目录（含 exercises/ 与 templates/）执行
+```
+
+> **Windows 移植说明**：终端输入层（raw-mode 行编辑器、粘贴聚合、
+> Ctrl-C 打断）基于 unix termios/poll 实现。移植需要用 Windows Console
+> API 等价重写，工作量约 1-2 天并需实机调试；当前版本在 WSL 中即可
+> 完整使用（WSL 是 Linux 环境）。
 
 ## 配置（R3/R6）
 
