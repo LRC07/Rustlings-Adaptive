@@ -24,17 +24,17 @@
   机器实测 + LLM 四维对比表、下一步练习决策。
 - **学习画像**：错误码计数 + 概念 SM-2 间隔复习 + 错题本；同概念反复
   失败会收到主动提示，教练可随时查询画像定向出题。
-- **R6 计费**：每次调用按 phase（对话/出题/评审/复盘）分相记账，预算
-  到顶自动拦截。
+- **用量与预算**：每次调用按用途（对话/出题/评审/复盘）分项记账，
+  实时展示花费，预算到顶自动拦截。
 - **多模型**：OpenAI 兼容端点皆可（OpenAI / DeepSeek / Kimi / 本地
   Ollama / vLLM…），`/model` 多档案一键切换，思考模式与推理强度可配。
 
 ## 安装与运行
 
 要求：**Rust 1.85+**（edition 2024，`rustup` 一行装好，`rustc` 随之到位，
-练习用它编译运行）。系统支持：**Linux**（开发与实测环境）、**macOS**
-（同为 unix，终端机制一致，预期可用、欢迎反馈）；Windows 暂不支持
-（终端输入层依赖 unix termios，见文末"移植说明"）。
+练习用它编译运行）。系统支持：**Linux**（主要开发与测试平台）、
+**macOS**（终端机制一致，预期可用，欢迎反馈）；Windows 暂不支持，
+可在 WSL 中完整使用（见文末"已知限制"）。
 
 ```bash
 git clone <仓库地址> rustlings-adaptive
@@ -80,7 +80,9 @@ REPL 命令：
 ```
 
 - **做题子模式**（`/practice`）：本会话 / 按主题 / 全库三层分区；
-  `<数字>` 选题、`e` 编辑（$EDITOR / VS Code 自动探测）、`r` 运行、
+  `<数字>` 选题、`e` 编辑（$EDITOR / VS Code 自动探测；VS Code 从
+  **项目根目录**打开时，练习处于 rust-analyzer 分析范围内，可实时
+  看到编译错误与补全）、`r` 运行、
   `h` 分级提示、`a` 问教练（代码+状态带回对话）、`f` 反馈难度、
   `v` 全部验证；通过后自动进入**评审门 + 复盘**。
 - **进度与打断**：LLM 调用/生成/编译显示实时 spinner（含轮次与耗时），
@@ -126,26 +128,25 @@ src/template/   练习模板库（TOML）加载与渲染
 src/taxonomy/   概念图谱与错误码反查
 src/llm/        OpenAI 兼容客户端
 src/exercise/   练习发现、运行、题目索引
-src/config/     模型配置加载（R3）
-src/usage/      token/费用统计与预算拦截（R6）
+src/config/     模型配置加载
+src/usage/      token/费用统计与预算拦截
 templates/      手写练习模板 ×44（TOML）
 taxonomy/       概念图谱定义
-exercises/      练习仓（fixtures 为内置样例；生成的题落在 generated/）
+exercises/      练习仓（内置样例题在 fixtures/；你生成的题落在 generated/）
 ```
 
 ## 测试
 
 ```bash
-cargo test    # 198 个单元测试 + 2 个端到端冒烟测试
+cargo test    # 完整测试套件（单元测试 + 端到端冒烟）
 ```
 
-仓库内的 fixture 测试会对每个模板的全部槽位轮转执行完整质量门
-（真实 rustc 编译 + 运行），保证题库自洽。
+题库自洽由测试保证：对每个练习模板的候选变体执行真实的 rustc
+编译与运行验证。
 
 ## 已知限制
 
-- **Windows**：终端输入层依赖 unix termios，暂不支持；WSL 中可完整使用。
-  移植需用 Windows Console API 重写输入层（约 1-2 天）。
+- **Windows**：终端输入层依赖 unix 专属 API，暂不支持；WSL 中可完整使用。
 - **模型端点差异**：分层出题的自由生成长输出对端点吞吐敏感；慢端点
   可调高 `llm_timeout_secs`，或 `/model` 切换更快的模型。
 - 练习代码经本地 `rustc` 编译执行，与普通本地开发等同；请勿把服务

@@ -271,6 +271,11 @@ pub fn open_editor(path: &Path, config_editor: Option<&str>) {
             path.display()
         );
         println!("  提示：等待期间敲入的按键会被缓存，回来后如有多余输出按一次回车即可。");
+        if prog.starts_with("code") || prog.starts_with("codium") {
+            println!(
+                "  提示：练习已接入 rust-analyzer。请从**项目根目录**打开的 VS Code 窗口中\n  编辑（不要用单文件窗口），即可实时看到编译错误与补全。"
+            );
+        }
     }
     let mut cmd = Command::new(prog);
     cmd.args(args).arg(path);
