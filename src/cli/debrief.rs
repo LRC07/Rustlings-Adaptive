@@ -128,6 +128,9 @@ fn build_input(
         title: meta.title.clone(),
         concepts: meta.concepts.clone(),
         body,
+        // Review sees the implementation view (no test module, no
+        // I AM NOT DONE marker) — see review::review_view.
+        user_code: review::review_view(user_code),
         anti_patterns: tpl.map(|t| t.anti_patterns.clone()).unwrap_or_default(),
         review_hints: tpl.map(|t| review::ReviewHintsSeed {
             root_cause: t.review_hints.as_ref().map(|h| h.root_cause.clone()).unwrap_or_default(),
@@ -135,7 +138,6 @@ fn build_input(
         }),
         confusion: tpl.map(|t| t.confusion.clone()),
         reference,
-        user_code: user_code.to_string(),
         constraint_specs,
         attempts: attempts_before,
     }

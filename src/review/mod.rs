@@ -178,11 +178,35 @@ impl StaticReport {
     }
 }
 
+/// Implementation-only view of a solution file: everything before the
+/// test module (`#[cfg(test)]`). The reference solution has no test
+/// module, so measuring the learner's FULL file would inflate the line
+/// count and drag test-only clippy lints / constraint hits into the
+/// comparison (9.6 手测反馈：行数把 tests 算进去了).
+pub fn impl_view(code: &str) -> &str {
+    match code.find("#[cfg(test)]") {
+        Some(i) => &code[..i],
+        None => code,
+    }
+}
+
+/// Review view of a solution file: implementation only, minus the
+/// rustlings progress marker. `// I AM NOT DONE` is a convention the
+/// learner is NOT asked to remove — it carries zero review signal and
+/// used to be scolded as "scaffolding residue" by the LLM (9.6 手测).
+pub fn review_view(code: &str) -> String {
+    let no_marker =
+        code.lines().filter(|l| !l.contains("I AM NOT DONE")).collect::<Vec<_>>().join("\n");
+    impl_view(&no_marker).trim_end().to_string()
+}
+
 /// Run the deterministic layer over the user's full solution file.
 /// `constraint_specs` are the exercise's declared constraint strings
-/// (empty = only todo!/clippy/lines are checked).
+/// (empty = only todo!/clippy/lines are checked). Measurement uses the
+/// implementation-only view (see `impl_view`).
 pub fn static_checks(code: &str, constraint_specs: &[String]) -> StaticReport {
     let parsed: Vec<Constraint> = constraint_specs.iter().filter_map(|s| Constraint::from_spec(s)).collect();
+    let code = impl_view(code);
     let violations = constraints::check(code, &parsed);
 
     let stripped = constraints::strip_line_comments(code);
@@ -675,21 +699,25 @@ pub fn machine_metrics(
             .unwrap_or(0);
         let workdir = std::env::temp_dir().join(format!("rustlings_cmp_{tag}_{nanos}"));
         let _ = std::fs::create_dir_all(&workdir);
+        // Compile & test the FULL file (tests must run); measure the
+        // implementation-only view so both sides of the comparison use
+        // the same metric scope.
         let timed = verifier::run_test_flow_timed(code, &workdir, tag);
         let _ = std::fs::remove_dir_all(&workdir);
         let (compile_ms, test_ms, passes) = match &timed {
             Ok((run, c, t)) => (*c, *t, run.test.as_ref().map(|t| t.ok).unwrap_or(false)),
             Err(_) => (0, 0, false),
         };
-        let lints = run_clippy(code).unwrap_or_default();
-        let stripped = constraints::strip_line_comments(code);
+        let impl_code = impl_view(code);
+        let lints = run_clippy(impl_code).unwrap_or_default();
+        let stripped = constraints::strip_line_comments(impl_code);
         let metrics = SideMetrics {
             effective_lines: stripped.lines().filter(|l| !l.trim().is_empty()).count(),
             clippy_count: lints.len(),
             compile_ms,
             test_ms,
             passes,
-            constraints_ok: constraints::check(code, &parsed).is_empty(),
+            constraints_ok: constraints::check(impl_code, &parsed).is_empty(),
         };
         (metrics, lints)
     };
@@ -1079,6 +1107,34 @@ mod tests {
         assert_eq!(report.violations[0].constraint, "no-clone");
         assert_eq!(report.effective_lines, 4, "comment line excluded");
         assert!(report.has_todo_residue() && report.has_constraint_violations());
+    }
+
+    #[test]
+    fn effective_lines_excludes_test_module_and_marker() {
+        // 9.6 手测反馈：the learner's file carries the template's test
+        // module and the rustlings marker; neither may inflate the
+        // metrics that are compared against the (bare) reference.
+        let code = "\
+// 场景说明注释。
+fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+// I AM NOT DONE
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn t() {
+        assert_eq!(add(1, 2), 3);
+    }
+}
+";
+        let report = static_checks(code, &[]);
+        assert_eq!(report.effective_lines, 3, "impl only: signature + body + closing brace");
+        let view = review_view(code);
+        assert!(!view.contains("I AM NOT DONE"), "marker stripped: {view}");
+        assert!(!view.contains("mod tests"), "test module stripped: {view}");
+        assert!(view.contains("fn add"), "implementation kept: {view}");
     }
 
     #[test]
