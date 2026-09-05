@@ -40,14 +40,18 @@ pub fn key_for(exercises_dir: &Path, ex_path: &Path) -> Option<String> {
 
 /// Shared status transition of a recorded run/attempt: a pass marks
 /// the exercise Passed (sticky) and clears last_error; a failure only
-/// counts up on non-Passed entries.
-fn apply_result(meta: &mut ExerciseMeta, passed: bool, first_error: Option<&str>) {
+/// counts up on non-Passed entries. `counts_failure=false` (a
+/// verification run of UNCHANGED code) confirms an existing failure
+/// without creating a new one — the ✗N marker must not grow either
+/// (9.5 回归实测：h/r 重跑两次后 [✗3]).
+fn apply_result(meta: &mut ExerciseMeta, passed: bool, first_error: Option<&str>, counts_failure: bool) {
     if passed {
         meta.status = Status::Passed;
         meta.last_error = None;
     } else if meta.status != Status::Passed {
         let times = match meta.status {
-            Status::Failed { times } => times + 1,
+            Status::Failed { times } if counts_failure => times + 1,
+            Status::Failed { times } => times,
             _ => 1,
         };
         meta.status = Status::Failed { times };
@@ -267,7 +271,7 @@ impl ExerciseIndex {
     pub fn record_attempt(&mut self, key: &str, passed: bool, first_error: Option<&str>) {
         let Some(meta) = self.entries.get_mut(key) else { return };
         meta.attempts += 1;
-        apply_result(meta, passed, first_error);
+        apply_result(meta, passed, first_error, true);
         self.save();
     }
 
@@ -279,7 +283,7 @@ impl ExerciseIndex {
     /// follow-up decision (9.5 实测反馈：一次通过的题显示"失败 7 次").
     pub fn record_run(&mut self, key: &str, passed: bool, first_error: Option<&str>) {
         let Some(meta) = self.entries.get_mut(key) else { return };
-        apply_result(meta, passed, first_error);
+        apply_result(meta, passed, first_error, false);
         self.save();
     }
 
@@ -665,12 +669,16 @@ mod tests {
             review_verdict: None,
         });
         // Verification runs of unchanged code: state transitions, but
-        // attempts never move (the "失败 7 次" regression).
+        // neither attempts nor the ✗N failure count ever move (the
+        // "失败 7 次"/"[✗3]" regressions).
         idx.record_run("generated/r.rs", false, Some("E0382"));
         assert_eq!(idx.get("generated/r.rs").unwrap().status, Status::Failed { times: 1 });
         assert_eq!(idx.get("generated/r.rs").unwrap().attempts, 0);
         idx.record_run("generated/r.rs", false, Some("E0382"));
+        assert_eq!(idx.get("generated/r.rs").unwrap().status, Status::Failed { times: 1 });
+        idx.record_run("generated/r.rs", false, Some("E0382"));
         assert_eq!(idx.get("generated/r.rs").unwrap().attempts, 0);
+        assert_eq!(idx.get("generated/r.rs").unwrap().status, Status::Failed { times: 1 });
         idx.record_run("generated/r.rs", true, None);
         assert_eq!(idx.get("generated/r.rs").unwrap().status, Status::Passed);
         assert_eq!(idx.get("generated/r.rs").unwrap().attempts, 0);
