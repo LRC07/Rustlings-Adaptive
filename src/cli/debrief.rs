@@ -741,7 +741,7 @@ fn step4_follow_up(
                 ),
             };
             Some(format!(
-                "我刚完成练习《{}》的复盘。\n· 评审判定：{verdict_cn}\n· {check}{hint_note}{fail_note}\n· 系统建议：{}\n\n{ask}",
+                "我刚完成练习《{}》的复盘。\n· 评审判定：{verdict_cn}\n· {check}{hint_note}{fail_note}\n· 系统判断：{}\n\n{ask}",
                 meta.title,
                 follow_up.label_cn(),
             ))

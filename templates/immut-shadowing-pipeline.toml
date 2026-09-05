@@ -44,8 +44,7 @@ reference = '''
 pub fn pipeline(raw: &str) -> i32 {
     let x = raw.trim();
     let x = x.parse::<i32>().unwrap_or(0);
-    let x = x * 2;
-    x
+    x * 2
 }
 '''
 

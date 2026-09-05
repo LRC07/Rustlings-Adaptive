@@ -15,6 +15,7 @@ body = '''
 //
 // TODO: 只改两个方法的接收者，函数体与 main_flow 都不动。
 //       想想：bump 要改状态，total 只读。
+#[derive(Default)]
 pub struct Counter {
     total: i32,
 }
@@ -60,6 +61,7 @@ mod tests {
 '''
 
 reference = '''
+#[derive(Default)]
 pub struct Counter {
     total: i32,
 }

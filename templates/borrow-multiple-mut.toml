@@ -49,12 +49,11 @@ mod tests {
 '''
 
 reference = '''
-fn curve(scores: &mut Vec<i32>, pass: i32) -> usize {
+fn curve(scores: &mut [i32], pass: i32) -> usize {
     let mut bumped = 0;
-    let n = scores.len();
-    for i in 0..n {
-        if scores[i] < pass {
-            scores[i] += 10;
+    for s in scores.iter_mut() {
+        if *s < pass {
+            *s += 10;
             bumped += 1;
         }
     }

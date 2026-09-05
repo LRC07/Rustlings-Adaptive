@@ -203,10 +203,20 @@ pub(crate) fn cmd_generate(
                 Err(e) => println!("  （index 登记失败：{e:#}）"),
             }
 
-            let go = read_line_or_leave("  现在开始做这道题？[Y/n] ").unwrap_or_default();
-            let go = go.to_ascii_lowercase();
-            if go == "n" || go == "no" {
-                return Some(out.path);
+            // EOF must stay conservative (don't drop into practice);
+            // skipping gets a pointer to the board (trial feedback).
+            match read_line_or_leave("  现在开始做这道题？[Y/n] ") {
+                None => {
+                    println!("  （题目已进练习库：/practice 随时可继续）");
+                    return Some(out.path);
+                }
+                Some(go) => {
+                    let go = go.to_ascii_lowercase();
+                    if go == "n" || go == "no" {
+                        println!("  （题目已进练习库：/practice 随时可继续）");
+                        return Some(out.path);
+                    }
+                }
             }
             // Path comparison uses canonicalize(): the generator's path
             // carries a "./" prefix while discover() yields plain

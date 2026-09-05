@@ -707,9 +707,16 @@ fn agent_turn(
                     println!("    触发：{t}");
                 }
                 match read_line_or_leave("  回车开始做题，输入 n 留在对话> ") {
-                    None => {}
+                    None => {
+                        // EOF（程序重启/管道结束）：offer 只出现一次，
+                        // 必须指路，否则用户不知道题在哪（试用反馈）。
+                        println!("  （题目已进「本会话」列表：/practice 随时可继续）");
+                    }
                     Some(ans) => {
                         let a = ans.trim().to_ascii_lowercase();
+                        if a == "n" || a == "no" {
+                            println!("  （题目已进「本会话」列表：/practice 随时可继续）");
+                        }
                         if a.is_empty() || a == "y" || a == "yes" || a == "是" {
                             let opts = practice::EnterOpts {
                                 include_fixtures: false,

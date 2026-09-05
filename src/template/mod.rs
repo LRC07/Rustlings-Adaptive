@@ -937,4 +937,31 @@ misconceptions = ["以为 String 赋值会深拷贝"]
         }
         let _ = std::fs::remove_dir_all(&wd);
     }
+
+    /// Reference solutions must be lint-clean (9.5 试用反馈：参考解自带
+    /// clippy lint 会被评审门如实报出，且教坏学习者)。机器可查 → 回归
+    /// 测试兜底；3 处既有违例已随本测试落地修复。
+    #[test]
+    fn repo_reference_solutions_are_clippy_clean() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let templates = load_dir(&root.join("templates")).unwrap();
+        let mut offenders: Vec<String> = Vec::new();
+        for t in &templates {
+            if !crate::review::clippy_available() {
+                eprintln!("  （clippy-driver 不可用，跳过参考解 lint 检查）");
+                return;
+            }
+            let lints = crate::review::run_clippy(&t.reference).unwrap_or_default();
+            if !lints.is_empty() {
+                let names: Vec<String> =
+                    lints.iter().map(|l| l.lint.clone()).collect();
+                offenders.push(format!("{}: {}", t.id, names.join(", ")));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "以下模板的参考解带 clippy lint:\n  {}",
+            offenders.join("\n  ")
+        );
+    }
 }
