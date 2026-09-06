@@ -263,8 +263,9 @@ pub(crate) fn after_pass(
         input.user_code = code;
     }
 
-    // Step 3: two-dimensional comparison (machine + LLM).
-    step3_comparison(deps, &input);
+    // Step 3: two-dimensional comparison (machine + LLM). M9b: data
+    // only — the rendering happens inside the debrief-theatre panel.
+    let cmp = step3_compare(deps, &input);
 
     // Step 4: follow-up decision (deterministic) + optional handback.
     let follow_up = review::decide_follow_up(&review::FollowUpInput {
@@ -290,7 +291,17 @@ pub(crate) fn after_pass(
         quality,
     );
 
-    step4_follow_up(deps, meta, &outcome, explanation_hit, last_fail, follow_up)
+    step4_follow_up(
+        deps,
+        meta,
+        &outcome,
+        explanation_hit,
+        last_fail,
+        follow_up,
+        cmp,
+        attempts_before,
+        used_hints,
+    )
 }
 
 /// Render the gate outcome (静态逐项 → LLM 评审 → probe → 最终判定).
@@ -596,15 +607,17 @@ fn step2_challenge(
 }
 
 // ---------------------------------------------------------------------------
-// Debrief Step 3: comparison table (machine + LLM, §4.3 定稿)
+// Debrief Step 3/4: comparison data + the debrief "theatre" panel
+// (machine + LLM, §4.3 定稿; M9b)
 // ---------------------------------------------------------------------------
 
-/// Step 3: measure both sides with the real toolchain, then ask the
-/// model for the four judged dimensions. Offline → machine-only table.
-fn step3_comparison(deps: &DebriefDeps, input: &review::ReviewInput) {
-    println!();
-    println!("{}", render::header("复盘 · 对比总结"));
-
+/// Step 3 data pass: measure both sides with the real toolchain and ask
+/// the model for the four judged dimensions. M9b: rendering moved into
+/// the step-4 theatre panel (`step4_follow_up`).
+fn step3_compare(
+    deps: &DebriefDeps,
+    input: &review::ReviewInput,
+) -> Option<(review::MachineComparison, Option<review::LlmComparison>, bool)> {
     let machine = {
         let input2 = input.clone();
         run_with_spinner("对比：本地实测（编译/测试/clippy）…", move |progress| {
@@ -616,7 +629,7 @@ fn step3_comparison(deps: &DebriefDeps, input: &review::ReviewInput) {
             )
         })
     };
-    let Some(machine) = machine else { return };
+    let machine = machine?;
 
     let llm_cmp: Option<review::LlmComparison> = make_caller(deps).and_then(|mut caller| {
         let input2 = input.clone();
@@ -628,27 +641,32 @@ fn step3_comparison(deps: &DebriefDeps, input: &review::ReviewInput) {
         .and_then(|r| r.ok())
     });
 
-    render_comparison(&machine, llm_cmp.as_ref(), input.reference.is_some());
+    Some((machine, llm_cmp, input.reference.is_some()))
 }
 
-fn render_comparison(m: &review::MachineComparison, llm: Option<&review::LlmComparison>, has_ref: bool) {
+/// Machine-measured rows of the comparison table.
+fn machine_rows(m: &review::MachineComparison, has_ref: bool) -> Vec<String> {
     let ref_cell = |v: String| if has_ref { v } else { "—".to_string() };
     let ok = |b: bool| if b { render::green("✓").to_string() } else { render::red("✗").to_string() };
     let dim_w = 10usize;
-
     let row = |dim: &str, user: String, reference: String| {
         let clip = |s: &str| render::truncate_display(s, 24);
-        println!(
-            "    {}  {}  {}",
+        format!(
+            "{}  {}  {}",
             render::pad_display(dim, dim_w),
             render::pad_display(&clip(&user), 26),
             render::pad_display(&clip(&reference), 26)
-        );
+        )
     };
 
-    println!("    {}  {}  {}", render::pad_display("维度", dim_w), render::pad_display("用户解", 26), render::pad_display("参考解", 26));
-    println!("    {}", render::dim(&"─".repeat(dim_w + 2 + 26 + 2 + 26)));
-    row("有效行数", m.user.effective_lines.to_string(), ref_cell(m.reference.as_ref().map(|r| r.effective_lines.to_string()).unwrap_or_default()));
+    let mut rows = vec![format!(
+        "{}  {}  {}",
+        render::pad_display("维度", dim_w),
+        render::pad_display("用户解", 26),
+        render::pad_display("参考解", 26)
+    )];
+    rows.push(render::dim(&"─".repeat(dim_w + 2 + 26 + 2 + 26)));
+    rows.push(row("有效行数", m.user.effective_lines.to_string(), ref_cell(m.reference.as_ref().map(|r| r.effective_lines.to_string()).unwrap_or_default())));
     let kinds = if m.user_clippy_kinds.is_empty() {
         "0 条".to_string()
     } else {
@@ -660,31 +678,37 @@ fn render_comparison(m: &review::MachineComparison, llm: Option<&review::LlmComp
             .collect();
         format!("{}（{}）", m.user.clippy_count, list.join("、"))
     };
-    row("clippy", kinds, ref_cell(m.reference.as_ref().map(|r| format!("{} 条", r.clippy_count)).unwrap_or_default()));
-    row("编译耗时", format!("{}ms", m.user.compile_ms), ref_cell(m.reference.as_ref().map(|r| format!("{}ms", r.compile_ms)).unwrap_or_default()));
-    row("测试耗时", format!("{}ms", m.user.test_ms), ref_cell(m.reference.as_ref().map(|r| format!("{}ms", r.test_ms)).unwrap_or_default()));
-    row("约束满足", ok(m.user.constraints_ok), ref_cell(m.reference.as_ref().map(|r| ok(r.constraints_ok)).unwrap_or_default()));
+    rows.push(row("clippy", kinds, ref_cell(m.reference.as_ref().map(|r| format!("{} 条", r.clippy_count)).unwrap_or_default())));
+    rows.push(row("编译耗时", format!("{}ms", m.user.compile_ms), ref_cell(m.reference.as_ref().map(|r| format!("{}ms", r.compile_ms)).unwrap_or_default())));
+    rows.push(row("测试耗时", format!("{}ms", m.user.test_ms), ref_cell(m.reference.as_ref().map(|r| format!("{}ms", r.test_ms)).unwrap_or_default())));
+    rows.push(row("约束满足", ok(m.user.constraints_ok), ref_cell(m.reference.as_ref().map(|r| ok(r.constraints_ok)).unwrap_or_default())));
+    rows
+}
 
-    match llm {
-        Some(c) if !c.rows.is_empty() => {
-            // List blocks instead of table cells: the notes carry the
-            // substance (短评 + 具体改法) and must not be squeezed.
-            for r in &c.rows {
-                let score = |s: Option<u8>| s.map(|n| format!("{n}/5")).unwrap_or_else(|| "?".into());
-                println!("    {}（用户 {} ｜ 参考 {}）", render::bold(dim_cn(&r.dim)), score(r.user_score), score(r.ref_score));
-                if !r.user_note.is_empty() {
-                    println!("      用户：{}", r.user_note);
-                }
-                if has_ref && !r.ref_note.is_empty() {
-                    println!("      参考：{}", r.ref_note);
-                }
-            }
-            if !c.takeaway.is_empty() {
-                println!("    点评：{}", c.takeaway);
-            }
-        }
-        _ => println!("    （LLM 维度评审不可用——未配置 Key 或输出解析失败）"),
+/// LLM four-dimension rows: list blocks (the notes carry the substance
+/// — 短评 + 具体改法 — and must not be squeezed into cells).
+fn llm_rows(llm: Option<&review::LlmComparison>, has_ref: bool) -> Vec<String> {
+    let Some(c) = llm else {
+        return vec!["（LLM 维度评审不可用——未配置 Key 或输出解析失败）".into()];
+    };
+    if c.rows.is_empty() {
+        return vec!["（LLM 维度评审不可用——未配置 Key 或输出解析失败）".into()];
     }
+    let mut rows = Vec::new();
+    for r in &c.rows {
+        let score = |s: Option<u8>| s.map(|n| format!("{n}/5")).unwrap_or_else(|| "?".into());
+        rows.push(format!("{}（用户 {} ｜ 参考 {}）", render::bold(dim_cn(&r.dim)), score(r.user_score), score(r.ref_score)));
+        if !r.user_note.is_empty() {
+            rows.push(format!("  用户：{}", r.user_note));
+        }
+        if has_ref && !r.ref_note.is_empty() {
+            rows.push(format!("  参考：{}", r.ref_note));
+        }
+    }
+    if !c.takeaway.is_empty() {
+        rows.push(format!("点评：{}", c.takeaway));
+    }
+    rows
 }
 
 fn dim_cn(dim: &str) -> &str {
@@ -704,6 +728,7 @@ fn dim_cn(dim: &str) -> &str {
 /// Step 4: deterministic follow-up decision, then offer to hand the
 /// result back to the conversation (the coach then arranges the next
 /// exercise through the history-aware generator). Some(msg) = handback.
+#[allow(clippy::too_many_arguments)]
 fn step4_follow_up(
     deps: &DebriefDeps,
     meta: &ExerciseMeta,
@@ -711,10 +736,53 @@ fn step4_follow_up(
     explanation_hit: Option<bool>,
     last_fail: Option<&str>,
     follow_up: review::FollowUp,
+    cmp: Option<(review::MachineComparison, Option<review::LlmComparison>, bool)>,
+    attempts_before: u32,
+    used_hints: bool,
 ) -> Option<String> {
     println!();
-    println!("{}", render::header("复盘 · 下一步"));
-    println!("  {}", follow_up.label_cn());
+    // ── M9b: the debrief theatre — verdict, comparison and the next
+    // step in ONE framed panel (fixed content, single screen).
+    let explanation_cell = match explanation_hit {
+        Some(true) => render::green("✓ 命中"),
+        Some(false) => render::red("✗ 未命中（已补充讲解）"),
+        None => "—（一次通过，无失败快照）".to_string(),
+    };
+    let hints_cell =
+        if used_hints { render::yellow("用了分级提示").to_string() } else { "未使用".to_string() };
+    let mut summary = vec![
+        ("最终判定".to_string(), render::bold(outcome.verdict.label_cn())),
+        ("解释校核".to_string(), explanation_cell),
+        ("分级提示".to_string(), hints_cell),
+        (
+            "尝试次数".to_string(),
+            format!("{} 次（本次复盘前）", attempts_before),
+        ),
+    ];
+    if outcome.statics.has_constraint_violations() {
+        summary.push((
+            "约束违例".to_string(),
+            render::yellow(&format!("⚠ {} 处——建议按改进项修改", outcome.statics.violations.len())),
+        ));
+    }
+    let mut sections: Vec<render::PanelSection> = Vec::new();
+    if let Some((machine, llm, has_ref)) = &cmp {
+        sections.push(render::PanelSection {
+            title: "机器实测（用户解 ｜ 参考解）".into(),
+            lines: machine_rows(machine, *has_ref),
+        });
+        sections.push(render::PanelSection {
+            title: "LLM 四维评审".into(),
+            lines: llm_rows(llm.as_ref(), *has_ref),
+        });
+    }
+    sections.push(render::PanelSection {
+        title: "下一步建议".into(),
+        lines: vec![follow_up.label_cn()],
+    });
+    for row in render::panel(&format!("复盘剧场 · 《{}》", meta.title), &summary, &sections) {
+        println!("{row}");
+    }
     println!("  [Enter] 回到对话让教练安排下一题   [n] 留在做题页   [q] 返回做题页");
 
     let ans = match read_line("复盘> ") {

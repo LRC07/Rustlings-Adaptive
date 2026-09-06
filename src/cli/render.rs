@@ -231,10 +231,29 @@ pub(crate) fn progress_bar(done: usize, total: usize, bar_width: usize) -> Strin
     format!("[{bar}] {done}/{total} ({pct}%)")
 }
 
-/// Left-align `s` in `width` display cells (CJK-aware), so table
-/// columns with mixed Chinese/ASCII line up.
+/// Display width ignoring ANSI SGR sequences (`ESC [ … m`), so columns
+/// padded from colored cells stay aligned. Plain text is unaffected.
+pub(crate) fn visible_width(s: &str) -> usize {
+    let mut w = 0usize;
+    let mut in_esc = false;
+    for c in s.chars() {
+        if in_esc {
+            if c == 'm' {
+                in_esc = false;
+            }
+        } else if c == '\x1b' {
+            in_esc = true;
+        } else {
+            w += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        }
+    }
+    w
+}
+
+/// Left-align `s` in `width` display cells (CJK-aware, ANSI-aware), so
+/// table columns with mixed Chinese/ASCII and colored cells line up.
 pub(crate) fn pad_display(s: &str, width: usize) -> String {
-    let w = s.width();
+    let w = visible_width(s);
     if w >= width {
         return s.to_string();
     }
@@ -242,18 +261,38 @@ pub(crate) fn pad_display(s: &str, width: usize) -> String {
 }
 
 /// Truncate `s` to at most `max_cells` display cells, appending `…`
-/// when anything was cut (CJK-aware). Used by the spinner so a long
+/// when anything was cut (CJK- and ANSI-aware: escape sequences don't
+/// count as width, a cut mid-sequence is dropped, and a still-active
+/// SGR style gets an explicit reset). Used by the spinner so a long
 /// status can never wrap and destroy the in-place redraw.
 pub(crate) fn truncate_display(s: &str, max_cells: usize) -> String {
     if max_cells == 0 {
         return String::new();
     }
-    if s.width() <= max_cells {
+    if visible_width(s) <= max_cells {
         return s.to_string();
     }
     let mut cells = 0usize;
     let mut out = String::new();
+    let mut in_esc = false;
+    let mut esc_start: Option<usize> = None;
+    let mut sgr_active = false;
     for c in s.chars() {
+        if in_esc {
+            out.push(c);
+            if c == 'm' {
+                in_esc = false;
+                sgr_active = true;
+                esc_start = None;
+            }
+            continue;
+        }
+        if c == '\x1b' {
+            in_esc = true;
+            esc_start = Some(out.len());
+            out.push(c);
+            continue;
+        }
         let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
         if cells + w > max_cells.saturating_sub(1) {
             break;
@@ -261,8 +300,79 @@ pub(crate) fn truncate_display(s: &str, max_cells: usize) -> String {
         cells += w;
         out.push(c);
     }
+    // A cut inside an escape sequence would leave broken bytes behind.
+    if let Some(start) = esc_start {
+        out.truncate(start);
+    }
+    if sgr_active {
+        out.push_str("\x1b[0m");
+    }
     out.push('…');
     out
+}
+
+// ---------------------------------------------------------------------------
+// Panels (M9b, docs/UI_设计规划_v1.md): boxed blocks for fixed-content
+// pages (title cards, the debrief "theatre"). Deliberately NOT used for
+// the scrolling chat — a framed chat area needs self-managed scrolling
+// and fights the terminal's native scrollback (M4.2 decision).
+//
+// Shape: double-line frame + an optional key/value summary zone (the
+// design doc's "sidebar", realized as a header grid — side columns
+// fight terminal reflow) + titled sections.
+// ---------------------------------------------------------------------------
+
+/// One titled section inside a panel.
+pub(crate) struct PanelSection {
+    pub title: String,
+    pub lines: Vec<String>,
+}
+
+/// Total width of a panel: clamp the terminal to a readable band.
+pub(crate) fn panel_width() -> usize {
+    term_width().clamp(46, 96)
+}
+
+/// Render a double-line panel as printable rows. Pure (no I/O): all
+/// rows are exactly `panel_width()` display cells wide (ANSI-aware);
+/// overlong body lines are truncated, long summary values wrap with
+/// the key column hanging.
+pub(crate) fn panel(title: &str, summary: &[(String, String)], sections: &[PanelSection]) -> Vec<String> {
+    let width = panel_width();
+    let content_w = width - 4; // "║ " + body + " ║"
+    let mut rows = Vec::new();
+
+    let fill = width.saturating_sub(5 + visible_width(title));
+    rows.push(format!("╔═ {title} {}╗", "═".repeat(fill)));
+
+    if !summary.is_empty() {
+        let kw = summary.iter().map(|(k, _)| k.width()).max().unwrap_or(0);
+        for (k, v) in summary {
+            let v_budget = content_w.saturating_sub(kw + 2);
+            for (i, piece) in wrap_line(v, v_budget.max(8)).into_iter().enumerate() {
+                let head = if i == 0 {
+                    format!("{}  ", pad_display(k, kw))
+                } else {
+                    " ".repeat(kw + 2)
+                };
+                rows.push(format!("║ {} ║", pad_display(&format!("{head}{piece}"), content_w)));
+            }
+        }
+    }
+
+    for (n, sec) in sections.iter().enumerate() {
+        if n > 0 || !summary.is_empty() {
+            rows.push(format!("║{}║", " ".repeat(width - 2)));
+        }
+        let fill = width.saturating_sub(5 + visible_width(&sec.title));
+        rows.push(format!("╠═ {} {}╣", sec.title, "═".repeat(fill)));
+        for line in &sec.lines {
+            rows.push(format!("║ {} ║", pad_display(&truncate_display(line, content_w), content_w)));
+        }
+    }
+
+    rows.push(format!("╚{}╝", "═".repeat(width - 2)));
+    rows
 }
 
 /// Nearest known command for a mistyped one (Damerau-ish Levenshtein
@@ -311,6 +421,79 @@ mod tests {
     use crate::llm::ChatMessage;
 
     // --- wrap -----------------------------------------------------------
+
+    // --- panels ---------------------------------------------------------
+
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::new();
+        let mut in_esc = false;
+        for c in s.chars() {
+            if in_esc {
+                if c == 'm' {
+                    in_esc = false;
+                }
+            } else if c == '\x1b' {
+                in_esc = true;
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn panel_rows_are_uniform_and_ansi_aware() {
+        let secs = vec![
+            PanelSection {
+                title: "机器实测".into(),
+                lines: vec![
+                    format!("{}  12", pad_display("有效行数", 10)),
+                    // Hard-coded SGR (tests run with ANSI off): proves
+                    // escape sequences don't break column math.
+                    format!("约束满足  \x1b[32m✓\x1b[0m"),
+                ],
+            },
+            PanelSection { title: "下一步".into(), lines: vec!["下一概念".into()] },
+        ];
+        let rows = panel(
+            "复盘剧场 · 《测试题》",
+            &[("判定".into(), "通过·写法地道".into()), ("解释校核".into(), "✓ 命中".into())],
+            &secs,
+        );
+        let w = panel_width();
+        for r in &rows {
+            assert_eq!(visible_width(r), w, "row not uniform: {r:?}");
+        }
+        assert!(rows[0].starts_with('╔') && rows[0].ends_with('╗'));
+        assert!(rows.last().unwrap().starts_with('╚'));
+        // Plain rows are untouched by ANSI logic.
+        assert!(strip_ansi(&rows[1]).contains("判定"));
+        // Colored body lines keep their escape sequences but still fit.
+        let colored = rows.iter().find(|r| r.contains("\x1b[32m")).expect("colored row kept");
+        assert_eq!(visible_width(colored), w);
+    }
+
+    #[test]
+    fn panel_truncates_overlong_lines_and_wraps_summary() {
+        let long = "很长很长的评语".repeat(30);
+        let secs = vec![PanelSection { title: "四维".into(), lines: vec![long.clone()] }];
+        let rows = panel("题", &[], &secs);
+        let w = panel_width();
+        for r in &rows {
+            assert_eq!(visible_width(r), w);
+        }
+        let body = rows.iter().find(|r| r.contains('…')).expect("truncation marker");
+        assert_eq!(visible_width(body), w);
+
+        // Summary values longer than the budget wrap with a hanging indent.
+        let kv = vec![("触发".into(), "长".repeat(80))];
+        let rows = panel("卡", &kv, &[]);
+        let w = panel_width();
+        assert!(rows.len() >= 4, "wrapped summary needs several rows: {rows:?}");
+        for r in &rows {
+            assert_eq!(visible_width(r), w);
+        }
+    }
 
     #[test]
     fn truncate_display_is_cjk_aware() {

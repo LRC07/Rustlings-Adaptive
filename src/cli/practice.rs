@@ -619,34 +619,44 @@ fn run_exercise(
     }
 }
 
-/// Exercise page: viewport clear + title card (before compile output).
+/// Exercise page: viewport clear + framed title card (M9b) before
+/// compile output.
 fn repaint_exercise(ex: &Exercise, meta: Option<&crate::exercise::index::ExerciseMeta>, last: Option<&exercise::RunResult>) {
     if render::ansi_enabled() {
         render::clear_viewport();
     }
-    println!("{}", render::header(&format!("《{}》", ex.title)));
-    if let Some(m) = meta {
-        let mut parts: Vec<String> = Vec::new();
-        if !m.concepts.is_empty() {
-            parts.push(format!("概念 {}", m.concepts.join("、")));
+    let summary: Vec<(String, String)> = match meta {
+        Some(m) => {
+            let mut kv: Vec<(String, String)> = Vec::new();
+            let conc =
+                if m.concepts.is_empty() { "—".to_string() } else { m.concepts.join("、") };
+            kv.push(("概念".into(), conc));
+            kv.push((
+                "难度".into(),
+                m.difficulty.as_deref().map(difficulty_cn).unwrap_or("—").to_string(),
+            ));
+            kv.push(("来源".into(), m.source.label_cn()));
+            if let Some(t) = &m.trigger {
+                kv.push(("触发".into(), t.clone()));
+            }
+            let mut st = m.status_line_cn();
+            match &m.status {
+                crate::exercise::index::Status::Passed => st = render::green(&st),
+                crate::exercise::index::Status::Failed { .. } => st = render::red(&st),
+                _ => {}
+            }
+            if let Some(code) = &m.last_error {
+                st.push_str(&format!(" ｜ 上次 {}", render::red(code)));
+            } else if let Some(code) = last.as_ref().and_then(|r| r.first_error.as_ref()) {
+                st.push_str(&format!(" ｜ 上次 {}", render::red(code)));
+            }
+            kv.push(("状态".into(), format!("{st}（{} 次尝试）", m.attempts)));
+            kv
         }
-        if let Some(d) = &m.difficulty {
-            parts.push(format!("难度 {}", difficulty_cn(d)));
-        }
-        parts.push(format!("来源 {}", m.source.label_cn()));
-        println!("  {}", parts.join(" ｜ "));
-        if let Some(t) = &m.trigger {
-            println!("  触发：{t}");
-        }
-        let mut st = format!("状态：{}（{} 次尝试）", m.status_line_cn(), m.attempts);
-        if let Some(code) = &m.last_error {
-            st.push_str(&format!(" ｜ 上次 {}", render::red(code)));
-        } else if let Some(code) = last.as_ref().and_then(|r| r.first_error.as_ref()) {
-            st.push_str(&format!(" ｜ 上次 {}", render::red(code)));
-        }
-        println!("  {st}");
-    } else {
-        println!("  {}", ex.path.display());
+        None => vec![("路径".into(), ex.path.display().to_string())],
+    };
+    for row in render::panel(&format!("《{}》", ex.title), &summary, &[]) {
+        println!("{row}");
     }
     println!();
 }
