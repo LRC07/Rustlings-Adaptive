@@ -1,83 +1,80 @@
-# rustlings-adaptive 模型配置（评测推荐版，2026-09-06）
+# rustlings-adaptive 模型配置
 #
 # ─────────────────────────────────────────────────────────────────
 # 校内同学（清华）零成本上手：
-#   1. 登录 https://easycompute.cs.tsinghua.edu.cn/login 领取免费
-#      token（全校已统一发放额度）
+#   1. 登录 https://easycompute.cs.tsinghua.edu.cn/login 领取学校
+#      发放的免费 token 额度
 #   2. 在聚合平台 https://ai.paratera.com/#/lms/api 创建 API Key
 #   3. 把 Key 粘到下面任一位置：
 #      a) 推荐：项目根目录建 .env，写一行 RUSTLINGS_API_KEY=sk-...
-#         （一处覆盖全部档案，/model 切换后依然生效）
+#         （一处覆盖全部档案，切换模型后依然生效）
 #      b) 或逐档案填 api_key = ""
 #   4. cp config.example.toml config.toml，cargo run 即可
-# 校外/其他来源：任意 OpenAI 兼容端点皆可（DeepSeek / Kimi 官方 /
+# 其他来源：任意 OpenAI 兼容端点皆可（DeepSeek / Kimi 官方 /
 # Ollama / vLLM…），把 endpoint 与模型 id 换成你自己的即可。
 # ─────────────────────────────────────────────────────────────────
 #
 # 配置概念只有一个：档案（[[models]]）。
 #   - 程序使用 active 指向的档案；/model <名> 切换 = 移动指针
-#   - [routing]（可选）把不同环节路由到不同档案，见下方说明
+#   - [routing]（可选）把不同环节交给不同模型，见下方说明
 #   - 每个模型在文件里只出现一次，没有隐藏的继承规则
 #
-# 【分场景模型结论】（12 档实测，详见项目反馈文档）
-#   对话 + 出题   → qwen38f-off（~$0.0001/回合，出题 6.6s 概念命中准；
-#                    想要更厚的讲解，把 chat 路由到 m3）
-#   评审门 + 复盘 → k3-low（唯一交互级复盘档：gate 14-32s，四维评分
-#                    最合理；约 $0.018/次，贵但值）
-#   出题备选      → glm-53f-low（E0382/E0597 命中准；E0308 会漂移）
-#   ⚠ qwen38f-off 做复盘时评审门偶发 5 分钟长尾——复盘请路由 k3-low。
+# 【不同环节需要什么样的模型】
+#   对话 / 出题：响应快、成本低——这是高频环节，快和省最重要
+#   评审 / 复盘：能力强——要能细致评判你的解法、把道理讲透，
+#                可以慢一点（每道题结束时才用一次）
+#   想要更厚的讲解：换表达更详细的模型当对话教练
 
-active = "qwen38f-off"
+active = "Qwen3.8-Flash"
 
-# 分场景路由（可选）：三个字段都可省略，省略 = 沿用 active。
+# 分场景路由（可选）：把某个环节交给哪个档案；三个字段都可省略，
+# 省略 = 沿用 active。
 [routing]
-chat = "qwen38f-off"      # 对话 / 工具环 / 假设实验室
-generate = "qwen38f-off"  # 出题（/generate 与教练的 generate_exercise）
-review = "k3-low"         # 评审门 + 复盘（解释校核/四维对比/挑战提示）
+chat = "Qwen3.8-Flash"      # 对话 / 工具环 / 假设实验室
+generate = "Qwen3.8-Flash"  # 出题
+review = "Kimi-K3"          # 评审门 + 复盘
 
-# ---- 1. 对话+出题主力：全场性价比最高 ----
+# ---- 主力：对话 + 出题（响应快、成本低，日常使用推荐）----
 [[models]]
-name = "qwen38f-off"
+name = "Qwen3.8-Flash"
 endpoint = "https://llmapi.paratera.com"
 api_key = ""                               # 建议走 .env（见顶部说明）
 model = "Qwen3.8-Flash"
 context_len = 1000000                      # 上下文窗口（tokens）
-prices = { input = 0.03, output = 0.20 }   # 每 1M token 价格（USD），按平台价格页核对
+prices = { input = 0.03, output = 0.20 }   # 每 1M token 价格（USD），请按平台价格页核对
 think_mode = "off"                         # auto = 沿用端点默认 | on | off
 # reasoning_effort = "low"                 # 仅思考开启时有效（low/high/max）
 # llm_timeout_secs = 480                   # 单次请求超时（慢端点可调高）
 # stream = true                            # 流式打字机；端点异常可设 false
 
-# ---- 2. 对话质感档：教学最厚（概念标签/假设实验提议/对比表）----
-# 想要更厚重的讲解时，把上面 [routing] 的 chat 改成 "m3"。
+# ---- 进阶：讲解更详细（想换教学更厚重的教练时用）----
 [[models]]
-name = "m3"
+name = "MiniMax-M3"
 endpoint = "https://llmapi.paratera.com"
 api_key = ""
 model = "MiniMax-M3"
 context_len = 192000
-prices = { input = 0.30, output = 1.20 }   # est. 请核对
-# MiniMax-M3 的 thinking 只有 adaptive/disabled 两档，缺省 auto 即可
+prices = { input = 0.30, output = 1.20 }   # 请按平台价格页核对
 
-# ---- 3. 评审门+复盘专用：唯一交互级复盘档 ----
+# ---- 评审 + 复盘（能力强：评判细致、讲解透彻；响应稍慢）----
 [[models]]
-name = "k3-low"
+name = "Kimi-K3"
 endpoint = "https://llmapi.paratera.com"
 api_key = ""
 model = "Kimi-K3"
 context_len = 1000000
-prices = { input = 2.82, output = 14.08 }  # 官方 ¥20/¥100 每 1M（缓存输入价程序暂未区分）
+prices = { input = 2.82, output = 14.08 }  # 请按平台价格页核对
 think_mode = "on"
 reasoning_effort = "low"
 
-# ---- 4. 出题备选：E0382/E0597 命中准（13-22s），E0308 会漂移 ----
+# ---- 备选：另一个快速的出题/对话模型（不同模型各有所长）----
 [[models]]
-name = "glm-53f-low"
+name = "GLM-5.3-Flash-2"
 endpoint = "https://llmapi.paratera.com"
 api_key = ""
 model = "GLM-5.3-Flash-2"
 context_len = 200000
-prices = { input = 0.10, output = 0.40 }   # est. 请核对
+prices = { input = 0.10, output = 0.40 }   # 请按平台价格页核对
 think_mode = "on"
 reasoning_effort = "low"
 
@@ -90,9 +87,9 @@ usd = 10.0
 # 练习编辑器（缺省自动：$EDITOR → $VISUAL → code --wait → vi）
 # editor = "code --wait"
 
-# 本地端点示例（免费但较慢，无 Key 需求，填占位即可）：
+# 本地端点示例（免费但较慢，无需真实 Key，填占位即可）：
 # [[models]]
-# name = "local"
+# name = "Ollama 本地"
 # endpoint = "http://localhost:11434/v1"
 # api_key = "ollama"
 # model = "qwen2.5:7b"
