@@ -492,8 +492,14 @@ fn print_banner(
     println!("{}", render::cyan("  欢迎使用 Rustlings-Adaptive —— 对话式 Rust 诊断教练"));
     println!(
         "  模型：{} ｜ /help 查看全部命令",
-        if has_key { cfg.model.as_str() } else { "未配置（/config 填 API Key）" }
+        if has_key { cfg.model.as_str() } else { "未配置" }
     );
+    if !has_key {
+        // A1 onboarding: the very first thing a new user hits — point
+        // straight at the wizard instead of letting them hunt for it.
+        println!("  还没有配置模型。推荐现在输入 /model new，四个问题建好第一个档案；");
+        println!("  或复制 config.example.toml 为 config.toml 手工填写（每个字段有说明）。");
+    }
     if resumed {
         println!("  已恢复上次会话 {}（{resumed_msgs} 条消息；/new 开新会话）", session.id);
     }
