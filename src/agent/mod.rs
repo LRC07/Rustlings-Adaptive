@@ -248,6 +248,10 @@ pub struct TurnOutcome {
     pub output_tokens: u64,
     pub reasoning_tokens: u64,
     pub cost_usd: f64,
+    /// M9h: at least one call in this turn was billed from a byte
+    /// estimate (endpoint streamed without a usage tail) — the footer
+    /// marks it so the numbers are not mistaken for exact (R6).
+    pub usage_estimated: bool,
 }
 
 /// How many model⇄tool round trips per user turn before bailing out.
@@ -307,6 +311,7 @@ pub fn run_turn(
     }
 
     let mut totals = tools::UsageAcc::default();
+    let mut estimated = false;
     let mut tool_notes = Vec::new();
     let mut practice = None;
     let mut reply: Option<String> = None;
@@ -333,6 +338,7 @@ pub fn run_turn(
                 output_tokens: totals.output_tokens,
                 reasoning_tokens: totals.reasoning_tokens,
                 cost_usd: totals.cost_usd,
+                usage_estimated: false,
             });
         }
 
@@ -357,6 +363,13 @@ pub fn run_turn(
                 }
             })?;
         record(env, out.usage, "chat", &mut totals);
+        estimated |= out.usage_estimated;
+        // M9h: the stream was interrupted mid-read; the usage above is
+        // the byte estimate (recorded — the caller paid for it). Abort
+        // the turn as before (partial content stays out of history).
+        if out.interrupted {
+            return Err(anyhow!("已打断"));
+        }
 
         if !out.has_tool_calls() {
             // Text-protocol fallback: a JSON {"tool": ...} directive.
@@ -439,6 +452,7 @@ pub fn run_turn(
         output_tokens: totals.output_tokens,
         reasoning_tokens: totals.reasoning_tokens,
         cost_usd: totals.cost_usd,
+        usage_estimated: estimated,
     })
 }
 
@@ -582,11 +596,11 @@ mod tests {
     use crate::llm::{ToolCall, Usage};
 
     fn reply(content: &str) -> TurnOutput {
-        TurnOutput { content: Some(content.into()), tool_calls: vec![], usage: Usage { prompt_tokens: 10, completion_tokens: 5, reasoning_tokens: 0 }, finish_reason: Some("stop".into()) }
+        TurnOutput { content: Some(content.into()), tool_calls: vec![], usage: Usage { prompt_tokens: 10, completion_tokens: 5, reasoning_tokens: 0 }, finish_reason: Some("stop".into()), interrupted: false, usage_estimated: false }
     }
 
     fn calls_output(calls: Vec<ToolCall>) -> TurnOutput {
-        TurnOutput { content: None, tool_calls: calls, usage: Usage { prompt_tokens: 10, completion_tokens: 5, reasoning_tokens: 0 }, finish_reason: Some("tool_calls".into()) }
+        TurnOutput { content: None, tool_calls: calls, usage: Usage { prompt_tokens: 10, completion_tokens: 5, reasoning_tokens: 0 }, finish_reason: Some("tool_calls".into()), interrupted: false, usage_estimated: false }
     }
 
     fn call(id: &str, name: &str, args: &str) -> ToolCall {

@@ -138,10 +138,14 @@ pub(crate) fn cmd_generate(
         let index = index::ExerciseIndex::load(&ctx.root);
         generator::GenHistory::from_index(&index)
     };
+    // M9h (level 信号): the learner profile steers L2/L3 difficulty and
+    // scenario choice; empty/offline → no block in the prompt.
+    let learner = generator::LearnerContext::from_local(&ctx.root);
     match generator::generate_with_history(
         &topic,
         &paths,
         &history,
+        Some(&learner),
         llm,
         Some(&mut |stage: generator::GenerateStage| {
             match &stage.note {

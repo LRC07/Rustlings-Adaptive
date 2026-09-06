@@ -64,7 +64,7 @@ rustlings-adaptive      # 注意：仍需在项目根目录（含 exercises/ 与
 2. **环境变量**：项目根目录建 `.env`，写 `RUSTLINGS_API_KEY=sk-...`
    （也可用 `RUSTLINGS_ENDPOINT` / `RUSTLINGS_MODEL` 覆盖，优先级更高）；
 3. **程序内配置页**：运行后 `/config`，交互修改 endpoint / model /
-   api_key / 预算 / 编辑器，修改写回当前档案。
+   api_key / 预算 / 编辑器 / 思考模式 / 流式输出，修改写回当前档案。
 
 > `config.toml` 与 `.env` 含 API Key，已被 `.gitignore` 排除，请勿提交。
 > 预算：累计花费达到 `[budget].usd` 后，后续模型调用被自动拦截。
@@ -85,7 +85,7 @@ REPL 命令：
 /new 新会话   /clear 清屏   /ui 界面模式   /topics 概念图谱
 /practice 做题   /generate 出题   /model 档案管理   /usage 用量
 /stats 学习画像   /reset 记录重置   /config 配置   /sessions 会话轨迹
-/help /exit
+/retry 重发上一条   /help /exit
 ```
 
 - **做题子模式**（`/practice`）：本会话 / 按主题 / 全库三层分区；

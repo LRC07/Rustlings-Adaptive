@@ -356,6 +356,8 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
         let index = crate::exercise::index::ExerciseIndex::load(&env.root.join("exercises"));
         generator::GenHistory::from_index(&index)
     };
+    // M9h (level 信号): learner profile steers L2/L3 drafts.
+    let learner = generator::LearnerContext::from_local(&env.root.join("exercises"));
     let mut bridge = CallerBridge {
         caller: env.caller.clone(),
         input_price: env.cfg.prices.input,
@@ -368,6 +370,7 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
         mode,
         &paths,
         &history,
+        Some(&learner),
         Some(&mut bridge),
         Some(&mut |stage: generator::GenerateStage| {
             // Round number and running cost FIRST: the spinner text is

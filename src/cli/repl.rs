@@ -101,6 +101,7 @@ pub(crate) fn run() {
         crate::exercise::index::migrate_progress(&mut index, &practice_ctx.root, &discovered);
     }
 
+    let mut last_chat: Option<String> = None; // M9h: /retry resends this
     loop {
         if agent::is_interrupted() {
             agent::reset_interrupt();
@@ -202,6 +203,23 @@ pub(crate) fn run() {
             }
             Cmd::Sessions(arg) => handle_sessions(arg.as_deref(), &mut session, &cfg, &tracker),
             Cmd::Reset => cmd_reset(&mut session, &cfg, &practice_ctx, &tracker),
+            Cmd::Retry => {
+                // M9h: one-key resend after an interrupt (demo use case 8)
+                // or a garbled turn — the user should not retype.
+                match last_chat.clone() {
+                    Some(msg) => {
+                        repaint_chat(&session, &cfg, &tracker);
+                        println!(
+                            "{} {} {}",
+                            super::render::bold("你>"),
+                            msg,
+                            super::render::dim("（重发）")
+                        );
+                        agent_turn(&mut session, &msg, &cfg, &tracker, &client, &practice_ctx, &mut open_loop_seen);
+                    }
+                    None => println!("  还没有可重发的消息——先发一条再说。"),
+                }
+            }
             Cmd::Unknown(raw) => {
                 let hint = render::suggest_command(&raw, KNOWN_COMMANDS)
                     .map(|s| format!("你是不是想用 {s}？"))
@@ -211,6 +229,7 @@ pub(crate) fn run() {
             Cmd::Chat => {
                 // View mode: fresh viewport per turn — header, dim recap
                 // of the last entries, then the echoed input.
+                last_chat = Some(line.clone());
                 repaint_chat(&session, &cfg, &tracker);
                 println!("{} {}", super::render::bold("你>"), line);
                 agent_turn(&mut session, &line, &cfg, &tracker, &client, &practice_ctx, &mut open_loop_seen);
@@ -580,13 +599,14 @@ enum Cmd<'a> {
     Config,
     Sessions(Option<String>),
     Reset,
+    Retry,
     Unknown(String),
     Chat,
 }
 
 /// Full command words offered for near-miss suggestions (M4.2).
 const KNOWN_COMMANDS: &[&str] =
-    &["new", "clear", "practice", "generate", "model", "usage", "stats", "config", "sessions", "topics", "reset", "help", "exit"];
+    &["new", "clear", "practice", "generate", "model", "usage", "stats", "config", "sessions", "topics", "reset", "retry", "help", "exit"];
 
 fn parse_command(line: &str) -> Cmd<'_> {
     if !line.starts_with('/') {
@@ -612,6 +632,7 @@ fn parse_command(line: &str) -> Cmd<'_> {
         ("config", _) | ("c", _) => Cmd::Config,
         ("sessions", a) | ("s", a) => Cmd::Sessions(a.map(str::to_string)),
         ("reset", _) => Cmd::Reset,
+        ("retry", _) => Cmd::Retry,
         (raw, _) => Cmd::Unknown(raw.to_string()),
     }
 }
@@ -638,6 +659,7 @@ fn print_help() {
     println!("    /reset      学习记录重置：会话/画像/做题状态 → 归档（练习保留）");
     println!("    /config     模型配置页（endpoint / model / api_key / 预算 / 编辑器）");
     println!("    /sessions   会话列表；/sessions <序号> 查看轨迹；clear <序号>|all 归档清理");
+    println!("    /retry      重发上一条消息（打断或答非所问后免重新输入）");
     println!("    /exit       退出");
     println!("  模型调用的累计花费达到预算上限时会被自动拦截。");
     println!();
@@ -902,7 +924,9 @@ fn agent_turn(
                     super::flush_stdin();
                     let tail = stream.finish();
                     print_out(&tail);
-                    println!("  已打断（本回合中止，已流出的内容未计入会话；后台调用完成后仍会计入用量）。");
+                    println!(
+                        "  已打断（本回合中止，已流出的内容未计入会话；被中断调用的用量已按已收内容估算入账）。"
+                    );
                     break;
                 }
             }
@@ -963,8 +987,12 @@ fn agent_turn(
                 String::new()
             };
             print!(
-                "  ─ 本回合: {} 次调用 ｜ 输入 {} tok ｜ 输出 {} tok{reasoning} ｜ ${:.6}",
-                turn.calls, turn.input_tokens, turn.output_tokens, turn.cost_usd
+                "  ─ 本回合: {} 次调用 ｜ 输入 {} tok ｜ 输出 {} tok{reasoning} ｜ ${:.6}{}",
+                turn.calls,
+                turn.input_tokens,
+                turn.output_tokens,
+                turn.cost_usd,
+                if turn.usage_estimated { "（流式估算）" } else { "" }
             );
             match cfg.budget_usd() {
                 Some(b) => println!("  ｜ 累计 ${:.4} / 预算 ${:.2}", total.cost_usd, b),
@@ -1219,7 +1247,7 @@ fn cmd_config(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
         println!("{}", render::header("模型配置"));
         let active_name = cfg.active.clone().unwrap_or_default();
         println!(
-            "  输入编号修改对应项（1..6），回车返回；修改写回当前档案「{}」",
+            "  输入编号修改对应项（1..7），回车返回；修改写回当前档案「{}」",
             render::cyan(&active_name)
         );
         println!();
@@ -1245,13 +1273,20 @@ fn cmd_config(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
                 .unwrap_or_else(|| "未设置（自动：$EDITOR → $VISUAL → code --wait → vi）".to_string())
         );
         println!(
+            "  6. 思考模式 : {}",
+            cfg.think_mode.label_cn()
+        );
+        println!(
+            "  7. 流式输出 : {}（打字机效果；端点流式异常时可关闭）",
+            if cfg.streaming { "开" } else { "关" }
+        );
+        println!(
             "  · 价格      : 输入 ${:.2}/1M ｜ 输出 ${:.2}/1M（在 config.toml 中修改）",
             cfg.prices.input, cfg.prices.output
         );
         println!(
-            "  · 上下文    : {} tokens ｜ 思考模式: {}（/config 6 可改）",
-            cfg.context_len,
-            cfg.think_mode.label_cn()
+            "  · 上下文    : {} tokens（在 config.toml 中修改）",
+            cfg.context_len
         );
         println!(
             "  · 界面      : {}（/ui view｜scroll 可切换）",
@@ -1332,6 +1367,17 @@ fn cmd_config(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
                         None => println!("  无法识别: {v}（auto / on / off）"),
                     }
                 }
+            }
+            "7" => {
+                // M9h bug3 fix: the stream switch gets a UI entry —
+                // endpoints with broken SSE support are exactly the
+                // users who cannot be expected to hand-edit TOML.
+                cfg.streaming = !cfg.streaming;
+                save_and_rebuild(cfg, client);
+                println!(
+                    "  流式输出已切换为：{}",
+                    if cfg.streaming { "开" } else { "关" }
+                );
             }
             other => println!("  未知选项: {other}"),
         }
@@ -1850,21 +1896,64 @@ fn install_ctrlc() {
 /// learner usually wants to add a question with the code (9.5 实测：
 /// 围栏结束即提交，把追问拆成两条消息，多烧一次调用). Ctrl-C/EOF
 /// cancels the whole message.
+/// Split `s` at its first fence-only line (a line whose trimmed content
+/// is exactly "```"): returns (text up to and including that line's
+/// newline, text after it). Lines like "```rust" are not fence-only.
+fn split_at_fence(s: &str) -> Option<(&str, &str)> {
+    let mut start = 0;
+    while let Some(rel) = s[start..].find("```") {
+        let at = start + rel;
+        let line_start = s[..at].rfind('\n').map(|p| p + 1).unwrap_or(0);
+        let line_end = s[at..].find('\n').map(|p| at + p + 1).unwrap_or(s.len());
+        if s[line_start..line_end].trim() == "```" {
+            return Some((&s[..line_end], &s[line_end..]));
+        }
+        start = at + 3;
+    }
+    None
+}
+
 fn read_paste() -> Option<String> {
     println!("  ─ 粘贴模式：继续粘贴代码，单独一行 ``` 结束 ─");
     let mut buf = String::new();
     loop {
         let l = read_line_or_leave("")?;
-        if l.trim() == "```" {
-            println!("  （代码已收下；可继续补充问题。输完后再按一次回车——空行即发送）");
-            loop {
-                let l = read_line_or_leave("")?;
-                if l.trim().is_empty() {
-                    return Some(buf);
-                }
-                buf.push_str(&l);
+        // A bracketed paste can carry the closing fence INSIDE it (the
+        // whole code block pasted at once, trailing ``` included) —
+        // split it off instead of silently staying in paste mode
+        // (9.6 bug4: 一次写入后无任何提示，用户以为已发送).
+        if let Some((before, after)) = split_at_fence(&l) {
+            buf.push_str(before);
+            if !before.is_empty() && !before.ends_with('\n') {
                 buf.push('\n');
             }
+            println!("  （代码已收下；可继续补充问题。输完后再按一次回车——空行即发送）");
+            return collect_supplement(buf, Some(after.to_string()));
+        }
+        if l.trim() == "```" {
+            println!("  （代码已收下；可继续补充问题。输完后再按一次回车——空行即发送）");
+            return collect_supplement(buf, None);
+        }
+        buf.push_str(&l);
+        buf.push('\n');
+    }
+}
+
+/// After the fence closes: keep reading supplement lines (the question
+/// around the code); an empty line sends. `first` is text already
+/// typed after the closing fence in the same paste (None = none).
+fn collect_supplement(mut buf: String, first: Option<String>) -> Option<String> {
+    let mut pending = first;
+    loop {
+        let l = match pending.take() {
+            Some(p) => p,
+            None => read_line_or_leave("")?,
+        };
+        if l.trim().is_empty() {
+            if buf.trim().is_empty() {
+                return None; // nothing collected after all
+            }
+            return Some(buf);
         }
         buf.push_str(&l);
         buf.push('\n');
@@ -2046,8 +2135,27 @@ mod tests {
         assert!(matches!(parse_command("/model fast"), Cmd::Model(Some("fast"))));
         assert!(matches!(parse_command("/m"), Cmd::Model(None)));
         assert!(matches!(parse_command("/helo"), Cmd::Unknown(_)));
+        assert!(matches!(parse_command("/retry"), Cmd::Retry));
         // A lone slash command word with no meaning is unknown.
         assert!(matches!(parse_command("/ "), Cmd::Unknown(_)));
+    }
+
+    #[test]
+    fn split_at_fence_finds_only_a_fence_only_line() {
+        // Whole block pasted at once: body + closing fence inside ONE
+        // paste (bug4) — the closer is split off, nothing is left behind.
+        let (before, after) = split_at_fence("fn main() {}\n```\n").unwrap();
+        assert_eq!(before, "fn main() {}\n```\n");
+        assert_eq!(after, "");
+        // Text typed after the embedded closer becomes the supplement.
+        let (_, after) = split_at_fence("code\n```\n为什么会报错？").unwrap();
+        assert_eq!(after, "为什么会报错？");
+        // "```rust" is an opener, not a closer — no split.
+        assert!(split_at_fence("```rust\nfn f() {}\n").is_none());
+        // ``` mentioned mid-line is not a fence line.
+        assert!(split_at_fence("这里讲 ``` 的用法\n").is_none());
+        // No fence at all.
+        assert!(split_at_fence("plain code\nmore code\n").is_none());
     }
 
     #[test]

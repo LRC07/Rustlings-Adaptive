@@ -28,6 +28,112 @@ pub const MAX_ATTEMPTS: u32 = 3;
 /// Category directory (under `exercises/`) for generated exercises.
 pub const OUT_CATEGORY: &str = "generated";
 
+/// Learner-profile signals steering L2/L3 draft difficulty and scenario
+/// choice (M9h, closes the M8.1 "level 信号" gap): built by the CLI /
+/// agent tool from the learner's local profile + exercise index and
+/// rendered into the draft prompt. Tier 1 stays profile-free — the
+/// pick-precision rules from M4.10/M4.16 must not be perturbed.
+#[derive(Debug, Clone, Default)]
+pub struct LearnerContext {
+    /// (concept id, fails, attempts), most failed first.
+    pub weak: Vec<(String, u32, u32)>,
+    /// SM-2 concepts whose review is due.
+    pub due: Vec<String>,
+    /// (error code, count), most frequent first.
+    pub codes: Vec<(String, u32)>,
+    /// Concepts the learner marked 太难 in feedback.
+    pub too_hard: Vec<String>,
+    /// Concepts the learner marked 太简单 in feedback.
+    pub too_easy: Vec<String>,
+}
+
+impl LearnerContext {
+    pub fn is_empty(&self) -> bool {
+        self.weak.is_empty()
+            && self.due.is_empty()
+            && self.codes.is_empty()
+            && self.too_hard.is_empty()
+            && self.too_easy.is_empty()
+    }
+
+    /// Collect from the learner's local data (`~/.rustlings_adaptive/`
+    /// profile + the exercise index's feedback marks). Never fails:
+    /// missing data → empty context (offline / fresh install).
+    pub fn from_local(exercises_dir: &Path) -> Self {
+        let mut ctx = Self::default();
+        let store = crate::profile::ProfileStore::load_or_create();
+        ctx.weak = store.profile.weakest(5);
+        ctx.due = store
+            .profile
+            .due_concepts(chrono::Utc::now())
+            .into_iter()
+            .take(5)
+            .collect();
+        ctx.codes = store.profile.top_error_codes(4);
+        let index = crate::exercise::index::ExerciseIndex::load(exercises_dir);
+        for meta in index.iter() {
+            match meta.feedback {
+                Some(crate::exercise::index::Feedback::TooHard) => {
+                    ctx.too_hard.extend(meta.concepts.iter().cloned())
+                }
+                Some(crate::exercise::index::Feedback::TooEasy) => {
+                    ctx.too_easy.extend(meta.concepts.iter().cloned())
+                }
+                _ => {}
+            }
+        }
+        for list in [&mut ctx.too_hard, &mut ctx.too_easy] {
+            list.sort();
+            list.dedup();
+            list.truncate(5);
+        }
+        ctx
+    }
+
+    /// The `## Learner profile` prompt block ("" when nothing to say).
+    pub fn prompt_block(&self) -> String {
+        if self.is_empty() {
+            return String::new();
+        }
+        let mut s =
+            String::from("\n## Learner profile (calibrate difficulty and scenario to this)\n");
+        if !self.weak.is_empty() {
+            let list = self
+                .weak
+                .iter()
+                .map(|(c, f, a)| format!("{c} ({f} fails / {a} attempts)"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            s.push_str(&format!("- Weakest concepts (most failed): {list}\n"));
+        }
+        if !self.due.is_empty() {
+            s.push_str(&format!("- Due for spaced review: {}\n", self.due.join(", ")));
+        }
+        if !self.codes.is_empty() {
+            let list =
+                self.codes.iter().map(|(c, n)| format!("{c} ×{n}")).collect::<Vec<_>>().join(", ");
+            s.push_str(&format!("- Frequent error codes: {list}\n"));
+        }
+        if !self.too_hard.is_empty() {
+            s.push_str(&format!(
+                "- The learner marked these concepts TOO HARD: {}\n",
+                self.too_hard.join(", ")
+            ));
+        }
+        if !self.too_easy.is_empty() {
+            s.push_str(&format!(
+                "- The learner marked these concepts TOO EASY: {}\n",
+                self.too_easy.join(", ")
+            ));
+        }
+        s.push_str(
+            "Aim at the learner's edge: one small step beyond what the profile says they can \
+             already do; do not re-teach what they have repeatedly passed.\n",
+        );
+        s
+    }
+}
+
 /// Progress event emitted while a generation run is in flight (M4:
 /// rendered by the CLI's spinner so long runs feel alive, R4).
 #[derive(Debug, Clone)]
@@ -382,21 +488,23 @@ pub fn generate(
     llm: Option<&mut dyn LlmCaller>,
     progress: Option<&mut dyn FnMut(GenerateStage)>,
 ) -> Result<Outcome> {
-    generate_with_history(topic, paths, &GenHistory::default(), llm, progress)
+    generate_with_history(topic, paths, &GenHistory::default(), None, llm, progress)
 }
 
 /// History-aware entry (M4.10): `history` carries which templates the
 /// learner already received (from the exercise index). Unused
 /// candidates rank first; a repeated template becomes a slot-rotated
-/// variant instead of the same question again.
+/// variant instead of the same question again. `learner` (M9h) carries
+/// the learner-profile signals for tiers 2/3 (`None` = offline/no data).
 pub fn generate_with_history(
     topic: &Topic,
     paths: &Paths,
     history: &GenHistory,
+    learner: Option<&LearnerContext>,
     llm: Option<&mut dyn LlmCaller>,
     progress: Option<&mut dyn FnMut(GenerateStage)>,
 ) -> Result<Outcome> {
-    generate_with_focus(topic, None, paths, history, llm, progress)
+    generate_with_focus(topic, None, paths, history, learner, llm, progress)
 }
 
 /// Focus-aware entry (考察点精度): `focus` carries the SPECIFIC
@@ -411,37 +519,42 @@ pub fn generate_with_focus(
     focus: Option<&str>,
     paths: &Paths,
     history: &GenHistory,
+    learner: Option<&LearnerContext>,
     llm: Option<&mut dyn LlmCaller>,
     progress: Option<&mut dyn FnMut(GenerateStage)>,
 ) -> Result<Outcome> {
-    generate_with_mode(topic, focus, GenerateMode::Auto, paths, history, llm, progress)
+    generate_with_mode(topic, focus, GenerateMode::Auto, paths, history, learner, llm, progress)
 }
 
 /// Full-parameter entry for the agent tool: `mode` here is only the
 /// user-intent relay from M4.14 ("free" skips tiers 1/2 when the user
 /// explicitly asked for no-template generation); the strategy stays
 /// program-controlled otherwise.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_full(
     topic: &Topic,
     focus: Option<&str>,
     mode: GenerateMode,
     paths: &Paths,
     history: &GenHistory,
+    learner: Option<&LearnerContext>,
     llm: Option<&mut dyn LlmCaller>,
     progress: Option<&mut dyn FnMut(GenerateStage)>,
 ) -> Result<Outcome> {
-    generate_with_mode(topic, focus, mode, paths, history, llm, progress)
+    generate_with_mode(topic, focus, mode, paths, history, learner, llm, progress)
 }
 
 /// Mode-parameterized entry — crate-internal (tests). The public
 /// surface always runs the automatic fall-through: the user and the
 /// coach model never pick the tier (M4.7 decision).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_with_mode(
     topic: &Topic,
     focus: Option<&str>,
     mode: GenerateMode,
     paths: &Paths,
     history: &GenHistory,
+    learner: Option<&LearnerContext>,
     mut llm: Option<&mut dyn LlmCaller>,
     mut progress: Option<&mut dyn FnMut(GenerateStage)>,
 ) -> Result<Outcome> {
@@ -501,11 +614,11 @@ pub(crate) fn generate_with_mode(
                     );
                 };
                 stage!("模板改编", 1, LLM_ATTEMPTS);
-                match generate_adapted(topic, focus, &templates, &graph, paths, call, &mut progress) {
+                match generate_adapted(topic, focus, &templates, &graph, paths, learner, call, &mut progress) {
                     Ok(o) => Ok(o),
                     Err(tier2_err) => {
                         stage!("自由生成", 1, LLM_ATTEMPTS);
-                        generate_free(topic, focus, &graph, paths, call, &mut progress)
+                        generate_free(topic, focus, &graph, paths, learner, call, &mut progress)
                             .map_err(|tier3_err| {
                                 anyhow!(
                                     "三层出题均失败。\n· 模板直配：{tier1_err:#}\n· 模板改编：{tier2_err:#}\n· 自由生成：{tier3_err:#}"
@@ -523,10 +636,10 @@ pub(crate) fn generate_with_mode(
         };
         if matches!(mode, GenerateMode::Adapted) {
             stage!("模板改编", 1, LLM_ATTEMPTS);
-            generate_adapted(topic, focus, &templates, &graph, paths, call, &mut progress)
+            generate_adapted(topic, focus, &templates, &graph, paths, learner, call, &mut progress)
         } else {
             stage!("自由生成", 1, LLM_ATTEMPTS);
-            generate_free(topic, focus, &graph, paths, call, &mut progress)
+            generate_free(topic, focus, &graph, paths, learner, call, &mut progress)
         }
     }
 }
@@ -707,12 +820,14 @@ struct DraftResult {
 }
 
 /// Tier 2: LLM rewrites a nearby template's skeleton to the user's topic.
+#[allow(clippy::too_many_arguments)]
 fn generate_adapted(
     topic: &Topic,
     focus: Option<&str>,
     templates: &[template::Template],
     graph: &ConceptGraph,
     paths: &Paths,
+    learner: Option<&LearnerContext>,
     call: &mut dyn LlmCaller,
     progress: &mut Option<&mut dyn FnMut(GenerateStage)>,
 ) -> Result<Outcome> {
@@ -723,6 +838,7 @@ fn generate_adapted(
         Some(base),
         graph,
         paths,
+        learner,
         call,
         progress,
         "模板改编",
@@ -736,11 +852,21 @@ fn generate_free(
     focus: Option<&str>,
     graph: &ConceptGraph,
     paths: &Paths,
+    learner: Option<&LearnerContext>,
     call: &mut dyn LlmCaller,
     progress: &mut Option<&mut dyn FnMut(GenerateStage)>,
 ) -> Result<Outcome> {
-    let DraftResult { draft, module_name, hints, attempts } =
-        llm_draft_loop(&topic.prompt_text(), focus, None, graph, paths, call, progress, "自由生成")?;
+    let DraftResult { draft, module_name, hints, attempts } = llm_draft_loop(
+        &topic.prompt_text(),
+        focus,
+        None,
+        graph,
+        paths,
+        learner,
+        call,
+        progress,
+        "自由生成",
+    )?;
     finish_draft(paths, draft, Tier::Free, module_name, hints, attempts)
 }
 
@@ -807,6 +933,7 @@ fn llm_draft_loop(
     base: Option<&template::Template>,
     graph: &ConceptGraph,
     paths: &Paths,
+    learner: Option<&LearnerContext>,
     call: &mut dyn LlmCaller,
     progress: &mut Option<&mut dyn FnMut(GenerateStage)>,
     stage_label: &'static str,
@@ -847,7 +974,7 @@ fn llm_draft_loop(
             cb(GenerateStage { attempt, total_attempts: LLM_ATTEMPTS, stage: stage_label, note });
         }
 
-        let prompt = draft_prompt(request, focus, base, &concept_ids, attempt, &last_fail);
+        let prompt = draft_prompt(request, focus, base, &concept_ids, attempt, &last_fail, learner);
         let reply = call.call_bounded(&prompt, DRAFT_MAX_TOKENS).map_err(|e| anyhow!("LLM 调用失败：{e:#}"))?;
         if reply.finish_reason.as_deref() == Some("length") {
             last_fail = format!(
@@ -1005,8 +1132,10 @@ fn ensure_ban_constraints(d: &mut template::ExerciseDraft) {
     }
 }
 
-/// The draft prompt: request + focus + rubric (spec C1–C7, compressed)
-/// + an optional reference skeleton (tier 2) + the retry feedback.
+/// The draft prompt: request, focus and rubric (spec C1–C7,
+/// compressed), plus an optional reference skeleton (tier 2), the
+/// retry feedback and the learner-profile block (M9h level 信号).
+#[allow(clippy::too_many_arguments)]
 fn draft_prompt(
     request: &str,
     focus: Option<&str>,
@@ -1014,7 +1143,12 @@ fn draft_prompt(
     concept_ids: &[String],
     attempt: u32,
     last_fail: &str,
+    learner: Option<&LearnerContext>,
 ) -> String {
+    let learner_block = match learner {
+        Some(l) => l.prompt_block(),
+        None => String::new(),
+    };
     let skeleton = match base {
         Some(b) => format!(
             "## Reference exercise (adapt its STRUCTURE to the topic below; do NOT copy it verbatim)\n\
@@ -1046,19 +1180,25 @@ fn draft_prompt(
     };
     format!(
         "You are writing ONE small Rust practice exercise for a learner who already codes \
-         (Python/Java/Go/C++) but is confused by Rust's ownership/borrowing/lifetimes/traits.\n\n\
+         (Python/Java/Go/C++) but is confused by Rust's ownership/borrowing/lifetimes/traits.\n\
+         {learner_block}\n\
          Topic / user request: {request}\n\
          {focus_block}\n\
          {skeleton}{retry}\n\
          ## Hard requirements (a local gate will REJECT the draft otherwise)\n\
-         1. Single root cause: the exercise's UNFINISHED body must fail to COMPILE, and the \
-         first rustc error must be one of the codes you declare in error_codes. Do not use \
-         todo!() for the hole — leave real, plausible learner code that triggers the error.\n\
+         1. Single root cause: the exercise's UNFINISHED body must fail to COMPILE with one \
+         plausible beginner mistake, and the first rustc error must be one of the codes you \
+         declare in error_codes. Do not use todo!() for the hole — leave real, plausible \
+         learner code that triggers the error. Syntax errors, unused-import noise or several \
+         unrelated errors at once all count as a failed draft.\n\
          2. Real scenario: the body does one small, humanly describable task; the first comment \
          lines say what the code is trying to do and what is wrong (in 简体中文, like the \
          reference exercise).\n\
          3. Idiomatic fix: there is one clean idiomatic fix; the reference solution implements \
-         it, passes ALL tests, and satisfies every constraint you declare.\n\
+         it, passes ALL tests, and satisfies every constraint you declare. The gate COMPILES \
+         the reference and statically checks it: under `no-clone` the reference must not call \
+         .clone()/.to_owned() anywhere; under `iterator-only` it must contain no for/while \
+         loop; declaring a constraint your own reference violates is an automatic rejection.\n\
          4. Tests: a #[cfg(test)] mod tests with 2+ tests asserting observable behavior; \
          they must FAIL on the unfinished body and PASS on the reference.\n\
          5. std-only, single file: no external crates, no unsafe, no std::process, no std::fs, \
@@ -1785,7 +1925,7 @@ fn add(a: i32, b: i32) -> i32 {
     #[test]
     fn error_code_routes_via_reverse_index() {
         let fx = Fixture::new();
-        let out = generate_with_mode(&Topic::ErrorCode("e0308".into()), None, GenerateMode::Auto, &fx.paths(), &GenHistory::default(), None, None).unwrap();
+        let out = generate_with_mode(&Topic::ErrorCode("e0308".into()), None, GenerateMode::Auto, &fx.paths(), &GenHistory::default(), None, None, None).unwrap();
         assert_eq!(out.tier, Tier::Matched { template_id: "mini-add".into() });
     }
 
@@ -1864,11 +2004,32 @@ fn add(a: i32, b: i32) -> i32 {
 
     #[test]
     fn draft_prompt_embeds_focus_block() {
-        let p = draft_prompt("collections.hashmap", Some("entry API 的 or_insert 单次查找"), None, &["test.concept".into()], 1, "");
+        let p = draft_prompt("collections.hashmap", Some("entry API 的 or_insert 单次查找"), None, &["test.concept".into()], 1, "", None);
         assert!(p.contains("Specific technique to train"), "{p}");
         assert!(p.contains("entry API 的 or_insert 单次查找"), "{p}");
-        let p2 = draft_prompt("test", None, None, &[], 1, "");
+        let p2 = draft_prompt("test", None, None, &[], 1, "", None);
         assert!(!p2.contains("Specific technique to train"), "{p2}");
+    }
+
+    #[test]
+    fn draft_prompt_embeds_learner_profile_block() {
+        let learner = LearnerContext {
+            weak: vec![("ownership.move".into(), 3, 5)],
+            due: vec!["traits.assoc-types".into()],
+            codes: vec![("E0382".into(), 4)],
+            too_hard: vec!["collections.hashmap".into()],
+            too_easy: vec![],
+        };
+        let p = draft_prompt("test", None, None, &[], 1, "", Some(&learner));
+        assert!(p.contains("## Learner profile"), "{p}");
+        assert!(p.contains("ownership.move (3 fails / 5 attempts)"), "{p}");
+        assert!(p.contains("E0382 ×4"), "{p}");
+        assert!(p.contains("TOO HARD"), "{p}");
+        // No learner / empty profile → no block (offline parity).
+        let p2 = draft_prompt("test", None, None, &[], 1, "", None);
+        assert!(!p2.contains("## Learner profile"), "{p2}");
+        let p3 = draft_prompt("test", None, None, &[], 1, "", Some(&LearnerContext::default()));
+        assert!(!p3.contains("## Learner profile"), "{p3}");
     }
 
     #[test]
@@ -1893,6 +2054,7 @@ fn add(a: i32, b: i32) -> i32 {
             Some("entry API 的 or_insert 单次查找"),
             &paths,
             &GenHistory::default(),
+        None, // learner
             Some(&mut call),
             None,
         )
@@ -1936,6 +2098,7 @@ fn add(a: i32, b: i32) -> i32 {
             Some("一个题库没有的手法"),
             &paths,
             &GenHistory::default(),
+        None, // learner
             Some(&mut call),
             None,
         )
@@ -1970,6 +2133,7 @@ fn add(a: i32, b: i32) -> i32 {
             GenerateMode::Free,
             &paths,
             &GenHistory::default(),
+        None, // learner
             Some(&mut call),
             None,
         )
@@ -1996,6 +2160,7 @@ fn add(a: i32, b: i32) -> i32 {
             GenerateMode::Adapted,
             &paths,
             &GenHistory::default(),
+        None, // learner
             Some(&mut call),
             None,
         )
@@ -2022,6 +2187,7 @@ fn add(a: i32, b: i32) -> i32 {
             GenerateMode::Auto,
             &paths,
             &GenHistory::default(),
+        None, // learner
             Some(&mut call),
             None,
         )
@@ -2043,6 +2209,7 @@ fn add(a: i32, b: i32) -> i32 {
             GenerateMode::Free,
             &paths,
             &GenHistory::default(),
+        None, // learner
             Some(&mut call),
             None,
         )
@@ -2089,6 +2256,7 @@ fn add(a: i32, b: i32) -> i32 {
             GenerateMode::Free,
             &paths,
             &GenHistory::default(),
+        None, // learner
             Some(&mut call),
             None,
         )
@@ -2125,6 +2293,7 @@ fn add(a: i32, b: i32) -> i32 {
             GenerateMode::Free,
             &paths,
             &GenHistory::default(),
+        None, // learner
             Some(&mut call),
             None,
         )
@@ -2143,6 +2312,7 @@ fn add(a: i32, b: i32) -> i32 {
             GenerateMode::Free,
             &fx.paths(),
             &GenHistory::default(),
+        None, // learner
             None,
             None,
         )
@@ -2250,6 +2420,7 @@ fn add(a: i32, b: i32) -> i32 {
             &Topic::Concept("test.concept".into()),
             &fx.paths(),
             &h,
+            None, // learner
             None,
             None,
         )
@@ -2268,6 +2439,7 @@ fn add(a: i32, b: i32) -> i32 {
             &Topic::Concept("test.concept".into()),
             &fx.paths(),
             &h,
+            None, // learner
             None,
             None,
         )
@@ -2288,6 +2460,7 @@ fn add(a: i32, b: i32) -> i32 {
             &Topic::Concept("test.concept".into()),
             &fx.paths(),
             &h,
+            None, // learner
             None,
             None,
         )
@@ -2313,6 +2486,7 @@ fn add(a: i32, b: i32) -> i32 {
             &Topic::FreeText("随便来一道".into()),
             &fx.paths(),
             &h,
+            None, // learner
             Some(&mut call),
             None,
         )
@@ -2429,6 +2603,7 @@ fn add(a: i32, b: i32) -> i32 {
                     GenerateMode::Free,
                     &paths,
                     &GenHistory::default(),
+        None, // learner
                     Some(&mut call),
                     None,
                 );

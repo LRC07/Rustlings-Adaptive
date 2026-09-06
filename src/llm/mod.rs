@@ -142,6 +142,13 @@ pub struct TurnOutput {
     /// choices[0].finish_reason ("stop" | "length" | "tool_calls" | …);
     /// "length" means the output was cut off by max_tokens (M4.7).
     pub finish_reason: Option<String>,
+    /// M9h: the stream was interrupted mid-read — `usage` is a byte
+    /// estimate of what actually arrived (still recorded: the caller
+    /// paid for it), and the turn aborts.
+    pub interrupted: bool,
+    /// M9h: the endpoint streamed without the official usage tail —
+    /// `usage` is a byte estimate (shown as 估算 in the footer, R6).
+    pub usage_estimated: bool,
 }
 
 impl TurnOutput {
@@ -299,6 +306,7 @@ impl LlmClient {
 
         let mut sse = SseBuffer::default();
         let mut content = String::new();
+        let mut reasoning = String::new();
         let mut calls = ToolCallAggregator::default();
         let mut usage: Option<Usage> = None;
         let mut finish_reason: Option<String> = None;
@@ -309,7 +317,20 @@ impl LlmClient {
         let mut buf = [0u8; 16 * 1024];
         loop {
             if (out.should_stop)() {
-                bail!("已打断");
+                // M9h bug2 fix: an interrupted call still COST money on
+                // the endpoint — record the byte estimate instead of
+                // dropping the accounting (the old `bail!` silently
+                // wrote nothing, contradicting the CLI's promise).
+                let mut u = estimate_usage(messages, &content, reasoning.len() + calls.approx_bytes());
+                u.reasoning_tokens = (reasoning.len() / 3) as u64;
+                return Ok(TurnOutput {
+                    content: Some(content),
+                    tool_calls: calls.take(),
+                    usage: u,
+                    finish_reason,
+                    interrupted: true,
+                    usage_estimated: true,
+                });
             }
             let n = raw.read(&mut buf).context("读取流式响应失败")?;
             if n == 0 {
@@ -318,11 +339,12 @@ impl LlmClient {
             for payload in sse.feed(&buf[..n]) {
                 match parse_stream_payload(&payload)? {
                     Some(StreamFrame::Usage(u)) => usage = Some(u),
-                    Some(StreamFrame::Delta { content: c, tool_call_frags, finish_reason: fr }) => {
+                    Some(StreamFrame::Delta { content: c, reasoning: rc, tool_call_frags, finish_reason: fr }) => {
                         if !c.is_empty() {
                             (out.on_content)(&c);
                             content.push_str(&c);
                         }
+                        reasoning.push_str(&rc);
                         calls.feed(&tool_call_frags);
                         if fr.is_some() {
                             finish_reason = fr;
@@ -332,12 +354,25 @@ impl LlmClient {
                 }
             }
         }
-        let usage = usage.unwrap_or_else(|| estimate_usage(messages, &content));
+        // M9h bug1 fix: estimate from ALL output bytes (content +
+        // reasoning_content + tool-call fragments), not content only —
+        // a tool-call round used to bill 0 output tokens; and mark the
+        // estimate so the footer can say 估算 (R6 honesty).
+        let (usage, usage_estimated) = match usage {
+            Some(u) => (u, false),
+            None => {
+                let mut u = estimate_usage(messages, &content, reasoning.len() + calls.approx_bytes());
+                u.reasoning_tokens = (reasoning.len() / 3) as u64;
+                (u, true)
+            }
+        };
         Ok(TurnOutput {
             content: Some(content),
             tool_calls: calls.take(),
             usage,
             finish_reason,
+            interrupted: false,
+            usage_estimated,
         })
     }
 }
@@ -491,6 +526,8 @@ pub fn parse_turn_response(body: &str) -> Result<TurnOutput> {
             })
             .unwrap_or_default(),
         finish_reason: choice.finish_reason.clone(),
+        interrupted: false,
+        usage_estimated: false,
     })
 }
 
@@ -516,6 +553,9 @@ pub struct StreamOut<'a> {
 pub enum StreamFrame {
     Delta {
         content: String,
+        /// `delta.reasoning_content` fragments (thinking models, DeepSeek
+        /// style) — metered for accounting, not displayed (M9h).
+        reasoning: String,
         tool_call_frags: Vec<serde_json::Value>,
         finish_reason: Option<String>,
     },
@@ -581,10 +621,12 @@ pub fn parse_stream_payload(payload: &str) -> Result<Option<StreamFrame>> {
     };
     let delta = &choice["delta"];
     let content = delta["content"].as_str().unwrap_or_default().to_string();
+    let reasoning = delta["reasoning_content"].as_str().unwrap_or_default().to_string();
     let finish_reason = choice["finish_reason"].as_str().map(str::to_string);
     let tool_call_frags = delta["tool_calls"].as_array().cloned().unwrap_or_default();
     Ok(Some(StreamFrame::Delta {
         content,
+        reasoning,
         tool_call_frags,
         finish_reason,
     }))
@@ -605,6 +647,17 @@ struct ToolCallSlot {
 }
 
 impl ToolCallAggregator {
+    /// Rough wire size of the aggregated tool calls (id/name/arguments
+    /// plus per-call framing) — feeds the usage estimate when the
+    /// endpoint streams without a usage tail (M9h bug1: a tool-call
+    /// round used to bill 0 output tokens).
+    pub fn approx_bytes(&self) -> usize {
+        self.slots
+            .iter()
+            .map(|s| s.id.len() + s.name.len() + s.arguments.len() + 16)
+            .sum()
+    }
+
     /// Feed one delta's `tool_calls` array (raw wire values).
     pub fn feed(&mut self, tcs: &[serde_json::Value]) {
         for tc in tcs {
@@ -653,14 +706,16 @@ fn parse_usage_value(v: &serde_json::Value) -> Usage {
 /// Fallback accounting when an endpoint streams without the usage tail:
 /// rough byte-based estimates (ASCII ≈4 chars/token, CJK ≈1.5) — good
 /// enough to keep the meter honest in magnitude, never exact.
-fn estimate_usage(messages: &[ChatMessage], content: &str) -> Usage {
+/// `extra_out_bytes` covers reasoning_content + tool-call fragments so
+/// thinking/tool rounds are no longer billed as zero output (M9h).
+fn estimate_usage(messages: &[ChatMessage], content: &str, extra_out_bytes: usize) -> Usage {
     let prompt: usize = messages
         .iter()
         .map(|m| m.content.as_deref().map(str::len).unwrap_or(0) + 8)
         .sum();
     Usage {
         prompt_tokens: (prompt / 4) as u64,
-        completion_tokens: (content.len() / 3) as u64,
+        completion_tokens: ((content.len() + extra_out_bytes) / 3) as u64,
         reasoning_tokens: 0,
     }
 }
@@ -699,8 +754,9 @@ mod tests {
         .unwrap()
         .unwrap();
         match f {
-            StreamFrame::Delta { content, tool_call_frags, finish_reason } => {
+            StreamFrame::Delta { content, reasoning, tool_call_frags, finish_reason } => {
                 assert_eq!(content, "hel");
+                assert!(reasoning.is_empty());
                 assert!(tool_call_frags.is_empty());
                 assert_eq!(finish_reason, None);
             }
@@ -748,7 +804,7 @@ mod tests {
     #[test]
     fn estimate_usage_is_magnitude_correct() {
         let msgs = vec![ChatMessage::user("a".repeat(400))];
-        let u = estimate_usage(&msgs, "b".repeat(300).as_str());
+        let u = estimate_usage(&msgs, "b".repeat(300).as_str(), 0);
         assert!(u.prompt_tokens >= 100 && u.prompt_tokens <= 200, "{u:?}");
         assert!(u.completion_tokens >= 80 && u.completion_tokens <= 120, "{u:?}");
     }
