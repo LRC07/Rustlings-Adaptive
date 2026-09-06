@@ -10,6 +10,7 @@
 //! building/parsing HTTP bodies.
 
 use anyhow::{anyhow, bail, Context, Result};
+use std::io::Read;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -30,7 +31,7 @@ const ERROR_BODY_SNIPPET: usize = 500;
 /// Token usage as reported by the API (R6 relies on these numbers).
 /// `reasoning_tokens` (thinking-mode CoT) is optional: only some
 /// endpoints report the breakdown, others leave it 0.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Usage {
     #[serde(default)]
     pub prompt_tokens: u64,
@@ -240,6 +241,91 @@ impl LlmClient {
         }
         parse_turn_response(&text)
     }
+
+    /// Streaming variant (C1): content deltas flow through
+    /// `out.on_content` as they arrive; the fully aggregated output
+    /// (content, tool calls, terminal usage) is returned exactly like
+    /// `chat_turn`. `out.should_stop` aborts the read mid-stream — the
+    /// caller treats that as an interruption.
+    ///
+    /// Requires an OpenAI-compatible SSE stream
+    /// (`stream_options.include_usage`). Incompatibility is the
+    /// CALLER's problem: the trait impl falls back to the non-streaming
+    /// turn once (which also restores exact usage accounting).
+    pub fn chat_turn_streaming(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[Tool],
+        max_tokens: Option<u32>,
+        out: &mut StreamOut,
+    ) -> Result<TurnOutput> {
+        let mut body = build_request_body(
+            &self.model,
+            messages,
+            tools,
+            max_tokens,
+            self.thinking,
+            self.reasoning_effort.as_deref(),
+        );
+        body["stream"] = serde_json::json!(true);
+        body["stream_options"] = serde_json::json!({ "include_usage": true });
+        let resp = self
+            .http
+            .post(chat_url(&self.endpoint))
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .context("网络请求失败（检查 endpoint 与网络连接）")?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().unwrap_or_default();
+            let snippet: String = text.chars().take(ERROR_BODY_SNIPPET).collect();
+            bail!("模型服务返回 {status}：{snippet}");
+        }
+
+        let mut sse = SseBuffer::default();
+        let mut content = String::new();
+        let mut calls = ToolCallAggregator::default();
+        let mut usage: Option<Usage> = None;
+        let mut finish_reason: Option<String> = None;
+        // blocking Response implements std::io::Read: each read returns
+        // whatever has arrived — exactly the streaming granularity we
+        // need.
+        let mut raw = resp;
+        let mut buf = [0u8; 16 * 1024];
+        loop {
+            if (out.should_stop)() {
+                bail!("已打断");
+            }
+            let n = raw.read(&mut buf).context("读取流式响应失败")?;
+            if n == 0 {
+                break;
+            }
+            for payload in sse.feed(&buf[..n]) {
+                match parse_stream_payload(&payload)? {
+                    Some(StreamFrame::Usage(u)) => usage = Some(u),
+                    Some(StreamFrame::Delta { content: c, tool_call_frags, finish_reason: fr }) => {
+                        if !c.is_empty() {
+                            (out.on_content)(&c);
+                            content.push_str(&c);
+                        }
+                        calls.feed(&tool_call_frags);
+                        if fr.is_some() {
+                            finish_reason = fr;
+                        }
+                    }
+                    None => {}
+                }
+            }
+        }
+        let usage = usage.unwrap_or_else(|| estimate_usage(messages, &content));
+        Ok(TurnOutput {
+            content: Some(content),
+            tool_calls: calls.take(),
+            usage,
+            finish_reason,
+        })
+    }
 }
 
 /// Build the OpenAI-compatible request body from internal message
@@ -394,9 +480,269 @@ pub fn parse_turn_response(body: &str) -> Result<TurnOutput> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Streaming (C1): pure SSE machinery + the wire callbacks. The network
+// loop lives on `LlmClient::chat_turn_streaming`.
+// ---------------------------------------------------------------------------
+
+/// Wire callbacks of a streaming turn.
+/// (Wired into the agent in block 2 — temporary allow.)
+#[allow(dead_code)]
+pub struct StreamOut<'a> {
+    /// Called for every non-empty content delta, in order. The fully
+    /// aggregated content is ALSO in the returned TurnOutput.
+    pub on_content: &'a mut dyn FnMut(&str),
+    /// Polled between chunks: true aborts the turn mid-stream.
+    pub should_stop: &'a dyn Fn() -> bool,
+}
+
+/// One parsed `data:` payload of the SSE stream. Tool-call fragments
+/// stay RAW here — they may split across frames, so aggregation owns
+/// the whole stream (the network loop's ToolCallAggregator), not a
+/// single frame.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StreamFrame {
+    Delta {
+        content: String,
+        tool_call_frags: Vec<serde_json::Value>,
+        finish_reason: Option<String>,
+    },
+    Usage(Usage),
+}
+
+/// Reassembles `data:` payloads from arbitrary network chunks: chunks
+/// may split frames mid-line — and even mid-UTF-8-character — so the
+/// buffer is byte-level and lines are only decoded when complete (a
+/// line ending at '\n' is always valid UTF-8: 0x0A never appears
+/// inside a multi-byte sequence).
+pub struct SseBuffer {
+    buf: Vec<u8>,
+}
+
+impl Default for SseBuffer {
+    fn default() -> Self {
+        Self { buf: Vec::new() }
+    }
+}
+
+impl SseBuffer {
+    /// Feed one raw chunk; returns complete `data:` payloads (prefix
+    /// and surrounding whitespace stripped, empty/keep-alive lines
+    /// dropped).
+    pub fn feed(&mut self, chunk: &[u8]) -> Vec<String> {
+        self.buf.extend_from_slice(chunk);
+        let mut out = Vec::new();
+        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
+            let line_bytes: Vec<u8> = self.buf.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&line_bytes);
+            let line = line.trim();
+            if let Some(payload) = line.strip_prefix("data:") {
+                let payload = payload.trim();
+                if !payload.is_empty() {
+                    out.push(payload.to_string());
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Parse one `data:` payload: `[DONE]` → None, otherwise a Delta or
+/// Usage frame (the include_usage tail carries an empty choices array).
+pub fn parse_stream_payload(payload: &str) -> Result<Option<StreamFrame>> {
+    let p = payload.trim();
+    if p == "[DONE]" {
+        return Ok(None);
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(p).with_context(|| format!("流式帧解析失败：{p}"))?;
+
+    // Usage tail: usage present and no choice carries a delta.
+    let choices = v["choices"].as_array();
+    let has_delta = choices.is_none_or(|cs| cs.iter().any(|c| c.get("delta").is_some()));
+    if !has_delta
+        && let Some(u) = v.get("usage").filter(|u| u.is_object())
+    {
+        return Ok(Some(StreamFrame::Usage(parse_usage_value(u))));
+    }
+
+    let Some(choice) = choices.and_then(|cs| cs.first()) else {
+        // No choices and no usable usage — ignore the frame.
+        return Ok(None);
+    };
+    let delta = &choice["delta"];
+    let content = delta["content"].as_str().unwrap_or_default().to_string();
+    let finish_reason = choice["finish_reason"].as_str().map(str::to_string);
+    let tool_call_frags = delta["tool_calls"].as_array().cloned().unwrap_or_default();
+    Ok(Some(StreamFrame::Delta {
+        content,
+        tool_call_frags,
+        finish_reason,
+    }))
+}
+
+/// Accumulates streaming tool-call fragments (they arrive split across
+/// deltas: id/name first, arguments in pieces) keyed by `index`.
+#[derive(Default)]
+pub struct ToolCallAggregator {
+    slots: Vec<ToolCallSlot>,
+}
+
+#[derive(Default)]
+struct ToolCallSlot {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+impl ToolCallAggregator {
+    /// Feed one delta's `tool_calls` array (raw wire values).
+    pub fn feed(&mut self, tcs: &[serde_json::Value]) {
+        for tc in tcs {
+            let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(self.slots.len() as u64) as usize;
+            while self.slots.len() <= idx {
+                self.slots.push(ToolCallSlot::default());
+            }
+            let slot = &mut self.slots[idx];
+            if let Some(id) = tc["id"].as_str().filter(|s| !s.is_empty()) {
+                slot.id = id.to_string();
+            }
+            if let Some(n) = tc["function"]["name"].as_str().filter(|s| !s.is_empty()) {
+                slot.name = n.to_string();
+            }
+            if let Some(a) = tc["function"]["arguments"].as_str() {
+                slot.arguments.push_str(a);
+            }
+        }
+    }
+
+    /// Finish: complete tool calls in index order (incomplete ones —
+    /// no name yet — are dropped, same tolerance as the non-streaming
+    /// parser).
+    pub fn take(self) -> Vec<ToolCall> {
+        self.slots
+            .into_iter()
+            .filter(|s| !s.name.is_empty())
+            .map(|s| ToolCall {
+                id: if s.id.is_empty() { format!("call_{}", s.name) } else { s.id },
+                name: s.name,
+                arguments: s.arguments,
+            })
+            .collect()
+    }
+}
+
+/// Shared usage parsing (non-streaming tail + streaming tail): lifts
+/// the nested reasoning breakdown to the top level.
+fn parse_usage_value(v: &serde_json::Value) -> Usage {
+    let mut usage: Usage = serde_json::from_value(v.clone()).unwrap_or_default();
+    usage.reasoning_tokens =
+        v["completion_tokens_details"]["reasoning_tokens"].as_u64().unwrap_or(0);
+    usage
+}
+
+/// Fallback accounting when an endpoint streams without the usage tail:
+/// rough byte-based estimates (ASCII ≈4 chars/token, CJK ≈1.5) — good
+/// enough to keep the meter honest in magnitude, never exact.
+fn estimate_usage(messages: &[ChatMessage], content: &str) -> Usage {
+    let prompt: usize = messages
+        .iter()
+        .map(|m| m.content.as_deref().map(str::len).unwrap_or(0) + 8)
+        .sum();
+    Usage {
+        prompt_tokens: (prompt / 4) as u64,
+        completion_tokens: (content.len() / 3) as u64,
+        reasoning_tokens: 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- streaming machinery (C1) ---------------------------------------
+
+    #[test]
+    fn sse_buffer_reassembles_frames_across_chunks() {
+        let mut sse = SseBuffer::default();
+        // A frame split mid-JSON, a CRLF frame, keep-alive lines, and a
+        // partial multi-byte char at the chunk boundary.
+        let a = "data: {\"choices\":[{\"delta\":{\"content\":\"你好";
+        let b = "世界\"}]}}\n\ndata: [DONE]\r\n\r\n";
+        // Feed a byte at a time to prove mid-UTF-8 safety.
+        let mut payloads = Vec::new();
+        let mut all = a.as_bytes().to_vec();
+        all.extend_from_slice(b.as_bytes());
+        for b in &all {
+            payloads.extend(sse.feed(std::slice::from_ref(b)));
+        }
+        assert_eq!(payloads.len(), 2, "{payloads:?}");
+        assert_eq!(payloads[0], "{\"choices\":[{\"delta\":{\"content\":\"你好世界\"}]}}");
+        assert_eq!(payloads[1], "[DONE]");
+    }
+
+    #[test]
+    fn parse_stream_payload_content_tool_calls_and_usage_tail() {
+        // Content delta.
+        let f = parse_stream_payload(
+            r#"{"choices":[{"delta":{"content":"hel"},"finish_reason":null}]}"#,
+        )
+        .unwrap()
+        .unwrap();
+        match f {
+            StreamFrame::Delta { content, tool_call_frags, finish_reason } => {
+                assert_eq!(content, "hel");
+                assert!(tool_call_frags.is_empty());
+                assert_eq!(finish_reason, None);
+            }
+            other => panic!("{other:?}"),
+        }
+        // Tool-call fragment delta stays raw.
+        let f = parse_stream_payload(
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"check_code","arguments":"{\"co"}}]},"finish_reason":null}]}"#,
+        )
+        .unwrap()
+        .unwrap();
+        match f {
+            StreamFrame::Delta { content, tool_call_frags, .. } => {
+                assert!(content.is_empty());
+                assert_eq!(tool_call_frags.len(), 1);
+                assert_eq!(tool_call_frags[0]["function"]["name"], "check_code");
+            }
+            other => panic!("{other:?}"),
+        }
+        // Usage tail (empty choices) + [DONE].
+        let f = parse_stream_payload(
+            r#"{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(f, StreamFrame::Usage(Usage { prompt_tokens: 10, completion_tokens: 5, reasoning_tokens: 0 }));
+        assert!(parse_stream_payload("[DONE]").unwrap().is_none());
+    }
+
+    #[test]
+    fn tool_call_aggregator_joins_fragments_across_frames() {
+        let mut agg = ToolCallAggregator::default();
+        agg.feed(&[serde_json::json!({"index":0,"id":"call_1","function":{"name":"check_code"}})]);
+        agg.feed(&[serde_json::json!({"index":0,"function":{"arguments":"{\"co"}}),
+                   serde_json::json!({"index":0,"function":{"arguments":"de\"}"}})]);
+        agg.feed(&[serde_json::json!({"index":1,"id":"call_2","function":{"name":"list_concepts"}})]);
+        let calls = agg.take();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].name, "check_code");
+        assert_eq!(calls[0].arguments, "{\"code\"}");
+        assert_eq!(calls[1].name, "list_concepts");
+    }
+
+    #[test]
+    fn estimate_usage_is_magnitude_correct() {
+        let msgs = vec![ChatMessage::user("a".repeat(400))];
+        let u = estimate_usage(&msgs, "b".repeat(300).as_str());
+        assert!(u.prompt_tokens >= 100 && u.prompt_tokens <= 200, "{u:?}");
+        assert!(u.completion_tokens >= 80 && u.completion_tokens <= 120, "{u:?}");
+    }
 
     /// Live probe (9.4): why did a request with max_tokens=3000 come
     /// back with 19.5k completion tokens on DeepSeek V4 Flash?
