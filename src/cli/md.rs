@@ -159,6 +159,7 @@ impl StreamMd {
     }
 
     /// Feed one content delta; returns everything printable now.
+    #[allow(dead_code)]
     pub(crate) fn feed(&mut self, delta: &str) -> String {
         if !self.ansi {
             return delta.to_string();
