@@ -796,34 +796,62 @@ fn agent_turn(
     let input = input.to_string();
     let input_had_code = input.contains("```");
 
-    let (spinner, status_slot) = Spinner::start("思考中…");
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (sp, status_slot) = Spinner::start("思考中…");
+    let mut spinner = Some(sp);
+    enum WorkerMsg {
+        Delta(String),
+        /// Boxed: the outcome is large and rare, the delta is small
+        /// and hot (clippy::large_enum_variant).
+        Done(Box<anyhow::Result<crate::agent::TurnOutcome>>),
+    }
+    let (tx, rx) = std::sync::mpsc::channel::<WorkerMsg>();
     let handle = std::thread::spawn(move || {
         let progress = move |s: &str| {
             if let Ok(mut slot) = status_slot.lock() {
                 *slot = s.to_string();
             }
         };
-        // C1 block 2: the streaming path exists; the CLI-side live
-        // renderer lands in block 4 — until then deltas are ignored
-        // here and the reply renders as a whole on Done (unchanged).
-        let mut on_delta = |_d: &str| {};
+        // C1: content deltas stream out through the channel the moment
+        // they arrive; the main thread renders them live (terminal) or
+        // drops them (pipes — the whole reply renders on Done).
+        let mut on_delta = |d: &str| {
+            let _ = tx.send(WorkerMsg::Delta(d.to_string()));
+        };
         let result = agent::run_turn(&history, &input, &env, &progress, &mut on_delta);
-        let _ = tx.send(result);
+        let _ = tx.send(WorkerMsg::Done(Box::new(result)));
     });
 
     // Poll for the turn result, watching the interrupt flag (R4).
+    // Content deltas that arrive first make the spinner step aside and
+    // render live through the streaming markdown renderer (C1).
     let mut outcome = None;
+    let mut stream = super::md::StreamMd::new(render::term_width(), render::ansi_enabled());
+    let mut has_streamed = false;
+    let print_out = |s: &str| {
+        print!("{s}");
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+    };
     loop {
         match rx.recv_timeout(Duration::from_millis(150)) {
-            Ok(res) => {
-                outcome = Some(res);
+            Ok(WorkerMsg::Delta(d)) => {
+                if !has_streamed {
+                    has_streamed = true;
+                    if let Some(sp) = spinner.take() {
+                        sp.stop();
+                    }
+                }
+                print_out(&stream.feed(&d));
+            }
+            Ok(WorkerMsg::Done(res)) => {
+                outcome = Some(*res);
                 break;
             }
             Err(RecvTimeoutError::Timeout) => {
                 if agent::is_interrupted() {
                     super::flush_stdin();
-                    println!("  已打断（本回合中止；后台调用完成后仍会计入用量）。");
+                    let tail = stream.finish();
+                    print_out(&tail);
+                    println!("  已打断（本回合中止，已流出的内容未计入会话；后台调用完成后仍会计入用量）。");
                     break;
                 }
             }
@@ -835,7 +863,10 @@ fn agent_turn(
             }
         }
     }
-    spinner.stop();
+    if let Some(sp) = spinner.take() {
+        sp.stop();
+    }
+    super::flush_stdin();
     let _ = handle; // abandoned threads finish in the background
 
     match outcome {
@@ -847,8 +878,15 @@ fn agent_turn(
             if let Err(e) = session.save() {
                 println!("  会话保存失败：{e:#}");
             }
-            println!();
-            if let Some(text) = &turn.reply {
+            if has_streamed {
+                // Live-rendered already; just flush the unterminated tail.
+                print_out(&stream.finish());
+            } else {
+                println!();
+            }
+            if let Some(text) = &turn.reply
+                && !has_streamed
+            {
                 // M4.3: markdown → ANSI (fenced code kept verbatim),
                 // width-aware wrapping; raw source on pipes.
                 print!("{}", super::md::render(text, render::term_width(), render::ansi_enabled()));

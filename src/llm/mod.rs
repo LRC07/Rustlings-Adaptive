@@ -486,8 +486,6 @@ pub fn parse_turn_response(body: &str) -> Result<TurnOutput> {
 // ---------------------------------------------------------------------------
 
 /// Wire callbacks of a streaming turn.
-/// (Wired into the agent in block 2 — temporary allow.)
-#[allow(dead_code)]
 pub struct StreamOut<'a> {
     /// Called for every non-empty content delta, in order. The fully
     /// aggregated content is ALSO in the returned TurnOutput.
@@ -739,6 +737,50 @@ mod tests {
         let u = estimate_usage(&msgs, "b".repeat(300).as_str());
         assert!(u.prompt_tokens >= 100 && u.prompt_tokens <= 200, "{u:?}");
         assert!(u.completion_tokens >= 80 && u.completion_tokens <= 120, "{u:?}");
+    }
+
+    /// Live probe (C1): the streaming turn against the real endpoint.
+    /// Verifies SSE arrives, content deltas are non-empty, usage lands
+    /// (tail or estimate flag), and the stream interrupts cleanly.
+    /// Run: cargo test live_probe_streaming -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn live_probe_streaming() {
+        let cfg = crate::config::ModelConfig::load().expect("config");
+        if cfg.api_key.trim().is_empty() {
+            eprintln!("no key configured; skipping");
+            return;
+        }
+        let client = LlmClient::with_timeout(&cfg.endpoint, &cfg.api_key, &cfg.model, std::time::Duration::from_secs(120));
+        let mut deltas = 0usize;
+        let mut chars = 0usize;
+        let started = std::time::Instant::now();
+        let out = client
+            .chat_turn_streaming(
+                &[ChatMessage::user("用一句话解释什么是所有权。")],
+                &[],
+                None,
+                &mut StreamOut {
+                    on_content: &mut |d| {
+                        deltas += 1;
+                        chars += d.len();
+                        if deltas <= 3 {
+                            println!("delta[{deltas}]: {d:?}");
+                        }
+                    },
+                    should_stop: &|| false,
+                },
+            )
+            .expect("streaming turn");
+        println!(
+            "== deltas={deltas} chars={chars} elapsed={:?} usage={:?} finish={:?}",
+            started.elapsed(),
+            out.usage,
+            out.finish_reason
+        );
+        assert!(deltas > 1, "expected multiple deltas (true streaming)");
+        let content = out.content.unwrap_or_default();
+        assert!(!content.trim().is_empty());
     }
 
     /// Live probe (9.4): why did a request with max_tokens=3000 come

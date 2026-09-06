@@ -143,8 +143,6 @@ impl LineRenderer {
 /// output as soon as a line completes. The trailing partial line is
 /// held until it terminates (or `finish`). `ansi = false` (pipes) just
 /// passes deltas through untouched.
-/// (Wired into the REPL in block 4 — temporary allow.)
-#[allow(dead_code)]
 pub(crate) struct StreamMd {
     ansi: bool,
     buf: String,
@@ -152,14 +150,11 @@ pub(crate) struct StreamMd {
 }
 
 impl StreamMd {
-    /// (Wired into the REPL in block 4 — temporary allow.)
-    #[allow(dead_code)]
     pub(crate) fn new(width: usize, ansi: bool) -> Self {
         Self { ansi, buf: String::new(), st: LineRenderer::new(width, ansi) }
     }
 
     /// Feed one content delta; returns everything printable now.
-    #[allow(dead_code)]
     pub(crate) fn feed(&mut self, delta: &str) -> String {
         if !self.ansi {
             return delta.to_string();
@@ -176,7 +171,6 @@ impl StreamMd {
 
     /// End of the reply: flush the unterminated tail (and close an
     /// open fence visibly, like `render`).
-    #[allow(dead_code)]
     pub(crate) fn finish(&mut self) -> String {
         let mut out = String::new();
         if !self.ansi {
