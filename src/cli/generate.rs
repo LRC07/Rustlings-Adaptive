@@ -27,7 +27,7 @@ pub(crate) fn cmd_generate(
     arg: Option<&str>,
 ) -> Option<PathBuf> {
     println!();
-    println!("── 生成练习 ──");
+    println!("{}", render::header("生成练习"));
     let topic_text = match arg {
         Some(t) => t.to_string(),
         None => {
@@ -160,7 +160,7 @@ pub(crate) fn cmd_generate(
             let slots: Vec<String> = out.slots.iter().map(|(k, v)| format!("{k}={v}")).collect();
             println!();
             println!(
-                "  ✔ 已生成（第 {} 轮通过）：{}（{}）",
+                "  ✓ 已生成（第 {} 轮通过）：{}（{}）",
                 out.attempts,
                 out.title,
                 out.difficulty.name_cn()

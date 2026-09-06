@@ -236,7 +236,7 @@ pub(crate) fn after_pass(
     let mut input = build_input(repo_root, meta, &content, attempts_before);
 
     println!();
-    println!("{}", render::cyan("── 解答评审门 ──"));
+    println!("{}", render::header("解答评审门"));
 
     let caller = make_caller(deps);
     let input2 = input.clone();
@@ -364,6 +364,16 @@ fn render_gate(o: &review::GateOutcome) {
     }
 
     println!("  · 最终判定：{}", render::bold(o.verdict.label_cn()));
+    // 9.6 实测 B5：a passing verdict with constraint violations felt
+    // too lenient — make the warning loud at the verdict itself.
+    if s.has_constraint_violations() {
+        println!(
+            "  {} 存在约束违例（{} 处）——通过记录保留，但请按上面的建议改进；\
+             复习时系统会建议附加更严约束的变式。",
+            render::yellow("⚠"),
+            s.violations.len()
+        );
+    }
     if !o.counted_as_mastery() {
         println!("    （本题不计入掌握；建议 [a] 问教练弄懂后再练变式）");
     }
@@ -417,7 +427,7 @@ fn step1_explanation_check(
         return None;
     };
     println!();
-    println!("{}", render::cyan("── 复盘 · 理解校核 ──"));
+    println!("{}", render::header("复盘 · 理解校核"));
 
     let input2 = input.clone();
     let lf = last_fail.map(str::to_string);
@@ -534,7 +544,7 @@ fn step2_challenge(
     }
 
     println!();
-    println!("{}", render::cyan("── 复盘 · 更优解挑战 ──"));
+    println!("{}", render::header("复盘 · 更优解挑战"));
     println!("  你的解法已通过测试，但还有更地道的方向（不给答案，只给方向）：");
     for (i, h) in hints.iter().take(3).enumerate() {
         println!("    {}. {h}", i + 1);
@@ -593,7 +603,7 @@ fn step2_challenge(
 /// model for the four judged dimensions. Offline → machine-only table.
 fn step3_comparison(deps: &DebriefDeps, input: &review::ReviewInput) {
     println!();
-    println!("{}", render::cyan("── 复盘 · 对比总结 ──"));
+    println!("{}", render::header("复盘 · 对比总结"));
 
     let machine = {
         let input2 = input.clone();
@@ -637,6 +647,7 @@ fn render_comparison(m: &review::MachineComparison, llm: Option<&review::LlmComp
     };
 
     println!("    {}  {}  {}", render::pad_display("维度", dim_w), render::pad_display("用户解", 26), render::pad_display("参考解", 26));
+    println!("    {}", render::dim(&"─".repeat(dim_w + 2 + 26 + 2 + 26)));
     row("有效行数", m.user.effective_lines.to_string(), ref_cell(m.reference.as_ref().map(|r| r.effective_lines.to_string()).unwrap_or_default()));
     let kinds = if m.user_clippy_kinds.is_empty() {
         "0 条".to_string()
@@ -702,7 +713,7 @@ fn step4_follow_up(
     follow_up: review::FollowUp,
 ) -> Option<String> {
     println!();
-    println!("{}", render::cyan("── 复盘 · 下一步 ──"));
+    println!("{}", render::header("复盘 · 下一步"));
     println!("  {}", follow_up.label_cn());
     println!("  [Enter] 回到对话让教练安排下一题   [n] 留在做题页   [q] 返回做题页");
 

@@ -275,7 +275,7 @@ fn handle_model(arg: Option<&str>, cfg: &mut ModelConfig, client: &mut Option<Ll
     }
     let Some(name) = arg else {
         println!();
-        println!("{}", render::cyan("── 模型档案 ──"));
+        println!("{}", render::header("模型档案"));
         // Column widths from actual content (display cells, CJK-aware)
         // so mixed Chinese/ASCII rows line up.
         let name_w = cfg.models.iter().map(|m| m.name.width()).max().unwrap_or(4).max(4);
@@ -805,7 +805,7 @@ fn print_usage(cfg: &ModelConfig, tracker: &Arc<Mutex<UsageTracker>>) {
     let s = t.session_totals();
     let a = t.all_totals();
     println!();
-    println!("{}", render::cyan("── 用量与花费 ──"));
+    println!("{}", render::header("用量与花费"));
     let reasoning_note = |r: u64| {
         if r > 0 { format!("（其中推理 {r}）") } else { String::new() }
     };
@@ -840,7 +840,7 @@ fn print_usage(cfg: &ModelConfig, tracker: &Arc<Mutex<UsageTracker>>) {
 /// print, never clears the screen.
 fn print_stats(practice_ctx: &practice::PracticeCtx, arg: Option<&str>) {
     println!();
-    println!("{}", render::cyan("── 学习画像 ──"));
+    println!("{}", render::header("学习画像"));
     // 9.6 实测：`/stats 显示到期…`（疑问句）silently ran the bare
     // page, swallowing the question. Reject unknown subcommands
     // instead — and point at the "drop the slash to ASK the coach" path.
@@ -904,12 +904,18 @@ fn print_stats(practice_ctx: &practice::PracticeCtx, arg: Option<&str>) {
     } else {
         println!("{}", render::dim("    （强度 = SM-2 的 EF 值，1.3–2.5，越高记得越牢；复习 = 下次到期日）"));
     }
-    for (c, fails, attempts) in &weak {
+    // Align the concept column so the metric columns line up.
+    let names: Vec<String> = weak.iter().map(|(c, _, _)| cname(c)).collect();
+    let name_w = names.iter().map(|n| n.width()).max().unwrap_or(0);
+    for ((c, fails, attempts), name) in weak.iter().zip(&names) {
         let s = profile.concepts.get(c);
         let ef = s.map(|s| format!("强度 {:.1}", s.sm2.ef)).unwrap_or_default();
         let due_str =
             s.and_then(|s| s.sm2.due.as_deref()).map(due_cn).unwrap_or_else(|| "—".into());
-        println!("    {} ｜ 失败 {fails}/{attempts} ｜ {ef} ｜ 复习 {due_str}", cname(c));
+        println!(
+            "    {} ｜ 失败 {fails}/{attempts} ｜ {ef} ｜ 复习 {due_str}",
+            render::pad_display(name, name_w)
+        );
     }
 
     // Top error codes (coarse track).
@@ -970,7 +976,7 @@ fn cmd_config(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
         if render::ansi_enabled() {
             clear_viewport();
         }
-        println!("{}", render::cyan("── 模型配置 ──"));
+        println!("{}", render::header("模型配置"));
         println!("  输入编号修改对应项（1..6），回车返回；修改会写回 config.toml");
         println!();
         println!("  1. endpoint : {}", cfg.endpoint);
@@ -1188,7 +1194,7 @@ fn sessions_list(
         println!();
         println!(
             "{} 第 {}/{} 页 ｜ 共 {} 条（全局序号可直接用于 /sessions <n> / load / export）",
-            render::cyan("── 会话列表 ──"),
+            render::header("会话列表"),
             page + 1,
             total_pages,
             infos.len()
@@ -1330,7 +1336,7 @@ fn topics_page() {
     match crate::taxonomy::ConceptGraph::load(std::path::Path::new("taxonomy/concepts.toml")) {
         Ok(g) => {
             println!();
-            println!("{}", render::cyan("── 概念图谱（出题主题的权威列表）──"));
+            println!("{}", render::header("概念图谱（出题主题的权威列表）"));
             for id in g.ids() {
                 let name = g.get(id).map(|n| n.name.as_str()).unwrap_or("");
                 for piece in render::wrap_line(&format!("  {id} ｜ {name}"), render::term_width()) {

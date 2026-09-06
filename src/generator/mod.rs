@@ -861,6 +861,8 @@ fn llm_draft_loop(
         let _ = fs::remove_dir_all(&workdir);
         match gated {
             Ok(_report) => {
+                let mut draft = draft;
+                calibrate_difficulty(&mut draft);
                 return Ok(DraftResult { draft, module_name, hints: draft_hints, attempts: attempt });
             }
             Err(e) => {
@@ -872,6 +874,22 @@ fn llm_draft_loop(
         "连续 {LLM_ATTEMPTS} 轮未产出合格题目（最后原因：{last_fail}）。\
          建议换一个更具体的主题或错误码（如 E0382，走模板直配），或 /model 切换更快的模型后重试。"
     )
+}
+
+/// Difficulty floor for generated drafts (9.6 实测 B3：综合题被 LLM 自
+/// 标"简单"——它的难度语义只看"应用几个已知修复"，不看综合范围）。
+/// A draft touching ≥2 concepts or carrying ≥2 TRAINING constraints is
+/// at least medium, whatever the model claimed. The tier-2/3 safety
+/// bans (`ban=…` appended by `ensure_ban_constraints`) are guardrails,
+/// not difficulty contributors, and are excluded; tier-1 template
+/// fills keep their hand-rated difficulty.
+fn calibrate_difficulty(d: &mut template::ExerciseDraft) {
+    let training = d.constraints.iter().filter(|c| !c.starts_with("ban=")).count();
+    if d.difficulty == template::Difficulty::Easy
+        && (d.concepts.len() >= 2 || training >= 2)
+    {
+        d.difficulty = template::Difficulty::Medium;
+    }
 }
 
 /// Concept normalization (§7.5): resolve on the graph; unknown ids fall
@@ -1517,6 +1535,39 @@ fn fresh_workdir(tag: &str) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn generated_difficulty_has_a_floor_for_composite_drafts() {
+        let mk = |concepts: usize, constraints: usize| template::ExerciseDraft {
+            title: "t".into(),
+            concepts: (0..concepts).map(|i| format!("c.{i}")).collect(),
+            error_codes: vec![],
+            difficulty: template::Difficulty::Easy,
+            constraints: (0..constraints).map(|i| format!("ban-{i}")).collect(),
+            body: "fn f() {}".into(),
+            tests: String::new(),
+            reference: String::new(),
+        };
+        let mut d = mk(2, 0);
+        calibrate_difficulty(&mut d);
+        assert_eq!(d.difficulty, template::Difficulty::Medium, "two concepts → medium");
+        let mut d = mk(1, 2);
+        calibrate_difficulty(&mut d);
+        assert_eq!(d.difficulty, template::Difficulty::Medium, "two constraints → medium");
+        let mut d = mk(1, 0);
+        calibrate_difficulty(&mut d);
+        assert_eq!(d.difficulty, template::Difficulty::Easy, "simple draft keeps easy");
+        let mut d = mk(3, 3);
+        d.difficulty = template::Difficulty::Hard;
+        calibrate_difficulty(&mut d);
+        assert_eq!(d.difficulty, template::Difficulty::Hard, "never downgrades");
+        // Safety bans appended by ensure_ban_constraints are guardrails,
+        // not difficulty contributors: 1 concept + only bans stays easy.
+        let mut d = mk(1, 0);
+        ensure_ban_constraints(&mut d);
+        calibrate_difficulty(&mut d);
+        assert_eq!(d.difficulty, template::Difficulty::Easy, "safety bans don't raise difficulty");
+    }
 
     const MINI_TAXONOMY: &str = r#"
 [[concept]]

@@ -40,6 +40,16 @@ fn paint(code: &str, text: &str) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Color semantics (M9a) — one vocabulary across all pages; pick from
+// here for new call sites, no ad-hoc styling:
+// - green  = success (✓, passed, generated)
+// - red    = error / failure (✗, error codes, failed runs)
+// - yellow = warning (⚠, constraint hits, due reviews, reminders)
+// - cyan   = structure (page & card headers, section titles)
+// - dim    = secondary (echoes, hints, footers, trivia)
+// - bold   = the one key number / verdict of a block
+
 pub(crate) fn dim(text: &str) -> String {
     paint("2", text)
 }
@@ -62,6 +72,16 @@ pub(crate) fn red(text: &str) -> String {
 
 pub(crate) fn yellow(text: &str) -> String {
     paint("33", text)
+}
+
+/// Page/card header (M9a): `── title ─────…`, CJK-aware, padded to a
+/// fixed rhythm (capped at the terminal width). One helper so every
+/// page and card shares the same visual language.
+pub(crate) fn header(title: &str) -> String {
+    let total = term_width().min(72);
+    let used = 3 + UnicodeWidthStr::width(title) + 1; // "── " + title + ' '
+    let fill = total.saturating_sub(used).min(28);
+    cyan(&format!("── {title} {}", "─".repeat(fill)))
 }
 
 /// Clear the viewport but keep scrollback (`2J` + home, never `3J`).
