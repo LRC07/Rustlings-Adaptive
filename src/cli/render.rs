@@ -167,6 +167,90 @@ pub(crate) fn wrap_line(line: &str, width: usize) -> Vec<String> {
     pieces.into_iter().filter(|p| !p.is_empty()).collect()
 }
 
+/// ANSI-aware variant of `wrap_line` for panel bodies: SGR escape
+/// sequences are zero-width (never counted, never split mid-sequence)
+/// and a piece left with an open style gets an explicit reset so the
+/// colour cannot bleed into the following rows. Used by `panel`; the
+/// chat path keeps `wrap_line` (fences render plain).
+pub(crate) fn wrap_line_ansi(line: &str, width: usize) -> Vec<String> {
+    if width == 0 || visible_width(line) <= width {
+        return vec![line.to_string()];
+    }
+    let mut pieces = Vec::new();
+    let mut current = String::new();
+    let mut current_w = 0usize;
+    let mut in_esc = false;
+    for ch in line.chars() {
+        if in_esc {
+            current.push(ch);
+            if ch == 'm' {
+                in_esc = false;
+            }
+            continue;
+        }
+        if ch == '\x1b' {
+            in_esc = true;
+            current.push(ch);
+            continue;
+        }
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if current_w + w > width && !current.is_empty() {
+            if let Some(pos) = current.rfind(' ').filter(|p| *p > 0 && !ch.is_whitespace()) {
+                let head = current[..=pos].trim_end().to_string();
+                let tail = current[pos + 1..].to_string();
+                push_closed(&mut pieces, head);
+                current = tail;
+                current_w = visible_width(&current);
+            } else {
+                let piece = current.trim_end().to_string();
+                current.clear();
+                current_w = 0;
+                push_closed(&mut pieces, piece);
+            }
+        }
+        current.push(ch);
+        current_w += w;
+    }
+    let piece = current.trim_end().to_string();
+    push_closed(&mut pieces, piece);
+    pieces
+}
+
+/// Push a wrapped piece, closing an SGR style left open at the break
+/// so it cannot bleed into the following rows.
+fn push_closed(pieces: &mut Vec<String>, piece: String) {
+    if piece.is_empty() {
+        return;
+    }
+    if ends_with_open_sgr(&piece) {
+        pieces.push(format!("{piece}\x1b[0m"));
+    } else {
+        pieces.push(piece);
+    }
+}
+
+/// Whether `s` ends inside an unterminated (non-reset) SGR style.
+/// Only our own CSI form `ESC [ params m` is produced here.
+fn ends_with_open_sgr(s: &str) -> bool {
+    let mut in_esc = false;
+    let mut param_start = 0usize;
+    let mut last_open = false;
+    for (i, c) in s.char_indices() {
+        if in_esc {
+            if c == 'm' {
+                in_esc = false;
+                last_open = &s[param_start..i] != "0";
+            }
+            continue;
+        }
+        if c == '\x1b' {
+            in_esc = true;
+            param_start = i + 2; // skip "ESC ["
+        }
+    }
+    last_open
+}
+
 // ---------------------------------------------------------------------------
 // Page furniture
 // ---------------------------------------------------------------------------
@@ -335,15 +419,32 @@ pub(crate) fn panel_width() -> usize {
 
 /// Render a double-line panel as printable rows. Pure (no I/O): all
 /// rows are exactly `panel_width()` display cells wide (ANSI-aware);
-/// overlong body lines are truncated, long summary values wrap with
-/// the key column hanging.
+/// long body lines wrap (ANSI-aware) instead of being truncated — the
+/// debrief theatre's LLM analysis must stay readable (9.6 实测), and
+/// titles are centered in their bars.
 pub(crate) fn panel(title: &str, summary: &[(String, String)], sections: &[PanelSection]) -> Vec<String> {
     let width = panel_width();
     let content_w = width - 4; // "║ " + body + " ║"
     let mut rows = Vec::new();
 
-    let fill = width.saturating_sub(5 + visible_width(title));
-    rows.push(format!("╔═ {title} {}╗", "═".repeat(fill)));
+    // Overlong titles are truncated (with the … marker) so the bar math
+    // below always has room for its `═` filler.
+    let clip_title = |t: &str| {
+        let max_tw = width.saturating_sub(8);
+        if visible_width(t) > max_tw {
+            truncate_display(t, max_tw)
+        } else {
+            t.to_string()
+        }
+    };
+    let centered = |t: &str| {
+        let total = width.saturating_sub(visible_width(t) + 6);
+        ("═".repeat(total / 2), "═".repeat(total - total / 2))
+    };
+
+    let title = clip_title(title);
+    let (l, r) = centered(&title);
+    rows.push(format!("╔{l}═ {title} ═{r}╗"));
 
     if !summary.is_empty() {
         let kw = summary.iter().map(|(k, _)| k.width()).max().unwrap_or(0);
@@ -364,10 +465,13 @@ pub(crate) fn panel(title: &str, summary: &[(String, String)], sections: &[Panel
         if n > 0 || !summary.is_empty() {
             rows.push(format!("║{}║", " ".repeat(width - 2)));
         }
-        let fill = width.saturating_sub(5 + visible_width(&sec.title));
-        rows.push(format!("╠═ {} {}╣", sec.title, "═".repeat(fill)));
+        let stitle = clip_title(&sec.title);
+        let (l, r) = centered(&stitle);
+        rows.push(format!("╠{l}═ {stitle} ═{r}╣"));
         for line in &sec.lines {
-            rows.push(format!("║ {} ║", pad_display(&truncate_display(line, content_w), content_w)));
+            for piece in wrap_line_ansi(line, content_w) {
+                rows.push(format!("║ {} ║", pad_display(&piece, content_w)));
+            }
         }
     }
 
@@ -474,7 +578,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_truncates_overlong_lines_and_wraps_summary() {
+    fn panel_wraps_overlong_lines_and_summary() {
         let long = "很长很长的评语".repeat(30);
         let secs = vec![PanelSection { title: "四维".into(), lines: vec![long.clone()] }];
         let rows = panel("题", &[], &secs);
@@ -482,8 +586,17 @@ mod tests {
         for r in &rows {
             assert_eq!(visible_width(r), w);
         }
-        let body = rows.iter().find(|r| r.contains('…')).expect("truncation marker");
-        assert_eq!(visible_width(body), w);
+        // Body lines WRAP instead of being truncated: the full text
+        // survives across rows and no … marker appears (9.6 实测: 复盘
+        // 分析被截断不可接受).
+        let joined: String = rows
+            .iter()
+            .map(|r| strip_ansi(r).replace(['║', ' '], ""))
+            .collect();
+        assert!(joined.contains(&long), "full analysis must survive wrapping");
+        assert!(!rows.iter().any(|r| r.contains('…')), "no truncation in body: {rows:?}");
+        let body_rows = rows.len() - 2; // minus top/bottom bars
+        assert!(body_rows >= 2, "long line needs several rows: {rows:?}");
 
         // Summary values longer than the budget wrap with a hanging indent.
         let kv = vec![("触发".into(), "长".repeat(80))];
@@ -493,6 +606,54 @@ mod tests {
         for r in &rows {
             assert_eq!(visible_width(r), w);
         }
+    }
+
+    #[test]
+    fn panel_titles_are_centered() {
+        // "╔═══ title ═══╗" → the part between the border chars.
+        let inner_of = |bar: &str| {
+            let cs: Vec<char> = bar.chars().collect();
+            cs[1..cs.len() - 1].iter().collect::<String>()
+        };
+        let rows = panel("复盘剧场", &[], &[]);
+        let top = &rows[0];
+        assert!(top.starts_with('╔') && top.ends_with('╗'));
+        let inner = inner_of(top);
+        let pos = inner.find("复盘剧场").expect("title present");
+        let count_bar = |s: &str| s.chars().filter(|c| *c == '═').count();
+        let left = count_bar(&inner[..pos]);
+        let right = count_bar(&inner[pos + "复盘剧场".len()..]);
+        assert!(left.abs_diff(right) <= 1, "title not centered: {top:?}");
+        // The `═ title ═` separators hug the title on both sides.
+        assert!(inner[..pos].ends_with("═ ") && inner[pos + "复盘剧场".len()..].starts_with(" ═"));
+        // Section title bars are centered too.
+        let secs = vec![PanelSection { title: "机器实测".into(), lines: vec!["x".into()] }];
+        let rows = panel("题", &[], &secs);
+        let bar = rows.iter().find(|r| r.contains("机器实测")).expect("section bar");
+        let inner = inner_of(bar);
+        let pos = inner.find("机器实测").unwrap();
+        let left = count_bar(&inner[..pos]);
+        let right = count_bar(&inner[pos + "机器实测".len()..]);
+        assert!(left.abs_diff(right) <= 1, "section title not centered: {bar:?}");
+    }
+
+    #[test]
+    fn wrap_line_ansi_skips_escape_width_and_closes_open_styles() {
+        // Plain long text wraps like wrap_line would by visible width.
+        let line = "一二三四五六七八九十".repeat(3);
+        let pieces = wrap_line_ansi(&line, 8);
+        assert!(pieces.iter().all(|p| visible_width(p) <= 8));
+        assert_eq!(pieces.concat(), line);
+        // A leading SGR is zero-width: the same text fits per piece.
+        let colored = format!("\x1b[31m{line}\x1b[0m");
+        let pieces = wrap_line_ansi(&colored, 8);
+        assert!(pieces.iter().all(|p| visible_width(p) <= 8));
+        assert_eq!(strip_ansi(&pieces.concat()), line);
+        // A break inside an open style closes it on that piece.
+        let open = format!("\x1b[1m{}{}", "字".repeat(10), "尾");
+        let pieces = wrap_line_ansi(&open, 6);
+        assert!(pieces.len() >= 2);
+        assert!(pieces[0].ends_with("\x1b[0m"), "open style closed: {:?}", pieces[0]);
     }
 
     #[test]

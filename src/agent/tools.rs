@@ -397,7 +397,17 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
             // triple-verification, no rustc evidence, no archiving).
             // Return a structured instruction instead of an error so
             // the model follows the designed degradation path.
-            let reason = ellipsize(&format!("{e:#}"), 400);
+            let full = format!("{e:#}");
+            // The rustc diagnostics block (up to ~1200 chars) is repair-
+            // loop food, not user reading material — the visible note
+            // carries the failure reason in FULL (9.6 实测: 原因被省略
+            // 号吃掉), only the model-facing copy is capped.
+            let reason_note = full
+                .split("\n[未完成模板的 rustc 诊断]")
+                .next()
+                .unwrap_or(&full)
+                .to_string();
+            let reason = ellipsize(&full, 400);
             return Ok(ToolOutcome {
                 value: json!({
                     "ok": false,
@@ -406,7 +416,7 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
                                  换一个主题，或 /model 切换更快的模型。**不要自行在回复里编写练习题**\
                                  ——未经本地三重校验的题目不可靠，这不是合格的替代品。",
                 }),
-                note: Some(format!("出题失败：{reason}")),
+                note: Some(format!("出题失败：{reason_note}")),
                 practice: None,
                 usage: bridge.acc,
             });

@@ -96,7 +96,7 @@ pub(crate) fn enter(ctx: &PracticeCtx, opts: EnterOpts, debrief: Option<&Debrief
         // 9.6 实测：斜杠命令在做题页会被吞（"/stats …" 报未知命令、
         // "/exit" 触发一次编译）。给明确的逃生口指引。
         if line.starts_with('/') {
-            println!("  做题页内不处理斜杠命令——先按 b 返回对话再使用（/exit 也在对话页）。");
+            println!("  做题页内不处理斜杠命令——按 b 回对话后再使用（/exit 也在对话页）。");
             continue;
         }
         if line == "b" || line == "q" || line == "back" {
@@ -117,11 +117,11 @@ pub(crate) fn enter(ctx: &PracticeCtx, opts: EnterOpts, debrief: Option<&Debrief
             }
             "n" => {
                 match first_pending(&items, &index, opts.include_fixtures) {
-                    Some(idx) => {
-                        if let Some(msg) = run_exercise(ctx, &mut index, idx, &items, debrief) {
-                            return Some(msg);
-                        }
-                    }
+                    Some(idx) => match run_exercise(ctx, &mut index, idx, &items, debrief) {
+                        ExerciseExit::Handback(msg) => return Some(msg),
+                        ExerciseExit::Chat => return None,
+                        ExerciseExit::List => {}
+                    },
                     None => println!("  所有练习已完成！"),
                 }
                 continue;
@@ -142,17 +142,19 @@ pub(crate) fn enter(ctx: &PracticeCtx, opts: EnterOpts, debrief: Option<&Debrief
                 match other.parse::<usize>() {
                     Ok(n) if n >= 1 && n <= visible.len() => {
                         let idx = visible[n - 1];
-                        if let Some(msg) = run_exercise(ctx, &mut index, idx, &items, debrief) {
-                            return Some(msg);
+                        match run_exercise(ctx, &mut index, idx, &items, debrief) {
+                            ExerciseExit::Handback(msg) => return Some(msg),
+                            ExerciseExit::Chat => return None,
+                            ExerciseExit::List => {}
                         }
                     }
                     // Out-of-range numbers get their own hint — "unknown
                     // command: 3" told the learner nothing (9.5 实测).
                     Ok(_) => println!(
-                        "  序号超出范围：本视图共 {} 题（数字选题 / n 下一题 / t 主题 / a 全库 / b 返回）",
+                        "  序号超出范围：本视图共 {} 题（数字选题 / n 下一题 / t 主题 / a 全库 / b 回对话）",
                         visible.len()
                     ),
-                    _ => println!("未知命令: {other}（数字选题 / n 下一题 / t 主题 / a 全库 / b 返回）"),
+                    _ => println!("未知命令: {other}（数字选题 / n 下一题 / t 主题 / a 全库 / b 回对话）"),
                 }
             }
         }
@@ -172,11 +174,11 @@ pub(crate) fn enter_at(
     let want = path.canonicalize().ok();
     let idx = items.iter().position(|i| i.ex.path.canonicalize().ok() == want);
     match idx {
-        Some(i) => {
-            if let Some(msg) = run_exercise(ctx, &mut index, i, &items, debrief) {
-                return Some(msg);
-            }
-        }
+        Some(i) => match run_exercise(ctx, &mut index, i, &items, debrief) {
+            ExerciseExit::Handback(msg) => return Some(msg),
+            ExerciseExit::Chat => return None,
+            ExerciseExit::List => {}
+        },
         None => println!("  生成文件未出现在练习列表（意外），可手动打开 {}", path.display()),
     }
     enter(ctx, opts, debrief)
@@ -336,7 +338,7 @@ fn render_board(board: &Board, mode: &Mode) -> Vec<usize> {
             if visible.is_empty() {
                 println!("  数字选题（本会话暂无题目；a 看全库后用数字选题）");
             } else {
-                println!("  数字选题（本会话） ｜ a 全库 ｜ t <主题> ｜ n 下一题 ｜ v 验证 ｜ b 返回");
+                println!("  数字选题（本会话） ｜ a 全库 ｜ t <主题> ｜ n 下一题 ｜ v 验证 ｜ b 回对话");
             }
             visible
         }
@@ -351,7 +353,7 @@ fn render_board(board: &Board, mode: &Mode) -> Vec<usize> {
                 print_row(board, i, n + 1);
             }
             println!();
-            println!("  数字选题 ｜ h 首页 ｜ a 全库 ｜ t <主题> ｜ b 返回");
+            println!("  数字选题 ｜ h 首页 ｜ a 全库 ｜ t <主题> ｜ b 回对话");
             ids
         }
         Mode::All => {
@@ -371,7 +373,7 @@ fn render_board(board: &Board, mode: &Mode) -> Vec<usize> {
                 }
             }
             println!();
-            println!("  数字选题 ｜ h 首页 ｜ t <主题> ｜ v 验证 ｜ b 返回");
+            println!("  数字选题 ｜ h 首页 ｜ t <主题> ｜ v 验证 ｜ b 回对话");
             visible
         }
     }
@@ -469,6 +471,18 @@ fn read_prompt(prompt: &str) -> Option<String> {
     }
 }
 
+/// How `run_exercise` hands control back (9.6 实测: 复盘完回对话要在
+/// 做题页/列表页连按多次 b——现在 `q` 从做题页直达对话，`b` 回列表).
+enum ExerciseExit {
+    /// Hand a coach message back to the conversation (`[a]` 问教练 or
+    /// the debrief `[Enter]` follow-up request).
+    Handback(String),
+    /// Leave practice entirely, back to the chat REPL (`q`).
+    Chat,
+    /// Return to the exercise list (`b`).
+    List,
+}
+
 /// Practice one exercise. Returns Some(coach-message) for `[a] 问教练`
 /// or a debrief follow-up request.
 fn run_exercise(
@@ -477,16 +491,22 @@ fn run_exercise(
     idx: usize,
     items: &[Item],
     debrief: Option<&DebriefDeps>,
-) -> Option<String> {
+) -> ExerciseExit {
     let mut cur = idx;
     let mut hint_idx = 0usize; // one more hint revealed per [h]
     let mut last_fail: Option<String> = None; // session-local failure snapshot (debrief Step 1)
-    let mut last_run_code: Option<String> = None; // content of the previous run
+    let mut last_run_code: Option<String>; // content of the previous run
     loop {
         let item = &items[cur];
         let key = item.key.clone();
         let meta = index.get(&key).cloned();
         repaint_exercise(&item.ex, meta.as_ref(), None);
+        // The run ON ENTERING an exercise is automatic (the page opens
+        // with the current verdict), not a user action — it must never
+        // count as an attempt (9.6 实测: "edit 一次通过却被记失败一
+        // 次"). Baseline = the file's content right now, reset per
+        // exercise, so this first run compares equal → verification run.
+        last_run_code = std::fs::read_to_string(&item.ex.path).ok();
         loop {
             let was_passed_before = index
                 .get(&key)
@@ -558,17 +578,25 @@ fn run_exercise(
                         hint_idx > 0,
                     )
                 {
-                    return Some(msg);
+                    return ExerciseExit::Handback(msg);
                 }
             }
             println!();
-            println!("  [r] 重跑   [e] 编辑   [h] 提示   [a] 问教练   [f] 反馈   [n] 下一题   [b] 返回");
-            let mut sel = read_prompt("> ")?;
+            println!(
+                "  [r] 重跑   [e] 编辑   [h] 提示   [a] 问教练   [f] 反馈   [n] 下一题   [b] 列表   [q] 回对话"
+            );
+            let mut sel = match read_prompt("> ") {
+                Some(s) => s,
+                None => return ExerciseExit::List, // ^C / EOF → list menu
+            };
             // Slash commands inside the exercise page: answer inline
             // (no recompile) and keep reading the menu.
             while sel.trim().starts_with('/') {
-                println!("  做题页内不处理斜杠命令——[b] 返回列表，再按 b 回对话后使用（/exit 同）。");
-                sel = read_prompt("> ")?;
+                println!("  做题页内不处理斜杠命令——[q] 直接回对话，或 [b] 回列表后再使用（/exit 同）。");
+                sel = match read_prompt("> ") {
+                    Some(s) => s,
+                    None => return ExerciseExit::List,
+                };
             }
             match sel.trim() {
                 "r" | "" => repaint_exercise(&item.ex, meta.as_ref(), Some(&res)),
@@ -578,7 +606,7 @@ fn run_exercise(
                 }
                 "a" => {
                     if let Some(msg) = coach_request(&item.ex, meta.as_ref(), &res) {
-                        return Some(msg);
+                        return ExerciseExit::Handback(msg);
                     }
                     repaint_exercise(&item.ex, meta.as_ref(), Some(&res));
                 }
@@ -612,7 +640,8 @@ fn run_exercise(
                         None => println!("  所有练习已完成！"),
                     }
                 }
-                "b" | "q" | "back" => return None,
+                "b" | "back" => return ExerciseExit::List,
+                "q" => return ExerciseExit::Chat,
                 other => println!("未知命令: {other}"),
             }
         }

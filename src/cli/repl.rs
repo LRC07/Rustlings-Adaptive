@@ -943,7 +943,17 @@ fn agent_turn(
                 print!("{}", super::md::render(text, render::term_width(), render::ansi_enabled()));
             }
             for note in &turn.tool_notes {
-                println!("  · {note}");
+                // Wrap with a hanging indent instead of letting the
+                // terminal soft-wrap: failure reasons (9.6 实测) stay
+                // readable as full multi-line text.
+                let budget = render::term_width().saturating_sub(4).max(20);
+                for (i, piece) in render::wrap_line(note, budget).into_iter().enumerate() {
+                    if i == 0 {
+                        println!("  · {piece}");
+                    } else {
+                        println!("    {piece}");
+                    }
+                }
             }
             // R6: per-turn usage footer.
             let total = tracker.lock().unwrap_or_else(|p| p.into_inner()).all_totals();

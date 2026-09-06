@@ -271,7 +271,24 @@ impl<F: FnMut(&str) -> Result<LlmReply>> LlmCaller for F {
 /// free-form generations (tier 3) all present as an `ExerciseDraft`
 /// and leave through this function; on failure the error text is what
 /// the repair loop feeds back to the model.
-pub fn gate_draft(d: &template::ExerciseDraft, workdir: &Path) -> Result<verifier::VerifyReport> {
+///
+/// `adopt_first_error` (9.6 实测): for LLM drafts (tiers 2/3) the
+/// declared error codes are the model's GUESS, while the unfinished
+/// body's real first error is knowable — a mismatch is no longer a
+/// rejected round but a self-correcting adoption (reality wins). Tier 1
+/// keeps the strict check: a hand template's declared codes are
+/// curated metadata (题卡 / 反查路由 / fixture 轮转测试都依赖它).
+pub fn gate_draft(d: &mut template::ExerciseDraft, workdir: &Path) -> Result<verifier::VerifyReport> {
+    gate_draft_with_policy(d, workdir, false)
+}
+
+/// Policy switch of `gate_draft` (`adopt = true` → L2/L3 self-correcting
+/// first-error handling, see above).
+pub fn gate_draft_with_policy(
+    d: &mut template::ExerciseDraft,
+    workdir: &Path,
+    adopt_first_error: bool,
+) -> Result<verifier::VerifyReport> {
     // Gate 2: static rule filter.
     let violations = template::rule_filter_draft(d);
     if !violations.is_empty() {
@@ -299,7 +316,11 @@ pub fn gate_draft(d: &template::ExerciseDraft, workdir: &Path) -> Result<verifie
         workdir,
     )
     .map_err(|e| anyhow!("校验执行失败：{e:#}"))?;
-    template::first_error_matches(&d.error_codes, &report)?;
+    if adopt_first_error {
+        adopt_real_first_error(d, &report);
+    } else {
+        template::first_error_matches(&d.error_codes, &report)?;
+    }
     if !report.all_pass() {
         // Attach the unfinished template's real rustc diagnostics so
         // the repair loop (§7.5) can feed them back to the model.
@@ -318,6 +339,23 @@ pub fn gate_draft(d: &template::ExerciseDraft, workdir: &Path) -> Result<verifie
         bail!("{}\n[未完成模板的 rustc 诊断]\n{diags}", failure_reason(&report));
     }
     Ok(report)
+}
+
+/// Self-correcting first-error adoption (9.6 实测): the exercise's
+/// essence is the KNOWLEDGE POINT, not which compile error happens to
+/// surface first — an LLM draft whose declared codes miss the body's
+/// real first error gets its declaration replaced by the observed code
+/// instead of burning a repair round. Returns true when adopted.
+/// Todo-type drafts (body compiles, tests fail) are untouched.
+fn adopt_real_first_error(d: &mut template::ExerciseDraft, report: &verifier::VerifyReport) -> bool {
+    let Some(actual) = &report.first_error_code else {
+        return false;
+    };
+    if d.error_codes.iter().any(|c| c == actual) {
+        return false;
+    }
+    d.error_codes = vec![actual.clone()];
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -598,7 +636,7 @@ fn generate_matched(
         draft.tests = rendered.tests.clone();
         draft.reference = rendered.reference.clone();
         let workdir = fresh_workdir("rustlings_generate")?;
-        let gated = gate_draft(&draft, &workdir);
+        let gated = gate_draft(&mut draft, &workdir);
         let _ = fs::remove_dir_all(&workdir);
         let report = match gated {
             Ok(r) => r,
@@ -857,7 +895,7 @@ fn llm_draft_loop(
         ensure_ban_constraints(&mut draft);
 
         let workdir = fresh_workdir("rustlings_llm")?;
-        let gated = gate_draft(&draft, &workdir);
+        let gated = gate_draft_with_policy(&mut draft, &workdir, true);
         let _ = fs::remove_dir_all(&workdir);
         match gated {
             Ok(_report) => {
@@ -1537,8 +1575,7 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn generated_difficulty_has_a_floor_for_composite_drafts() {
-        let mk = |concepts: usize, constraints: usize| template::ExerciseDraft {
+    fn generated_difficulty_has_a_floor_for_composite_drafts() {        let mk = |concepts: usize, constraints: usize| template::ExerciseDraft {
             title: "t".into(),
             concepts: (0..concepts).map(|i| format!("c.{i}")).collect(),
             error_codes: vec![],
@@ -1567,6 +1604,44 @@ mod tests {
         ensure_ban_constraints(&mut d);
         calibrate_difficulty(&mut d);
         assert_eq!(d.difficulty, template::Difficulty::Easy, "safety bans don't raise difficulty");
+    }
+
+    #[test]
+    fn llm_draft_adopts_the_real_first_error_code() {
+        let mk = |codes: &[&str]| template::ExerciseDraft {
+            title: "t".into(),
+            concepts: vec!["test.concept".into()],
+            error_codes: codes.iter().map(|s| s.to_string()).collect(),
+            difficulty: template::Difficulty::Easy,
+            constraints: vec![],
+            body: "fn f() {}".into(),
+            tests: String::new(),
+            reference: String::new(),
+        };
+        let report = |code: Option<&str>| crate::verifier::VerifyReport {
+            compiles: true,
+            ref_solution_passes: true,
+            template_fails: true,
+            first_error_code: code.map(str::to_string),
+            template: None,
+            reference: None,
+        };
+        // Declared E0382, body actually fails with E0308 → adopted.
+        let mut d = mk(&["E0382"]);
+        assert!(adopt_real_first_error(&mut d, &report(Some("E0308"))));
+        assert_eq!(d.error_codes, vec!["E0308".to_string()], "reality wins");
+        // Declared codes already contain the actual → untouched.
+        let mut d = mk(&["E0382", "E0308"]);
+        assert!(!adopt_real_first_error(&mut d, &report(Some("E0308"))));
+        assert_eq!(d.error_codes, vec!["E0382".to_string(), "E0308".to_string()]);
+        // Todo-type (compiles, tests fail) → untouched.
+        let mut d = mk(&["E0382"]);
+        assert!(!adopt_real_first_error(&mut d, &report(None)));
+        assert_eq!(d.error_codes, vec!["E0382".to_string()]);
+        // Empty declaration + compile failure → filled with the actual.
+        let mut d = mk(&[]);
+        assert!(adopt_real_first_error(&mut d, &report(Some("E0599"))));
+        assert_eq!(d.error_codes, vec!["E0599".to_string()]);
     }
 
     const MINI_TAXONOMY: &str = r#"
