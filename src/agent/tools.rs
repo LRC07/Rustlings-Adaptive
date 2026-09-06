@@ -370,8 +370,18 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
         &history,
         Some(&mut bridge),
         Some(&mut |stage: generator::GenerateStage| {
+            // Round number and running cost FIRST: the spinner text is
+            // width-truncated and each LLM round can run for minutes —
+            // the 9.6 "重试风暴" felt like a hang because neither was
+            // visible. The rejection reason goes last (truncatable).
+            let cost = env
+                .tracker
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .all_totals()
+                .cost_usd;
             let base = format!(
-                "生成练习（{topic_text}）：{}（第 {}/{} 轮）",
+                "出题「{topic_text}」{} 第{}/{}轮（累计 ${cost:.4}）",
                 stage.stage, stage.attempt, stage.total_attempts
             );
             match &stage.note {

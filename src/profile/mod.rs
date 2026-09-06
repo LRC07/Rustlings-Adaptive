@@ -165,18 +165,22 @@ impl Profile {
         v
     }
 
-    /// Concepts whose SM-2 review is due today or overdue.
+    /// Concepts whose SM-2 review is due today or overdue. A concept
+    /// with a failed recall (q<3 → reps reset to 0) but an elapsed due
+    /// date counts too — it is the MOST in need of a review. This is
+    /// the single authority for "到期" everywhere (stats page, coach
+    /// tools); row formatters must not apply their own predicate
+    /// (9.6 实测：三处口径不一致).
     pub fn due_concepts(&self, today: chrono::DateTime<chrono::Utc>) -> Vec<String> {
         self.concepts
             .iter()
             .filter(|(_, s)| {
-                s.sm2.reps > 0
-                    && s.sm2
-                        .due
-                        .as_deref()
-                        .and_then(|d| chrono::DateTime::parse_from_rfc3339(d).ok())
-                        .map(|d| d <= today)
-                        .unwrap_or(false)
+                s.sm2
+                    .due
+                    .as_deref()
+                    .and_then(|d| chrono::DateTime::parse_from_rfc3339(d).ok())
+                    .map(|d| d <= today)
+                    .unwrap_or(false)
             })
             .map(|(c, _)| c.clone())
             .collect()
@@ -458,9 +462,18 @@ mod tests {
         let s = p.concepts.get_mut("c.due-later").unwrap();
         s.sm2.due = Some((now - chrono::Duration::days(1)).to_rfc3339());
         assert_eq!(p.due_concepts(now), vec!["c.due-later".to_string()]);
-        // Never-learned concept (reps=0) is never due.
+        // Never-learned concept (no due date at all) is never due.
         p.concepts.entry("c.fresh".to_string()).or_default();
         assert!(!p.due_concepts(now).contains(&"c.fresh".to_string()));
+        // A concept whose recall FAILED (q<3 → reps reset to 0) but
+        // whose due date has elapsed IS due — it needs review most
+        // (the old reps>0 gate hid it from the queue while the stats
+        // row still said 已到期: the reported口径 contradiction).
+        p.record_debrief(&["c.reset".into()], false, Some(false), 2);
+        assert_eq!(p.concepts.get("c.reset").unwrap().sm2.reps, 0);
+        p.concepts.get_mut("c.reset").unwrap().sm2.due =
+            Some((now - chrono::Duration::days(1)).to_rfc3339());
+        assert!(p.due_concepts(now).contains(&"c.reset".to_string()));
     }
 
     #[test]

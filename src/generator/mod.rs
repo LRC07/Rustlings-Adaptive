@@ -638,7 +638,7 @@ fn generate_matched(
 // ---------------------------------------------------------------------------
 
 /// LLM draft rounds (design §7.5 修复环).
-pub const LLM_ATTEMPTS: u32 = 4;
+pub const LLM_ATTEMPTS: u32 = 3;
 
 /// Wire shape of the LLM's draft JSON.
 #[derive(Debug, Deserialize)]
@@ -776,6 +776,7 @@ fn llm_draft_loop(
     let concept_ids: Vec<String> = graph.ids().cloned().collect();
     let started = Instant::now();
     let mut last_fail = String::new();
+    let mut prev_fail = String::new();
     for attempt in 1..=LLM_ATTEMPTS {
         if crate::agent::is_interrupted() {
             crate::agent::reset_interrupt();
@@ -789,6 +790,19 @@ fn llm_draft_loop(
                 attempt - 1
             );
         }
+        // Cost guard (9.6 实测"重试风暴"：4 轮 11 次调用 307s): if the
+        // previous round failed for the SAME reason, feeding it back
+        // again is very unlikely to help — stop burning calls and let
+        // the designed degradation path (structured fallback → suggest
+        // a concrete topic / faster model) take over.
+        if attempt > 2 && !last_fail.is_empty() && last_fail == prev_fail {
+            bail!(
+                "连续两轮因同一原因被拒（{last_fail}）——继续重试意义不大。\
+                 建议换一个更具体的主题或错误码（如 E0382，走模板直配），\
+                 或 /model 切换更快的模型后重试。"
+            );
+        }
+        prev_fail = last_fail.clone();
         if let Some(cb) = progress.as_mut() {
             let note = (attempt > 1 && !last_fail.is_empty())
                 .then(|| last_fail.chars().take(110).collect::<String>());
@@ -854,7 +868,10 @@ fn llm_draft_loop(
             }
         }
     }
-    bail!("连续 {LLM_ATTEMPTS} 轮未产出合格题目。最后失败原因：{last_fail}")
+    bail!(
+        "连续 {LLM_ATTEMPTS} 轮未产出合格题目（最后原因：{last_fail}）。\
+         建议换一个更具体的主题或错误码（如 E0382，走模板直配），或 /model 切换更快的模型后重试。"
+    )
 }
 
 /// Concept normalization (§7.5): resolve on the graph; unknown ids fall

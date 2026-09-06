@@ -841,6 +841,17 @@ fn print_usage(cfg: &ModelConfig, tracker: &Arc<Mutex<UsageTracker>>) {
 fn print_stats(practice_ctx: &practice::PracticeCtx, arg: Option<&str>) {
     println!();
     println!("{}", render::cyan("── 学习画像 ──"));
+    // 9.6 实测：`/stats 显示到期…`（疑问句）silently ran the bare
+    // page, swallowing the question. Reject unknown subcommands
+    // instead — and point at the "drop the slash to ASK the coach" path.
+    if let Some(a) = arg
+        && !a.is_empty()
+        && a.strip_prefix("wrong").is_none()
+    {
+        println!("  未知子命令「{a}」。用法：/stats ｜ /stats wrong <概念|错误码>");
+        println!("  如果你想问的是「{}」，请去掉行首的 / 直接发给教练。", a);
+        return;
+    }
     let store = crate::profile::ProfileStore::load_or_create();
     let profile = &store.profile;
 
@@ -1354,7 +1365,7 @@ fn read_paste() -> Option<String> {
     loop {
         let l = read_line_or_leave("")?;
         if l.trim() == "```" {
-            println!("  （代码已收下；可继续补充问题，直接回车发送）");
+            println!("  （代码已收下；可继续补充问题。输完后再按一次回车——空行即发送）");
             loop {
                 let l = read_line_or_leave("")?;
                 if l.trim().is_empty() {

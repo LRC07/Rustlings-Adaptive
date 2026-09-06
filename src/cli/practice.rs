@@ -93,6 +93,12 @@ pub(crate) fn enter(ctx: &PracticeCtx, opts: EnterOpts, debrief: Option<&Debrief
         if line.is_empty() {
             continue;
         }
+        // 9.6 实测：斜杠命令在做题页会被吞（"/stats …" 报未知命令、
+        // "/exit" 触发一次编译）。给明确的逃生口指引。
+        if line.starts_with('/') {
+            println!("  做题页内不处理斜杠命令——先按 b 返回对话再使用（/exit 也在对话页）。");
+            continue;
+        }
         if line == "b" || line == "q" || line == "back" {
             return None;
         }
@@ -557,8 +563,14 @@ fn run_exercise(
             }
             println!();
             println!("  [r] 重跑   [e] 编辑   [h] 提示   [a] 问教练   [f] 反馈   [n] 下一题   [b] 返回");
-            let s = read_prompt("> ")?;
-            match s.trim() {
+            let mut sel = read_prompt("> ")?;
+            // Slash commands inside the exercise page: answer inline
+            // (no recompile) and keep reading the menu.
+            while sel.trim().starts_with('/') {
+                println!("  做题页内不处理斜杠命令——[b] 返回列表，再按 b 回对话后使用（/exit 同）。");
+                sel = read_prompt("> ")?;
+            }
+            match sel.trim() {
                 "r" | "" => repaint_exercise(&item.ex, meta.as_ref(), Some(&res)),
                 "e" => {
                     exercise::open_editor(&item.ex.path, ctx.editor.as_deref());

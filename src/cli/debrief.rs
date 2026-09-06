@@ -704,7 +704,7 @@ fn step4_follow_up(
     println!();
     println!("{}", render::cyan("── 复盘 · 下一步 ──"));
     println!("  {}", follow_up.label_cn());
-    println!("  [Enter] 回到对话让教练安排下一题   [n] 留在做题页   [q] 退出做题");
+    println!("  [Enter] 回到对话让教练安排下一题   [n] 留在做题页   [q] 返回做题页");
 
     let ans = match read_line("复盘> ") {
         Line::Text(s) => s.trim().to_ascii_lowercase(),
