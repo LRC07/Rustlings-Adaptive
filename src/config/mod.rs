@@ -384,13 +384,36 @@ impl ModelConfig {
             }
         };
         cfg.materialize();
-        cfg.validate_routing()?;
+        cfg.clear_invalid_routing();
         Ok(cfg)
     }
 
-    /// Routing names must point at existing profiles — a typo would
-    /// otherwise silently route a phase to the fallback forever.
-    fn validate_routing(&self) -> Result<()> {
+    /// Routing names must point at existing profiles — a typo, or a
+    /// `[routing]` table copied from someone else's example, must not
+    /// brick startup: warn once and fall back to `active` for that
+    /// phase. (The /model routing panel still BLOCKS saving an invalid
+    /// pick via [`ModelConfig::validate_routing`].)
+    fn clear_invalid_routing(&mut self) {
+        for (phase, field) in [
+            ("chat", &mut self.routing.chat),
+            ("generate", &mut self.routing.generate),
+            ("review", &mut self.routing.review),
+        ] {
+            if let Some(n) = field
+                && !self.models.iter().any(|m| &m.name == n)
+            {
+                eprintln!(
+                    "警告：[routing] {phase} = \"{n}\" 没有对应的 [[models]] 档案，该环节回落当前档案（可用：{}）",
+                    self.models.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join("、")
+                );
+                *field = None;
+            }
+        }
+    }
+
+    /// Strict check used when SAVING from the /model routing panel: a
+    /// typo'd name must not land in the file.
+    pub fn validate_routing(&self) -> Result<()> {
         for (phase, name) in [
             ("chat", &self.routing.chat),
             ("generate", &self.routing.generate),

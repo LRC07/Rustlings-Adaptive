@@ -368,7 +368,7 @@ fn model_panel(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
             );
         }
         println!();
-        println!("  [数字] 切换 ｜ [n] 新建 ｜ [d <名>] 删除 ｜ [q] 返回对话");
+        println!("  [数字] 切换 ｜ [n] 新建 ｜ [d <名>] 删除 ｜ [r] 分场景路由 ｜ [q] 返回对话");
         let Some(line) = read_line_or_leave("模型> ") else { return };
         let t = line.trim();
         if t.starts_with('/') {
@@ -378,6 +378,7 @@ fn model_panel(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
         match t {
             "" | "q" | "b" | "back" => return,
             "n" => model_new(cfg, client),
+            "r" => model_routing(cfg, client),
             t if t == "d" || t.starts_with('d') => {
                 let name = t.strip_prefix('d').map(str::trim).unwrap_or("");
                 model_remove(cfg, client, name);
@@ -404,6 +405,67 @@ fn model_panel(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
                 Ok(_) => println!("  序号超出范围：共 {} 个档案。", cfg.models.len()),
                 _ => println!("  未知输入：数字切换 / n 新建 / d <名> 删除 / q 返回"),
             },
+        }
+    }
+}
+
+/// `/model r` 面板 (M9m)：交互编辑 [routing]——为对话/出题/复盘
+/// 三个环节分别指定档案（0 = 清除，回落当前档案）。与 M9c 单一
+/// 事实源一致：改动经 save_to_default_file 落盘，无隐藏继承。
+fn model_routing(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
+    loop {
+        if render::ansi_enabled() {
+            clear_viewport();
+        }
+        println!("{}", render::header("分场景路由"));
+        let default_name = cfg.active.clone().unwrap_or_default();
+        let label = |n: &Option<String>| {
+            n.clone().unwrap_or_else(|| format!("（默认 {default_name}）"))
+        };
+        println!("  1. 对话 / 工具环 / 假设实验室：{}", label(&cfg.routing.chat));
+        println!("  2. 出题                    ：{}", label(&cfg.routing.generate));
+        println!("  3. 评审门 + 复盘            ：{}", label(&cfg.routing.review));
+        println!();
+        println!("  [1-3] 选择环节后指定档案（0 = 清除） ｜ [q] 返回");
+        let Some(line) = read_line_or_leave("路由> ") else { return };
+        if line.trim().starts_with('/') {
+            println!("  面板内不处理斜杠命令——按 q 返回对话后再使用。");
+            continue;
+        }
+        match line.trim() {
+            "" | "q" | "b" | "back" => return,
+            p @ ("1" | "2" | "3") => {
+                println!("  选择该环节使用的档案（0 = 清除，沿用当前档案）：");
+                for (i, m) in cfg.models.iter().enumerate() {
+                    println!("    {}. {}（{}）", i + 1, m.name, m.model);
+                }
+                let Some(pick) = read_line_or_leave("档案> ") else { return };
+                let pick = pick.trim();
+                let field = match p {
+                    "1" => &mut cfg.routing.chat,
+                    "2" => &mut cfg.routing.generate,
+                    _ => &mut cfg.routing.review,
+                };
+                if pick == "0" {
+                    *field = None;
+                } else {
+                    match pick.parse::<usize>() {
+                        Ok(i) if (1..=cfg.models.len()).contains(&i) => {
+                            *field = Some(cfg.models[i - 1].name.clone());
+                        }
+                        _ => {
+                            println!("  无效选择（1..={} 或 0）。", cfg.models.len());
+                            continue;
+                        }
+                    }
+                }
+                if let Err(e) = cfg.validate_routing() {
+                    println!("  校验失败：{e:#}");
+                    continue;
+                }
+                save_and_rebuild(cfg, client);
+            }
+            _other => println!("  未知输入：1 / 2 / 3 / q"),
         }
     }
 }
