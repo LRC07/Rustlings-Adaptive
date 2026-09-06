@@ -142,7 +142,7 @@ src/llm/        OpenAI 兼容客户端
 src/exercise/   练习发现、运行、题目索引
 src/config/     模型配置加载
 src/usage/      token/费用统计与预算拦截
-templates/      手写练习模板 ×44（TOML）
+templates/      手写练习模板 ×60（TOML，覆盖并发/测试/转换等课件主题）
 taxonomy/       概念图谱定义
 exercises/      练习仓（内置样例题在 fixtures/；你生成的题落在 generated/）
 ```

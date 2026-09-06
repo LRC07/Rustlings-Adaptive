@@ -1,0 +1,100 @@
+# 批次三 B1：方法借用整个 self，字段借用只借字段（拆分借用）
+id = "split-fields-borrow"
+title = "拆分借用：方法的 &mut self 与字段的 &mut field"
+concepts = ["borrowing.split-fields"]
+error_codes = ["E0499"]
+difficulty = "medium"
+constraints = []
+confusion = "Java/C++ 里“同时改对象两个成员”天经地义；Rust 通过方法拿到的可变借用覆盖整个 self——连拿两次就是 E0499。但直接按字段借（&mut p.name + &mut p.score）编译器能证明互不重叠，恰恰是允许的：坑在“借用的粒度是 self 还是字段”"
+hints = ["报错的是第二次 p.score_mut()：两次 &mut self 借用同时存活。", "name_mut/score_mut 的可变借用都覆盖整个 self，粒度太粗。", "改成直接对字段取 &mut：编译器知道 name 和 score 不重叠。"]
+
+body = '''
+// 场景：给会员玩家做“铭牌装饰”——名字追加后缀，积分加奖励。
+//
+// name_mut / score_mut 各自借用 &mut self；decorate 想同时
+// 持有两个，编译器在这里拒绝（E0499）。
+//
+// TODO: 只改 decorate 的函数体——不用这两个方法，直接按
+// 字段借用完成同样的修改（不同字段的 &mut 可以同时存在）。
+struct Player {
+    name: String,
+    score: u32,
+}
+
+impl Player {
+    fn name_mut(&mut self) -> &mut String {
+        &mut self.name
+    }
+    fn score_mut(&mut self) -> &mut u32 {
+        &mut self.score
+    }
+}
+
+pub fn decorate(p: &mut Player) {
+    let name = p.name_mut();
+    let score = p.score_mut();
+    name.push_str("（会员）");
+    *score += {{bonus}};
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decorate_touches_both_fields() {
+        let mut p = Player { name: "{{who}}".to_string(), score: {{base}} };
+        decorate(&mut p);
+        assert_eq!(p.name, format!("{{who}}（会员）"));
+        assert_eq!(p.score, {{base}} + {{bonus}});
+    }
+}
+'''
+
+reference = '''
+struct Player {
+    name: String,
+    score: u32,
+}
+
+impl Player {
+    fn name_mut(&mut self) -> &mut String {
+        &mut self.name
+    }
+    fn score_mut(&mut self) -> &mut u32 {
+        &mut self.score
+    }
+}
+
+pub fn decorate(p: &mut Player) {
+    let name = &mut p.name;
+    let score = &mut p.score;
+    name.push_str("（会员）");
+    *score += {{bonus}};
+}
+'''
+
+[[slots]]
+name = "bonus"
+kind = "literal"
+values = ["50", "100", "200"]
+default = "50"
+
+[[slots]]
+name = "who"
+kind = "literal"
+values = ["小王", "Alex", "阿花"]
+default = "小王"
+
+[[slots]]
+name = "base"
+kind = "literal"
+values = ["1000", "2500", "80"]
+default = "1000"
+
+[review_hints]
+root_cause = ["&mut self 借用覆盖整个结构体，两个方法调用即两次可变借用", "对不同字段的 &mut 借用互不重叠，编译器允许同时存在"]
+misconceptions = ["以为任何两次可变借用都互斥", "以为方法比字段访问更“安全”"]

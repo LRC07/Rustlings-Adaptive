@@ -1,0 +1,85 @@
+# 批次三 A1：Copy 语义 vs move（参考 rustlings primitive_types/move_semantics 的对比直觉）
+id = "copy-vs-move"
+title = "Copy 与移动：整体传走之后原值不可再用"
+concepts = ["ownership.copy-clone"]
+error_codes = ["E0382"]
+difficulty = "easy"
+constraints = ["no-clone"]
+confusion = "Python/Java/Go 的赋值都是引用语义，从不“交出”原变量；初学者更不会预期 u32 这类小类型是 Copy（赋值即位拷贝，原值照常可用），而自己定义的结构体默认不是——同一个赋值动作，两种命运"
+anti_patterns = ["clone-everywhere"]
+hints = ["u32 是 Copy 类型，所以 id 那一行不报错；报错的是整个 Record 被按值传走了。", "读一个结构体不需要拥有它。", "把 bump 的参数改成借用，调用处跟着改。"]
+
+body = '''
+// 场景：成绩单要“抄送”一份原始记录，再产出加分后的新记录。
+//
+// 注意 id 是 u32（Copy 类型）：把它赋给别的变量后原值照常可用。
+// 但 Record 整体不是 Copy——按值传进函数就永远离开原变量了。
+//
+// TODO: 不改动 bump 的函数体，不使用 clone，让 main_flow 通过
+// 测试（提示：bump 只需要“读”）。
+#[derive(Debug)]
+struct Record {
+    id: u32,
+    score: f64,
+}
+
+fn bump(r: Record) -> Record {
+    Record { id: r.id, score: r.score + 1.0 }
+}
+
+pub fn main_flow() -> (u32, f64, f64) {
+    let r = Record { id: {{id}}, score: {{score}} };
+    let bumped = bump(r);
+    (r.id, r.score, bumped.score)
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn original_record_survives() {
+        let (id, score, bumped_score) = main_flow();
+        assert_eq!(id, {{id}});
+        assert_eq!(score, {{score}});
+        assert_eq!(bumped_score, {{score}} + 1.0);
+    }
+}
+'''
+
+reference = '''
+#[derive(Debug)]
+struct Record {
+    id: u32,
+    score: f64,
+}
+
+fn bump(r: &Record) -> Record {
+    Record { id: r.id, score: r.score + 1.0 }
+}
+
+pub fn main_flow() -> (u32, f64, f64) {
+    let r = Record { id: {{id}}, score: {{score}} };
+    let bumped = bump(&r);
+    (r.id, r.score, bumped.score)
+}
+'''
+
+[[slots]]
+name = "id"
+kind = "literal"
+values = ["101", "202", "303"]
+default = "101"
+
+[[slots]]
+name = "score"
+kind = "literal"
+values = ["3.5", "7.25", "9.0"]
+default = "3.5"
+
+[review_hints]
+root_cause = ["按值传参把非 Copy 的 Record 移走了", "u32/i32/f64/bool 等基本类型是 Copy，整体结构体默认不是"]
+misconceptions = ["以为所有赋值都是引用语义", "以为给函数传参总会复制一份"]

@@ -1,0 +1,63 @@
+# 批次三 C2：线程与所有权——闭包要 move 拿走数据（课件 6.2.7 / rustlings threads）
+id = "thread-spawn-move"
+title = "线程与所有权：闭包可能活得比数据久"
+concepts = ["concurrency.thread"]
+error_codes = ["E0373"]
+difficulty = "medium"
+constraints = []
+confusion = "Python/Go 的闭包/协程共享外部变量天经地义；Rust 的线程可能比创建它的函数活得更久，借用局部数据的闭包直接被拒（E0373 'closure may outlive'）——必须 move 把所有权搬进闭包"
+hints = ["报错说的是闭包借用了 data，但可能比 data 活得久。", "thread::spawn 的闭包需要 'static——借用满足不了。", "给闭包加 move 关键字，把数据搬进去。"]
+
+body = '''
+// 场景：后台线程统计一批数据的和，主线程 join 拿结果。
+//
+// 下面的闭包只是“借用”了 data——但线程可能活得比这个函数
+// 更久，编译器在 spawn 处拒绝（E0373）。
+//
+// TODO: 只改 thread::spawn 那一行，让闭包合法拿到数据。
+use std::thread;
+
+pub fn sum_in_background(data: Vec<u64>) -> u64 {
+    let handle = thread::spawn(|| data.iter().sum::<u64>());
+    handle.join().unwrap()
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn background_sum_matches() {
+        let data = vec![{{nums}}];
+        let expected: u64 = data.iter().sum();
+        assert_eq!(sum_in_background(vec![{{nums}}]), expected);
+    }
+
+    #[test]
+    fn empty_batch_is_zero() {
+        assert_eq!(sum_in_background(vec![]), 0);
+    }
+}
+'''
+
+reference = '''
+use std::thread;
+
+pub fn sum_in_background(data: Vec<u64>) -> u64 {
+    let handle = thread::spawn(move || data.iter().sum::<u64>());
+    handle.join().unwrap()
+}
+'''
+
+[[slots]]
+name = "nums"
+kind = "literal"
+values = ["1, 2, 3", "10, 20, 30", "5"]
+default = "1, 2, 3"
+
+[review_hints]
+root_cause = ["thread::spawn 要求闭包 'static，借用局部数据不满足", "move 把 data 的所有权搬进闭包，借用问题消失"]
+misconceptions = ["以为闭包默认会复制捕获的变量", "以为 join 了就不用担心生命周期"]

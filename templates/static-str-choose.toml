@@ -1,0 +1,63 @@
+# 批次三 C3：'static 与动态内容——静态借用装不下 format! 的临时值（hard）
+id = "static-str-choose"
+title = "'static 引用：字面量可以，临时值不行"
+concepts = ["lifetimes.static"]
+error_codes = ["E0515", "E0716"]
+difficulty = "hard"
+constraints = []
+confusion = "已知状态码想用 &'static str 返回字面量，可未知分支只有运行时才知道内容——&format!(...) 指向的临时 String 语句一结束就被回收（E0716）。初学者不明白“借用静态生命周期”与“运行时构造”不可兼得，该换成拥有值 String"
+hints = ["报错说的是“不能返回指向临时值的引用”——format! 的结果活不到返回之后。", "'static 的承诺只有字面量给得起。", "把返回类型改成 String，各分支统一成拥有值。"]
+
+body = '''
+// 场景：HTTP 状态码的中文描述。已知码返回字面量没问题，
+// 未知码只能运行时拼接——这正是编译器卡住的地方（E0716）。
+//
+// TODO: 调整 describe 的签名与各分支，让未知码也能正确
+// 返回（提示：统一改为拥有值）。
+pub fn describe(code: u32) -> &'static str {
+    match code {
+        200 => "OK",
+        404 => "Not Found",
+        other => &format!("未知状态码 {other}"),
+    }
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_codes() {
+        assert_eq!(describe(200), "OK");
+        assert_eq!(describe(404), "Not Found");
+    }
+
+    #[test]
+    fn unknown_code_gets_its_number() {
+        assert_eq!(describe({{code}}), format!("未知状态码 {{code}}"));
+    }
+}
+'''
+
+reference = '''
+pub fn describe(code: u32) -> String {
+    match code {
+        200 => "OK".to_string(),
+        404 => "Not Found".to_string(),
+        other => format!("未知状态码 {other}"),
+    }
+}
+'''
+
+[[slots]]
+name = "code"
+kind = "literal"
+values = ["503", "418", "599"]
+default = "503"
+
+[review_hints]
+root_cause = ["&'static str 只能指向整个程序存续期有效的数据（如字面量）", "运行时构造的内容应返回 String（拥有值），借用语义装不下它"]
+misconceptions = ["以为 &format! 与字面量等价", "以为加 'static 标注就能让临时值活下来"]

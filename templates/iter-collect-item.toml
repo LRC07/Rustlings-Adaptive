@@ -1,0 +1,68 @@
+# 批次三 C4：collect 的元素类型——iter() 产出引用，收集拥有值要 copied
+id = "iter-collect-item"
+title = "迭代器收集：collect 的是引用还是拥有值"
+concepts = ["iterators.adapters"]
+error_codes = ["E0277"]
+difficulty = "medium"
+constraints = []
+confusion = "Python 的 [x for x in list] 循环变量就是元素本身；Rust 的 nums.iter() 产出的是 &u32——collect::<Vec<u32>> 要的是拥有值 u32，类型对不上直接 E0277。初学者分不清 iter() / into_iter() / iter_mut() 的产出"
+hints = ["报错说不能从 &u32 的迭代器建 Vec<u32>——差一层“拿走”。", "iter() 产出引用；copied() 能把每个 &u32 变成 u32。", "sum_squares 里的 |&x| 模式是同一个思路：从引用里解构出值。"]
+
+body = '''
+// 场景：从传感器数据里挑出偶数（返回拥有值的新向量）。
+//
+// evens 的 collect 失败：iter() 产出 &u32，Vec<u32> 要 u32
+// （E0277）。sum_squares 是正确的参考写法（fold + |&x|）。
+//
+// TODO: 只改 evens 的函数体，让收集成功。
+pub fn evens(nums: &[u32]) -> Vec<u32> {
+    nums.iter().filter(|x| *x % 2 == 0).collect()
+}
+
+pub fn sum_squares(nums: &[u32]) -> u32 {
+    nums.iter().fold(0, |acc, &x| acc + x * x)
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn evens_collected() {
+        let data: Vec<u32> = vec![{{nums}}];
+        let expected: Vec<u32> = data.iter().filter(|x| *x % 2 == 0).copied().collect();
+        assert_eq!(evens(&data), expected);
+    }
+
+    #[test]
+    fn sum_of_squares() {
+        let data: Vec<u32> = vec![{{nums}}];
+        let expected: u32 = data.iter().map(|&x| x * x).sum();
+        assert_eq!(sum_squares(&data), expected);
+    }
+}
+'''
+
+reference = '''
+pub fn evens(nums: &[u32]) -> Vec<u32> {
+    nums.iter().filter(|x| *x % 2 == 0).copied().collect()
+}
+
+pub fn sum_squares(nums: &[u32]) -> u32 {
+    nums.iter().fold(0, |acc, &x| acc + x * x)
+}
+'''
+
+[[slots]]
+name = "nums"
+kind = "literal"
+values = ["2, 3, 4", "1, 2, 4, 5", "8"]
+default = "2, 3, 4"
+
+
+[review_hints]
+root_cause = ["iter() 产出 &u32，collect 进 Vec<u32> 差一层所有权", "copied()（或 map(|&x| x)）把引用换成拥有值"]
+misconceptions = ["以为 iter() 产出元素本身", "以为 collect 能自动解引用"]

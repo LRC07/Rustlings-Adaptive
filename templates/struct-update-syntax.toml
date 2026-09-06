@@ -1,0 +1,95 @@
+# 批次三 B4：struct 更新语法 ..base（顺带把整体 move 的坑暴露出来）
+id = "struct-update-syntax"
+title = "结构体更新语法：..base 与它的移动语义"
+concepts = ["structs.update"]
+error_codes = ["E0382"]
+difficulty = "medium"
+constraints = []
+confusion = "JS 的 {...base, port} 是浅拷贝，base 随后照常可用；Rust 的 ..base 会把剩余的非 Copy 字段移走——base 之后整体不可再用。初学者还容易逐字段搬运并提前 move 掉整个值"
+hints = ["报错在 send_telemetry(base) 之后：base 已经整体被移走了。", "send_telemetry 只需要读——改成借用即可。", "Config { port, ..base } 能一次搬齐剩余字段。"]
+
+body = '''
+// 场景：配置升级——发一条遥测（只读），然后沿用 host/verbose、
+// 换上新端口。
+//
+// TODO: 修复 upgrade（send_telemetry 的签名可以改），并用结构
+// 体更新语法 ..base 重写构造。
+pub struct Config {
+    pub host: String,
+    pub port: u16,
+    pub verbose: bool,
+}
+
+fn send_telemetry(base: Config) {
+    let _ = base.port;
+}
+
+pub fn upgrade(base: Config, port: u16) -> Config {
+    send_telemetry(base);
+    Config {
+        host: base.host,
+        port,
+        verbose: base.verbose,
+    }
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upgrade_keeps_fields_and_sets_port() {
+        let base = Config {
+            host: "{{host}}".to_string(),
+            port: {{old}},
+            verbose: true,
+        };
+        let cfg = upgrade(base, {{port}});
+        assert_eq!(cfg.host, "{{host}}");
+        assert_eq!(cfg.port, {{port}});
+        assert!(cfg.verbose);
+    }
+}
+'''
+
+reference = '''
+pub struct Config {
+    pub host: String,
+    pub port: u16,
+    pub verbose: bool,
+}
+
+fn send_telemetry(base: &Config) {
+    let _ = base.port;
+}
+
+pub fn upgrade(base: Config, port: u16) -> Config {
+    send_telemetry(&base);
+    Config { port, ..base }
+}
+'''
+
+[[slots]]
+name = "host"
+kind = "literal"
+values = ["edge-01", "edge-02", "edge-03"]
+default = "edge-01"
+
+[[slots]]
+name = "old"
+kind = "literal"
+values = ["8000", "8080", "443"]
+default = "8000"
+
+[[slots]]
+name = "port"
+kind = "literal"
+values = ["9000", "9100", "8443"]
+default = "9000"
+
+[review_hints]
+root_cause = ["send_telemetry 按值收参把 base 整体移走，后面的字段访问触发 E0382", "..base 一次搬齐剩余字段；它对非 Copy 字段同样是移动语义"]
+misconceptions = ["以为 ..base 会复制剩余字段", "以为逐字段手写比 ..base 更“稳”"]

@@ -1,0 +1,68 @@
+# 批次三 B3：自动测试——assert_eq 的 PartialEq/Debug bound 与 #[should_panic]
+id = "test-should-panic"
+title = "自动测试：断言的 bound 与 should_panic"
+concepts = ["testing.basics"]
+error_codes = ["E0369"]
+difficulty = "easy"
+constraints = []
+confusion = "Python 的 assert 对一切对象可用（比较走 __eq__）；Rust 的 assert_eq! 要求类型同时实现 PartialEq 和 Debug——少派生一个就在测试里报 E0277。初学者也常不知道 #[should_panic] 能把“会 panic”本身变成测试目标"
+hints = ["报错在 assert_eq! 那一行：Temp 缺的不是逻辑，是 trait。", "assert_eq! 需要类型实现 PartialEq 和 Debug 两个 trait。", "用 #[derive(...)] 一次补齐；should_panic 的用例不用动。"]
+
+body = '''
+// 场景：温度记录仪的两个用例——温度相等性比较、除零必须恐慌。
+//
+// TODO: 只给 Temp 补上需要的派生，让两个测试都通过；
+// 不要改动测试代码。
+#[derive(Debug)]
+struct Temp(f64);
+
+fn to_temp(c: f64) -> Temp {
+    Temp(c)
+}
+
+fn divide(a: u32, b: u32) -> u32 {
+    a / b
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn same_temperature_is_equal() {
+        assert_eq!(to_temp({{c}}), Temp({{c}}));
+    }
+
+    #[test]
+    #[should_panic]
+    fn divide_by_zero_panics() {
+        divide(1, 0);
+    }
+}
+'''
+
+reference = '''
+#[derive(Debug, PartialEq)]
+struct Temp(f64);
+
+fn to_temp(c: f64) -> Temp {
+    Temp(c)
+}
+
+fn divide(a: u32, b: u32) -> u32 {
+    a / b
+}
+'''
+
+[[slots]]
+name = "c"
+kind = "literal"
+values = ["20.0", "0.5", "36.6"]
+default = "20.0"
+
+[review_hints]
+root_cause = ["assert_eq! 要求 PartialEq + Debug 两个 bound", "#[should_panic] 把 panic 本身变成断言目标"]
+misconceptions = ["以为自定义类型天然可以 == 比较", "以为 panic 只能靠注释说明"]

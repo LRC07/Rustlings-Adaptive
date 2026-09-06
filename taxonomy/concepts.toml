@@ -116,7 +116,7 @@ fix_patterns = ["add-lifetime"]
 id = "lifetimes.static"
 name = "'static 与字符串字面量"
 parents = ["lifetimes"]
-error_codes = ["E0597", "E0716"]
+error_codes = ["E0597", "E0716", "E0515"]
 fix_patterns = ["use-static-str", "to-owned"]
 
 [[concept]]
@@ -155,7 +155,7 @@ fix_patterns = ["type-alias-in-impl"]
 id = "traits.objects"
 name = "trait 对象与 impl Trait"
 parents = ["traits"]
-error_codes = ["E0277", "E0038"]
+error_codes = ["E0277", "E0038", "E0782"]
 fix_patterns = ["use-dyn", "use-impl-trait"]
 
 [[concept]]
@@ -198,8 +198,8 @@ name = "类型系统"
 id = "types.mismatch"
 name = "类型不匹配与转换"
 parents = ["types"]
-error_codes = ["E0308"]
-fix_patterns = ["use-as", "use-from"]
+error_codes = ["E0308", "E0437"]
+fix_patterns = ["use-as", "use-from", "try-from-validate"]
 
 [[concept]]
 id = "types.strings"
@@ -266,8 +266,8 @@ name = "模式匹配"
 id = "patterns.basics"
 name = "match 完备性与枚举解构"
 parents = ["patterns"]
-error_codes = ["E0004", "E0005", "E0308"]
-fix_patterns = ["exhaustive-match", "use-if-let"]
+error_codes = ["E0004", "E0005", "E0308", "E0507", "E0508"]
+fix_patterns = ["exhaustive-match", "use-if-let", "borrow-in-pattern"]
 
 [[concept]]
 id = "ownership.method-receiver"
@@ -340,3 +340,50 @@ name = "pub 可见性与路径"
 parents = ["modules"]
 error_codes = ["E0603", "E0624"]
 fix_patterns = ["widen-visibility"]
+
+[[concept]]
+id = "concurrency"
+name = "并发"
+
+[[concept]]
+id = "concurrency.thread"
+name = "线程与所有权"
+parents = ["concurrency", "ownership"]
+error_codes = ["E0373", "E0500", "E0382"]
+fix_patterns = ["move-into-closure", "join-before-drop"]
+
+[[concept]]
+id = "concurrency.shared"
+name = "Mutex/Arc 共享状态"
+parents = ["concurrency", "pointers"]
+error_codes = ["E0277", "E0596"]
+fix_patterns = ["arc-mutex", "lock-unwrap"]
+
+[[concept]]
+id = "concurrency.channel"
+name = "mpsc 通道"
+parents = ["concurrency"]
+error_codes = ["E0382"]
+fix_patterns = ["clone-sender", "move-into-closure"]
+
+[[concept]]
+id = "testing"
+name = "自动测试"
+
+[[concept]]
+id = "testing.basics"
+name = "断言与 should_panic"
+parents = ["testing"]
+error_codes = ["E0369", "E0277", "E0308"]
+fix_patterns = ["derive-traits"]
+
+[[concept]]
+id = "structs"
+name = "结构体"
+
+[[concept]]
+id = "structs.update"
+name = "更新语法与部分移动"
+parents = ["structs", "ownership"]
+error_codes = ["E0382"]
+fix_patterns = ["use-update-syntax"]

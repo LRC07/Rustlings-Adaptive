@@ -1,0 +1,121 @@
+# 批次三 C1：特型对象 Box<dyn Trait>（参考课件 4.3 / rustlings traits4-5）
+id = "dyn-trait-object"
+title = "特型对象：异构集合要装进 Box<dyn Shape>"
+concepts = ["traits.objects"]
+error_codes = ["E0782", "E0277"]
+difficulty = "medium"
+constraints = []
+confusion = "Java/Python 的 List 天然装任意子类型（对象自带 vtable 指针）；Rust 的 trait 不是类型、没有已知大小，Vec<Shape> 直接编译失败。初学者不知道 Box<dyn Trait> 把“大小未知”转化为“指针已知”"
+hints = ["报错说“expected a type, found a trait”——trait 不是具体类型，也没有大小。", "把每个实现装进 Box::new，集合类型写成 Vec<Box<dyn Shape>>。", "两种 Box 类型不同，vec! 需要显式的元素类型标注。"]
+
+body = '''
+// 场景：画板上有圆有方，统一求总面积。
+//
+// Shape 是特型（不是类型），没有编译期大小——Vec<Shape>
+// 在这里直接失败（E0277）。
+//
+// TODO: 改 total 的参数与 main_flow 的集合，把形状装进
+// Box<dyn Shape> 里再求和。
+use std::f64::consts::PI;
+
+trait Shape {
+    fn area(&self) -> f64;
+}
+
+struct Circle {
+    r: f64,
+}
+
+impl Shape for Circle {
+    fn area(&self) -> f64 {
+        PI * self.r * self.r
+    }
+}
+
+struct Square {
+    a: f64,
+}
+
+impl Shape for Square {
+    fn area(&self) -> f64 {
+        self.a * self.a
+    }
+}
+
+pub fn total(shapes: &[Shape]) -> f64 {
+    shapes.iter().map(|s| s.area()).sum()
+}
+
+pub fn main_flow() -> f64 {
+    let shapes = vec![Circle { r: {{r}} }, Square { a: {{a}} }];
+    total(&shapes)
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mixed_shapes_sum() {
+        let want = std::f64::consts::PI * {{r}} * {{r}} + {{a}} * {{a}};
+        assert!((main_flow() - want).abs() < 1e-9);
+    }
+}
+'''
+
+reference = '''
+use std::f64::consts::PI;
+
+trait Shape {
+    fn area(&self) -> f64;
+}
+
+struct Circle {
+    r: f64,
+}
+
+impl Shape for Circle {
+    fn area(&self) -> f64 {
+        PI * self.r * self.r
+    }
+}
+
+struct Square {
+    a: f64,
+}
+
+impl Shape for Square {
+    fn area(&self) -> f64 {
+        self.a * self.a
+    }
+}
+
+pub fn total(shapes: &[Box<dyn Shape>]) -> f64 {
+    shapes.iter().map(|s| s.area()).sum()
+}
+
+pub fn main_flow() -> f64 {
+    let shapes: Vec<Box<dyn Shape>> =
+        vec![Box::new(Circle { r: {{r}} }), Box::new(Square { a: {{a}} })];
+    total(&shapes)
+}
+'''
+
+[[slots]]
+name = "r"
+kind = "literal"
+values = ["2.0", "1.5", "3.0"]
+default = "2.0"
+
+[[slots]]
+name = "a"
+kind = "literal"
+values = ["4.0", "2.5", "10.0"]
+default = "4.0"
+
+[review_hints]
+root_cause = ["trait 没有编译期大小，不能直接作为值/元素的类型", "Box<dyn Shape> 用指针承载大小未知的实现者，异构集合由此成立"]
+misconceptions = ["以为 trait 可以像具体类型一样存进集合", "以为 Box::new 之后类型就自动统一"]

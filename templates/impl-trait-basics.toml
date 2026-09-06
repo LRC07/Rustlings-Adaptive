@@ -1,0 +1,101 @@
+# 批次三 A2：手写 impl 实现 trait（derive 只解决能比较/能打印，行为要自己写）
+id = "impl-trait-basics"
+title = "实现特型：为类型补上行为契约"
+concepts = ["traits.basics"]
+error_codes = ["E0277"]
+difficulty = "easy"
+constraints = []
+confusion = "Java/Python 的接口在类声明处“顺便”实现（class X implements Y）；Rust 的 impl 块与类型定义分离，忘了写 impl 编译器只会在调用点报 E0277——错误位置离原因很远，初学者容易在调用处瞎改"
+hints = ["报错说的是 WechatPay 没有满足 Pay 这个 bound，不是 checkout 写错了。", "为 WechatPay 单独写一个 impl Pay 块。", "trait 里的方法签名是什么，impl 里就得一字不差。"]
+
+body = '''
+// 场景：收银台支持多种支付方式，只认 Pay 这个契约。
+//
+// CardPay 已经实现；WechatPay 还没有——checkout 一调用就会
+// 在 bound 检查处失败。
+//
+// TODO: 不改动 checkout 与 main_flow，为 WechatPay 实现 Pay
+//（规则：实付 = 金额，无折扣）。
+trait Pay {
+    fn pay(&self, cents: u32) -> String;
+}
+
+struct CardPay;
+
+impl Pay for CardPay {
+    fn pay(&self, cents: u32) -> String {
+        format!("银行卡扣款 {cents} 分")
+    }
+}
+
+struct WechatPay;
+
+fn checkout<T: Pay>(method: &T, cents: u32) -> String {
+    method.pay(cents)
+}
+
+pub fn main_flow() -> (String, String) {
+    (
+        checkout(&CardPay, {{cents}}),
+        checkout(&WechatPay, {{cents}}),
+    )
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn both_channels_checkout() {
+        let (a, b) = main_flow();
+        assert_eq!(a, format!("银行卡扣款 {} 分", {{cents}}));
+        assert_eq!(b, format!("微信支付 {} 分", {{cents}}));
+    }
+}
+'''
+
+reference = '''
+trait Pay {
+    fn pay(&self, cents: u32) -> String;
+}
+
+struct CardPay;
+
+impl Pay for CardPay {
+    fn pay(&self, cents: u32) -> String {
+        format!("银行卡扣款 {cents} 分")
+    }
+}
+
+struct WechatPay;
+
+impl Pay for WechatPay {
+    fn pay(&self, cents: u32) -> String {
+        format!("微信支付 {cents} 分")
+    }
+}
+
+fn checkout<T: Pay>(method: &T, cents: u32) -> String {
+    method.pay(cents)
+}
+
+pub fn main_flow() -> (String, String) {
+    (
+        checkout(&CardPay, {{cents}}),
+        checkout(&WechatPay, {{cents}}),
+    )
+}
+'''
+
+[[slots]]
+name = "cents"
+kind = "literal"
+values = ["1500", "990", "88"]
+default = "1500"
+
+[review_hints]
+root_cause = ["泛型约束 T: Pay 在调用点做检查，类型没有对应 impl 就不满足", "Rust 的实现与类型定义分离，需要独立的 impl 块"]
+misconceptions = ["以为在 struct 定义处声明“实现了什么”", "以为 trait 方法可以在调用处现场补"]

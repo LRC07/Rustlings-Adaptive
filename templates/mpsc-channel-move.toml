@@ -1,0 +1,91 @@
+# 批次三 D2：send 会拿走值——先算再用（课件 6.4 通道）
+id = "mpsc-channel-move"
+title = "通道收发：send 之后值就归接收方了"
+concepts = ["concurrency.channel"]
+error_codes = ["E0382"]
+difficulty = "medium"
+constraints = []
+confusion = "Go 的 channel 发送的是副本（值/引用语义可切换），发完还能用；Rust 的 tx.send(w) 是一次 move——本地再读 w 就是 E0382。发送方要留数据就得先算好再发，或用 clone（有代价）"
+hints = ["报错位置在 send 之后的 w.len()：值已经移进通道。", "send 是 move 语义，发送方不再拥有 w——先统计再发送。", "接收方的 for 循环靠“通道关闭”结束：发送完 drop(tx)。"]
+
+body = '''
+// 场景：主线程把一批词发给工作线程统计总长，同时自己记录
+// 发送的字节数。
+//
+// 下面的循环先 send 再读 w——send 已经把 w 移走了（E0382）。
+// 另外发送完毕后要显式关闭通道（drop tx），否则接收方的
+// for 循环永远等不到结束。
+//
+// TODO: 调整循环体里的顺序，并补上通道的收尾，让 dispatch
+// 通过测试。
+use std::sync::mpsc;
+use std::thread;
+
+pub fn dispatch(words: Vec<String>) -> (usize, usize) {
+    let (tx, rx) = mpsc::channel::<String>();
+    let handle = thread::spawn(move || {
+        let mut total = 0;
+        for w in rx {
+            total += w.len();
+        }
+        total
+    });
+    let mut count = 0;
+    for w in words {
+        tx.send(w).unwrap();
+        count += w.len();
+    }
+    (count, handle.join().unwrap())
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn both_sides_see_the_data() {
+        let words = vec![{{words}}];
+        let expected: usize = words.iter().map(|w| w.len()).sum();
+        let (sent, total) = dispatch(words.clone());
+        assert_eq!(sent, expected);
+        assert_eq!(total, expected);
+    }
+}
+'''
+
+reference = '''
+use std::sync::mpsc;
+use std::thread;
+
+pub fn dispatch(words: Vec<String>) -> (usize, usize) {
+    let (tx, rx) = mpsc::channel::<String>();
+    let handle = thread::spawn(move || {
+        let mut total = 0;
+        for w in rx {
+            total += w.len();
+        }
+        total
+    });
+    let mut count = 0;
+    for w in words {
+        count += w.len();
+        tx.send(w).unwrap();
+    }
+    drop(tx); // 发送完毕：关闭通道，接收方的 for 循环才会结束
+    (count, handle.join().unwrap())
+}
+'''
+
+[[slots]]
+name = "words"
+kind = "literal"
+values = ['"ab".to_string(), "cd".to_string()', '"hi".to_string(), "hey".to_string(), "yo".to_string()', '"ok".to_string()']
+default = '"ab".to_string(), "cd".to_string()'
+
+
+[review_hints]
+root_cause = ["send(w) 把 w 移动给接收方，之后读 w 触发 E0382", "for-in-rx 依赖通道关闭才结束：发送方要 drop(tx)，否则 join 死锁"]
+misconceptions = ["以为 send 传的是副本", "以为通道两端共享同一份数据"]

@@ -1,0 +1,66 @@
+# 批次三 B2：解构引用里的元组——模式里要有 &，而不是把值搬出来（E0508）
+id = "tuple-winner-borrow"
+title = "元组解构：从引用里借字段，而不是搬出来"
+concepts = ["patterns.basics"]
+error_codes = ["E0508"]
+difficulty = "easy"
+constraints = ["no-clone"]
+confusion = "Python 的解构 tup[0] 拿到的都是引用语义，随便用；Rust 的 let (name, _) = pairs[0] 是在“搬走”String——值在共享引用背后且切片非 Copy，编译器拒绝（E0508）。初学者不知道模式里可以写 & 来改成借用"
+anti_patterns = ["clone-everywhere"]
+hints = ["报错说的是 String 不能从非 Copy 切片里“搬出来”。", "解构的模式里写 &：let (name, _) = &pairs[0]。", "此时 name 是 &String，.len() 照常可用。"]
+
+body = '''
+// 场景：成绩册查询——只借用，不复制。
+// pairs 是共享引用背后的数据，函数只负责“看”。
+//
+// 下面的解构试图把 String 搬出共享引用（E0508）。
+//
+// TODO: 只改 first_name_len 的函数体：解构时借用而不是
+// 搬走，取到名字长度（禁止 clone）。
+pub fn first_name_len(pairs: &[(String, u32)]) -> usize {
+    let (name, _) = pairs[0];
+    name.len()
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_name_measured_without_moving() {
+        let pairs = vec![
+            ("{{first}}".to_string(), 30),
+            ("{{second}}".to_string(), 90),
+        ];
+        assert_eq!(first_name_len(&pairs), "{{first}}".len());
+        // 原始数据完好无损。
+        assert_eq!(pairs[0].0, "{{first}}");
+    }
+}
+'''
+
+reference = '''
+pub fn first_name_len(pairs: &[(String, u32)]) -> usize {
+    let (name, _) = &pairs[0];
+    name.len()
+}
+'''
+
+[[slots]]
+name = "first"
+kind = "literal"
+values = ["小明", "Zoe", "老李"]
+default = "小明"
+
+[[slots]]
+name = "second"
+kind = "literal"
+values = ["小红", "Max", "小张"]
+default = "小红"
+
+[review_hints]
+root_cause = ["对非 Copy 类型的切片做按值解构 = 把 String 移出共享引用", "模式里写 &（let (name, _) = &pairs[0]）即改为借用解构"]
+misconceptions = ["以为解构默认是借用的", "以为索引切片会自动得到拷贝"]

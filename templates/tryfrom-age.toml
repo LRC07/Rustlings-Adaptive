@@ -1,0 +1,91 @@
+# 批次三 D3：TryFrom 的关联类型叫 Error 不叫 Err（E0437），验证失败走 Err 分支
+id = "tryfrom-age"
+title = "TryFrom：可能失败的转换要给出错误类型"
+concepts = ["types.mismatch"]
+error_codes = ["E0437"]
+difficulty = "hard"
+constraints = []
+confusion = "From<i32> for Age 一路畅通；TryFrom 的签名里多了一个关联类型 Error——初学者按直觉写成 Err（和 Result 的枚举变体同名），E0437 'not a member of trait' 一下看不懂。关联类型是 trait 契约的一部分，名字必须一字不差"
+hints = ["报错说 Err 不是 TryFrom 的成员——这是在说 impl 块里的关联类型。", "TryFrom 声明的是 type Error；Result 的第二个参数要引用 Self::Error。", "校验失败的分支返回 Err(String) 就交给调用者处理。"]
+
+body = '''
+// 场景：年龄校验——i32 可能越界（负数、过大），必须用
+// TryFrom 而不是 From。
+//
+// 下面的实现把关联类型写成了 Err（E0437）。
+//
+// TODO: 修正关联类型的名字，让校验逻辑原样通过测试。
+#[derive(Debug, PartialEq)]
+pub struct Age(u8);
+
+impl Age {
+    fn value(&self) -> u8 {
+        self.0
+    }
+}
+
+impl TryFrom<i32> for Age {
+    type Err = String;
+
+    fn try_from(v: i32) -> Result<Self, Self::Error> {
+        if (0..=150).contains(&v) {
+            Ok(Age(v as u8))
+        } else {
+            Err(format!("非法年龄 {v}"))
+        }
+    }
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_age_converts() {
+        let age = Age::try_from({{ok}}).unwrap();
+        assert_eq!(age.value(), {{ok}} as u8);
+    }
+
+    #[test]
+    fn invalid_age_reports() {
+        let err = Age::try_from(-1).unwrap_err();
+        assert!(err.contains("非法年龄"));
+    }
+}
+'''
+
+reference = '''
+#[derive(Debug, PartialEq)]
+pub struct Age(u8);
+
+impl Age {
+    fn value(&self) -> u8 {
+        self.0
+    }
+}
+
+impl TryFrom<i32> for Age {
+    type Error = String;
+
+    fn try_from(v: i32) -> Result<Self, Self::Error> {
+        if (0..=150).contains(&v) {
+            Ok(Age(v as u8))
+        } else {
+            Err(format!("非法年龄 {v}"))
+        }
+    }
+}
+'''
+
+[[slots]]
+name = "ok"
+kind = "literal"
+values = ["30", "0", "150"]
+default = "30"
+
+[review_hints]
+root_cause = ["TryFrom 的关联类型是 Error，写错名字就是“trait 没有这个成员”", "可能失败的转换用 TryFrom + Err，而不是 panic 或截断"]
+misconceptions = ["以为关联类型可以随口起名", "以为 TryFrom 和 From 只是多一个参数"]

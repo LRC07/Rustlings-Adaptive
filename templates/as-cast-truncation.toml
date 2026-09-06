@@ -1,0 +1,64 @@
+# 批次三 A3：as 数值转换（as 截断不四舍五入；f64/u8 不能直接混算）
+id = "as-cast-truncation"
+title = "类型转换：as 的截断语义与混算限制"
+concepts = ["types.mismatch"]
+error_codes = ["E0308"]
+difficulty = "easy"
+constraints = []
+confusion = "C/Python 允许数字类型隐式互转或直接混算；Rust 连 u8 + f64 都拒绝，必须显式 as——而且 as 是向零截断不是四舍五入（7.9 → 7），初学者按“转换成 u8 就该四舍五入”理解会算错值"
+hints = ["两处报错是同一个原因：f64 与 u8 不能直接混算。", "as u8 会向零截断：7.9 变 7，不是 8。", "先把 f64 算完，最后一步再转。"]
+
+body = '''
+// 场景：温度上报只接受 0-255 的整数字节。
+//
+// TODO: 用 as 完成转换，让两个函数通过编译与测试；
+// 注意 as 向零截断（不四舍五入）。
+fn mean_byte(a: f64, b: f64) -> u8 {
+    (a + b) / 2.0
+}
+
+fn add_base(base: u8, c: f64) -> u8 {
+    base + c
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mean_truncates_toward_zero() {
+        // 7.9 截断为 7，不四舍五入。
+        assert_eq!(mean_byte(7.0, 8.9), 7);
+        assert_eq!(mean_byte(10.0, 11.9), 10);
+    }
+
+    #[test]
+    fn base_adds_truncated_value() {
+        assert_eq!(add_base(10, {{c}}), 10 + {{c}} as u8);
+    }
+}
+'''
+
+reference = '''
+fn mean_byte(a: f64, b: f64) -> u8 {
+    ((a + b) / 2.0) as u8
+}
+
+fn add_base(base: u8, c: f64) -> u8 {
+    base + c as u8
+}
+'''
+
+[[slots]]
+name = "c"
+kind = "literal"
+values = ["2.9", "0.5", "200.9"]
+default = "2.9"
+
+
+[review_hints]
+root_cause = ["Rust 不做数字类型的隐式转换，混合运算必须显式 as", "as 对浮点→整数是向零截断"]
+misconceptions = ["以为类型会自动提升/转换", "以为 as 会四舍五入"]

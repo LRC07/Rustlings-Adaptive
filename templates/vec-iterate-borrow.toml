@@ -1,0 +1,61 @@
+# 批次三 A4：for 循环默认按值迭代，Vec 被移走（参考 rustlings vecs/move_semantics）
+id = "vec-iterate-borrow"
+title = "迭代 Vec：for 循环会把它整个移走"
+concepts = ["collections.vec"]
+error_codes = ["E0382"]
+difficulty = "easy"
+constraints = ["no-clone"]
+confusion = "Python 的 for x in list 从不消耗 list；Rust 的 for 会调用 into_iter()——对 Vec 就是按值迭代，每个元素都被移走，循环结束后 Vec 本身也没了。初学者以为循环只是“读一遍”"
+anti_patterns = ["clone-everywhere"]
+hints = ["报错位置在循环之后——说明循环本身把 logs 消耗掉了。", "for 会调用 into_iter()；对 Vec 这意味着按值。", "用 &logs 迭代，元素就是借用。"]
+
+body = '''
+// 场景：统计日志总长度，然后还要把原始日志交给下一个环节。
+//
+// TODO: 只改 for 那一行，让 total_len 通过测试；
+// 禁止 clone（原始日志一个字都不能复制）。
+pub fn total_len(logs: Vec<String>) -> (usize, Vec<String>) {
+    let mut n = 0;
+    for s in logs {
+        n += s.len();
+    }
+    (n, logs)
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logs_survive_the_loop() {
+        let logs = vec!["{{word}}".to_string(), "done".to_string()];
+        let (n, rest) = total_len(logs);
+        assert_eq!(n, "{{word}}".len() + 4);
+        assert_eq!(rest.len(), 2);
+        assert_eq!(rest[0], "{{word}}");
+    }
+}
+'''
+
+reference = '''
+pub fn total_len(logs: Vec<String>) -> (usize, Vec<String>) {
+    let mut n = 0;
+    for s in &logs {
+        n += s.len();
+    }
+    (n, logs)
+}
+'''
+
+[[slots]]
+name = "word"
+kind = "literal"
+values = ["alpha", "beta", "gamma"]
+default = "alpha"
+
+[review_hints]
+root_cause = ["for 循环对 Vec 调用 into_iter()，按值取走每个元素", "用 &iterating（for s in &logs）拿到借用，Vec 保留"]
+misconceptions = ["以为 for 只是只读遍历", "以为循环结束后 Vec 还在"]

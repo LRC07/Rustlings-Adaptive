@@ -1,0 +1,78 @@
+# 批次三 D4：? 的类型要和返回类型配套——Option/Result 不能混用
+id = "option-question-op"
+title = "问号传播：? 只能用在匹配的返回类型里"
+concepts = ["types.option-result"]
+error_codes = ["E0277"]
+difficulty = "medium"
+constraints = []
+confusion = "把 ? 当成“取值的捷径”在任何函数里都能用；实际上 ? 是 early-return，类型必须与函数返回类型配套——返回 Result 的函数里对 Option 用 ?，E0277 直接点破“only be used on Results, not Options”。选 Option 还是 Result 要先想清楚有没有错误信息可给"
+hints = ["报错说 ? 只能作用于 Result——因为这个函数声明返回 Result。", "这里失败时没有错误信息可给，Option 才是诚实的返回类型。", "把签名改成 Option<i32>，两个失败分支都归 None。"]
+
+body = '''
+// 场景：在成绩表里找某人的第一个正分——找不到、没有正分
+// 都是“没有”，不需要错误信息。
+//
+// 下面的实现返回 Result，却在 Option 上用 ?（E0277）。
+//
+// TODO: 调整 first_positive 的签名，让 ? 的传播成立；
+// 借用失败与无正数都归 None。
+use std::collections::HashMap;
+
+pub fn first_positive(scores: &HashMap<String, Vec<i32>>, name: &str) -> Result<i32, String> {
+    let v = scores.get(name)?;
+    v.iter().find(|x| **x > 0).copied().ok_or_else(|| "无正数".to_string())
+}
+// I AM NOT DONE
+'''
+
+tests = '''
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn table() -> HashMap<String, Vec<i32>> {
+        let mut m = HashMap::new();
+        m.insert("{{who}}".to_string(), vec![{{scores}}]);
+        m.insert("全负".to_string(), vec![-3, -7]);
+        m
+    }
+
+    #[test]
+    fn finds_first_positive() {
+        let want = vec![{{scores}}].into_iter().find(|x| *x > 0).unwrap();
+        assert_eq!(first_positive(&table(), "{{who}}"), Some(want));
+    }
+
+    #[test]
+    fn none_when_nothing_positive() {
+        assert_eq!(first_positive(&table(), "全负"), None);
+        assert_eq!(first_positive(&table(), "查无此人"), None);
+    }
+}
+'''
+
+reference = '''
+use std::collections::HashMap;
+
+pub fn first_positive(scores: &HashMap<String, Vec<i32>>, name: &str) -> Option<i32> {
+    let v = scores.get(name)?;
+    v.iter().find(|x| **x > 0).copied()
+}
+'''
+
+[[slots]]
+name = "who"
+kind = "literal"
+values = ["小明", "Zoe", "老李"]
+default = "小明"
+
+[[slots]]
+name = "scores"
+kind = "literal"
+values = ["-1, 5, 9", "-2, -8, 3", "7"]
+default = "-1, 5, 9"
+
+
+[review_hints]
+root_cause = ["? 的类型必须与函数返回类型配套：Option 对 Option、Result 对 Result", "“没有”而非“出错”的场景应返回 Option"]
+misconceptions = ["以为 ? 在任何返回类型的函数里都能用", "以为能拿到值就该用 Result 包装"]
