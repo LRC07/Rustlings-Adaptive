@@ -281,28 +281,7 @@ fn handle_model(arg: Option<&str>, cfg: &mut ModelConfig, client: &mut Option<Ll
         return;
     }
     let Some(name) = arg else {
-        println!();
-        println!("{}", render::header("模型档案"));
-        // Column widths from actual content (display cells, CJK-aware)
-        // so mixed Chinese/ASCII rows line up.
-        let name_w = cfg.models.iter().map(|m| m.name.width()).max().unwrap_or(4).max(4);
-        let model_w = cfg.models.iter().map(|m| m.model.width()).max().unwrap_or(5).max(5);
-        println!(
-            "  {}  {}  端点主机",
-            render::pad_display("档案名", name_w),
-            render::pad_display("模型 id", model_w)
-        );
-        for m in &cfg.models {
-            let mark = if cfg.is_active_profile(m) { render::green("*") } else { " ".to_string() };
-            println!(
-                "  {mark} {}  {}  {}",
-                render::pad_display(&m.name, name_w),
-                render::pad_display(&m.model, model_w),
-                host_of(&m.endpoint)
-            );
-        }
-        println!("  切换：/model <档案名>（* = 当前生效，唯一）｜ new 新建 ｜ rm <名> 删除");
-        println!();
+        model_panel(cfg, client);
         return;
     };
     match cfg.apply_profile(name) {
@@ -323,6 +302,77 @@ fn handle_model(arg: Option<&str>, cfg: &mut ModelConfig, client: &mut Option<Ll
         Err(e) => {
             println!("  切换失败：{e:#}");
             println!("  输入 /model 查看可用档案。");
+        }
+    }
+}
+
+/// `/model` with no argument (M9f): an interactive panel — everything
+/// (switch / create / remove) happens INSIDE the panel, so the hints
+/// never lure the learner into typing bare keywords ("new") into the
+/// chat. Switching exits back to the conversation; create/remove stay
+/// in the panel for follow-up actions.
+fn model_panel(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
+    loop {
+        if render::ansi_enabled() {
+            clear_viewport();
+        }
+        println!();
+        println!("{}", render::header("模型档案"));
+        // Column widths from actual content (display cells, CJK-aware)
+        // so mixed Chinese/ASCII rows line up.
+        let name_w = cfg.models.iter().map(|m| m.name.width()).max().unwrap_or(4).max(4);
+        let model_w = cfg.models.iter().map(|m| m.model.width()).max().unwrap_or(5).max(5);
+        println!(
+            "  {}  {}  端点主机",
+            render::pad_display("档案名", name_w),
+            render::pad_display("模型 id", model_w)
+        );
+        for m in &cfg.models {
+            let mark = if cfg.is_active_profile(m) { render::green("*") } else { " ".to_string() };
+            println!(
+                "  {mark} {}  {}  {}",
+                render::pad_display(&m.name, name_w),
+                render::pad_display(&m.model, model_w),
+                host_of(&m.endpoint)
+            );
+        }
+        println!();
+        println!("  [数字] 切换 ｜ [n] 新建 ｜ [d <名>] 删除 ｜ [q] 返回对话");
+        let Some(line) = read_line_or_leave("模型> ") else { return };
+        let t = line.trim();
+        if t.starts_with('/') {
+            println!("  面板内不处理斜杠命令——按 q 返回对话后再使用（/exit 同）。");
+            continue;
+        }
+        match t {
+            "" | "q" | "b" | "back" => return,
+            "n" => model_new(cfg, client),
+            t if t == "d" || t.starts_with('d') => {
+                let name = t.strip_prefix('d').map(str::trim).unwrap_or("");
+                model_remove(cfg, client, name);
+            }
+            t => match t.parse::<usize>() {
+                Ok(i) if (1..=cfg.models.len()).contains(&i) => {
+                    let name = cfg.models[i - 1].name.clone();
+                    if cfg.apply_profile(&name).is_ok() {
+                        match cfg.save_to_default_file() {
+                            Ok(()) => println!(
+                                "  已切换到「{name}」：{} @ {}（超时 {}s｜价格 输入 ${:.2}/输出 ${:.2} 每 1M tok）",
+                                cfg.model,
+                                host_of(&cfg.endpoint),
+                                cfg.llm_timeout_secs.unwrap_or(480),
+                                cfg.prices.input,
+                                cfg.prices.output
+                            ),
+                            Err(e) => println!("  已切换但写回 config.toml 失败：{e:#}"),
+                        }
+                        *client = make_client(cfg);
+                        return; // switched → back to the conversation
+                    }
+                }
+                Ok(_) => println!("  序号超出范围：共 {} 个档案。", cfg.models.len()),
+                _ => println!("  未知输入：数字切换 / n 新建 / d <名> 删除 / q 返回"),
+            },
         }
     }
 }
@@ -1304,54 +1354,7 @@ fn handle_sessions(arg: Option<&str>, session: &mut Session, cfg: &ModelConfig, 
             // M9d: session cleanup with ARCHIVE semantics (nothing is
             // truly deleted — files move to ~/.rustlings_adaptive/archive).
             let word = words.next().unwrap_or("");
-            match word {
-                "all" => {
-                    println!(
-                        "  将把全部 {} 个会话移入归档（~/.rustlings_adaptive/archive/，可找回），",
-                        infos.len()
-                    );
-                    let Some(ans) = read_line_or_leave("  然后开启一个新会话。确认？[y/N] ") else { return };
-                    if !ans.trim().eq_ignore_ascii_case("y") {
-                        println!("  已取消。");
-                        return;
-                    }
-                    match archive_dir_for() {
-                        Ok(dir) => match move_session_files(&dir.join("sessions"), &|_| true) {
-                            Ok(n) => {
-                                *session = Session::new(&cfg.model);
-                                println!("  已归档 {n} 个会话 → {}；当前为新会话。", dir.join("sessions").display());
-                                repaint_chat(session, cfg, tracker);
-                            }
-                            Err(e) => println!("  归档失败：{e:#}"),
-                        },
-                        Err(e) => println!("  归档失败：{e:#}"),
-                    }
-                }
-                n => match n.parse::<usize>() {
-                    Ok(i) if (1..=infos.len()).contains(&i) => {
-                        let target = &infos[i - 1];
-                        if target.id == session.id {
-                            println!("  当前会话不能直接清除——先 /new 开新会话再来。");
-                            return;
-                        }
-                        println!("  将归档会话 {}（{} 条消息，可在 archive/ 找回）。", target.id, target.messages);
-                        let Some(ans) = read_line_or_leave("  确认？[y/N] ") else { return };
-                        if !ans.trim().eq_ignore_ascii_case("y") {
-                            println!("  已取消。");
-                            return;
-                        }
-                        match archive_dir_for() {
-                            Ok(dir) => match move_session_files(&dir.join("sessions"), &|id| id == target.id) {
-                                Ok(1) => println!("  已归档会话 {}。", target.id),
-                                Ok(n) => println!("  已归档 {n} 个文件。"),
-                                Err(e) => println!("  归档失败：{e:#}"),
-                            },
-                            Err(e) => println!("  归档失败：{e:#}"),
-                        }
-                    }
-                    _ => println!("  用法：/sessions clear <序号> ｜ /sessions clear all"),
-                },
-            }
+            sessions_clear(session, cfg, tracker, word, infos.len());
         }
         "load" => {
             match parse_index(words.next(), infos.len()) {
@@ -1409,6 +1412,80 @@ fn handle_sessions(arg: Option<&str>, session: &mut Session, cfg: &ModelConfig, 
                 _ => println!("  用法：/sessions ｜ /sessions <序号> ｜ /sessions load <序号> ｜ /sessions export <序号>"),
             }
         }
+    }
+}
+
+/// Shared session-clear flow (M9f): archive one session or all of
+/// them, with confirmation. `word` = "" | "<序号>" | "all".
+fn sessions_clear(
+    session: &mut Session,
+    cfg: &ModelConfig,
+    tracker: &Arc<Mutex<UsageTracker>>,
+    word: &str,
+    total: usize,
+) {
+    if total == 0 {
+        println!("  没有会话可清理。");
+        return;
+    }
+    match word {
+        "all" => {
+            println!(
+                "  将把全部 {total} 个会话移入归档（~/.rustlings_adaptive/archive/，可找回），"
+            );
+            let Some(ans) = read_line_or_leave("  然后开启一个新会话。确认？[y/N] ") else { return };
+            if !ans.trim().eq_ignore_ascii_case("y") {
+                println!("  已取消。");
+                return;
+            }
+            match archive_dir_for() {
+                Ok(dir) => match move_session_files(&dir.join("sessions"), &|_| true) {
+                    Ok(n) => {
+                        *session = Session::new(&cfg.model);
+                        println!(
+                            "  已归档 {n} 个会话 → {}；当前为新会话。",
+                            dir.join("sessions").display()
+                        );
+                        repaint_chat(session, cfg, tracker);
+                    }
+                    Err(e) => println!("  归档失败：{e:#}"),
+                },
+                Err(e) => println!("  归档失败：{e:#}"),
+            }
+        }
+        n => match n.parse::<usize>() {
+            Ok(i) if (1..=total).contains(&i) => {
+                let infos = Session::list();
+                let Some(target) = infos.get(i - 1) else {
+                    println!("  序号超出范围。");
+                    return;
+                };
+                if target.id == session.id {
+                    println!("  当前会话不能直接清除——先 /new 开新会话再来。");
+                    return;
+                }
+                println!(
+                    "  将归档会话 {}（{} 条消息，可在 archive/ 找回）。",
+                    target.id, target.messages
+                );
+                let Some(ans) = read_line_or_leave("  确认？[y/N] ") else { return };
+                if !ans.trim().eq_ignore_ascii_case("y") {
+                    println!("  已取消。");
+                    return;
+                }
+                match archive_dir_for() {
+                    Ok(dir) => {
+                        match move_session_files(&dir.join("sessions"), &|id| id == target.id) {
+                            Ok(1) => println!("  已归档会话 {}。", target.id),
+                            Ok(n) => println!("  已归档 {n} 个文件。"),
+                            Err(e) => println!("  归档失败：{e:#}"),
+                        }
+                    }
+                    Err(e) => println!("  归档失败：{e:#}"),
+                }
+            }
+            _ => println!("  用法：clear <序号> ｜ clear all"),
+        },
     }
 }
 
@@ -1570,8 +1647,9 @@ fn sessions_list(
         }
         println!();
         println!(
-            "  [n] 更晚 ｜ [p] 更早 ｜ [数字] 回看 ｜ [load n] 切换 ｜ [export n] 导出 ｜ [q] 返回"
+            "  [n] 更晚 ｜ [p] 更早 ｜ [数字] 回看 ｜ [load n] 切换 ｜ [export n] 导出"
         );
+        println!("  [c <n>|all] 归档清理 ｜ [q] 返回");
         match read_line("会话> ") {
             Line::Text(s) => {
                 let t = s.trim();
@@ -1585,9 +1663,18 @@ fn sessions_list(
                     "q" | "b" | "back" | "" => break,
                     _ => {
                         // Inline handlers reuse the same semantics as
-                        // `/sessions load|export|<n>`; view then redraw.
+                        // `/sessions load|export|clear|<n>`; view then redraw.
                         let words: Vec<&str> = t.split_whitespace().collect();
                         match words.first().copied().unwrap_or("") {
+                            "c" | "clear" => {
+                                sessions_clear(
+                                    session,
+                                    cfg,
+                                    tracker,
+                                    words.get(1).copied().unwrap_or(""),
+                                    infos.len(),
+                                );
+                            }
                             "load" => {
                                 if let Some(n) = parse_index(words.get(1).copied(), infos.len()) {
                                     match Session::load(&infos[n - 1].path) {
@@ -1664,21 +1751,57 @@ fn sessions_list(
 
 
 /// `/ui` — switch rendering mode (M4.2): view = repaint viewport per
-/// turn, scroll = plain transcript. Persisted to config.toml.
+/// turn, scroll = plain transcript. Persisted to config.toml. With no
+/// argument this is an interactive mini-panel (M9f), so the hints never
+/// make the learner type bare "view"/"scroll" into the chat.
 fn switch_ui(cfg: &mut ModelConfig, arg: Option<&str>) {
-    let mode = arg.unwrap_or("");
+    let mode = arg.unwrap_or("").trim();
     match mode {
-        "view" | "scroll" => {
-            cfg.ui.mode = mode.to_string();
-            match cfg.save_to_default_file() {
-                Ok(()) => println!(
-                    "  界面模式已切换为 {}（已写回 config.toml）",
-                    if mode == "view" { "视口重绘" } else { "滚动" }
-                ),
-                Err(e) => println!("  已切换但写回配置失败：{e:#}"),
+        "view" | "scroll" => apply_ui_mode(cfg, mode),
+        "" => {
+            loop {
+                println!();
+                println!(
+                    "{}",
+                    render::header(&format!(
+                        "界面模式（当前：{}）",
+                        if cfg.ui.mode_view() { "视口重绘" } else { "滚动" }
+                    ))
+                );
+                println!("  [1] 视口重绘（默认：每回合刷新视口，回滚缓冲区保留）");
+                println!("  [2] 滚动（纯聊天流，不做视口重绘）");
+                println!("  [q] 返回对话");
+                let Some(line) = read_line_or_leave("界面> ") else { return };
+                if line.trim().starts_with('/') {
+                    println!("  面板内不处理斜杠命令——按 q 返回对话后再使用（/exit 同）。");
+                    continue;
+                }
+                match line.trim() {
+                    "" | "q" | "b" => return,
+                    "1" => {
+                        apply_ui_mode(cfg, "view");
+                        return;
+                    }
+                    "2" => {
+                        apply_ui_mode(cfg, "scroll");
+                        return;
+                    }
+                    _other => println!("  未知输入：1 / 2 / q"),
+                }
             }
         }
-        _ => println!("  用法：/ui view（视口重绘，默认）或 /ui scroll（滚动，当前：{}）", if cfg.ui.mode_view() { "view" } else { "scroll" }),
+        other => println!("  未知模式「{other}」：/ui 进入面板选择，或 /ui view｜/ui scroll"),
+    }
+}
+
+fn apply_ui_mode(cfg: &mut ModelConfig, mode: &str) {
+    cfg.ui.mode = mode.to_string();
+    match cfg.save_to_default_file() {
+        Ok(()) => println!(
+            "  界面模式已切换为 {}（已写回 config.toml）",
+            if mode == "view" { "视口重绘" } else { "滚动" }
+        ),
+        Err(e) => println!("  已切换但写回配置失败：{e:#}"),
     }
 }
 
