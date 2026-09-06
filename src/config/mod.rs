@@ -302,12 +302,6 @@ impl ModelConfig {
             }
         };
         cfg.materialize();
-        cfg.key_source = if cfg.api_key.trim().is_empty() {
-            KeySource::None
-        } else {
-            KeySource::ConfigFile
-        };
-        cfg.apply_env_overrides("RUSTLINGS_");
         Ok(cfg)
     }
 
@@ -427,6 +421,13 @@ impl ModelConfig {
     /// least one profile exists and the pointer is valid, so `/model`
     /// always shows exactly one active marker and `/config` always has
     /// a concrete profile to edit.
+    ///
+    /// Env overrides (`.env` / `RUSTLINGS_*`) are applied HERE, at the
+    /// end of every materialization — they are the highest-priority
+    /// GLOBAL overlay and must survive `/model` switching (9.6 复核：
+    /// apply_profile re-materializes the snapshot; applying env only in
+    /// load() made an .env-provided key silently fall back to the
+    /// target profile's key after a switch). key_source follows.
     pub fn materialize(&mut self) {
         if self.models.is_empty() {
             self.models.push(ModelProfile {
@@ -455,6 +456,16 @@ impl ModelConfig {
         self.prices = p.prices;
         self.llm_timeout_secs = p.llm_timeout_secs;
         self.active = Some(name);
+        // Env overlay on top of the profile, then derive the key source
+        // from whether THIS materialization actually had an env key.
+        let env_key = self.apply_env_overrides("RUSTLINGS_");
+        self.key_source = if env_key {
+            KeySource::Env
+        } else if self.api_key.trim().is_empty() {
+            KeySource::None
+        } else {
+            KeySource::ConfigFile
+        };
     }
 
     /// Write the snapshot back into the active profile, then serialize.
@@ -526,11 +537,14 @@ impl ModelConfig {
 
     /// Env overrides: RUSTLINGS_API_KEY / RUSTLINGS_ENDPOINT / RUSTLINGS_MODEL.
     /// Prefixed so tests can exercise the logic without touching real vars.
-    fn apply_env_overrides(&mut self, prefix: &str) {
+    /// Returns whether the API key was overridden (drives key_source and
+    /// keeps an env-provided key out of the file on save).
+    fn apply_env_overrides(&mut self, prefix: &str) -> bool {
         let get = |name: &str| std::env::var(format!("{prefix}{name}")).ok().filter(|v| !v.trim().is_empty());
+        let mut key_from_env = false;
         if let Some(k) = get("API_KEY") {
             self.api_key = k.trim().to_string();
-            self.key_source = KeySource::Env;
+            key_from_env = true;
         }
         if let Some(e) = get("ENDPOINT") {
             self.endpoint = e.trim().to_string();
@@ -547,8 +561,8 @@ impl ModelConfig {
                 self.reasoning_effort = Some(e);
             }
         }
+        key_from_env
     }
-
 }
 
 #[cfg(test)]
@@ -658,17 +672,64 @@ model = "mini"
         }
         let mut cfg = ModelConfig {
             api_key: "file-key".to_string(),
-            key_source: KeySource::ConfigFile,
             ..Default::default()
         };
-        cfg.apply_env_overrides("RUSTLINGS_TESTX_");
+        let key_from_env = cfg.apply_env_overrides("RUSTLINGS_TESTX_");
         unsafe {
             std::env::remove_var("RUSTLINGS_TESTX_API_KEY");
             std::env::remove_var("RUSTLINGS_TESTX_MODEL");
         }
+        assert!(key_from_env);
         assert_eq!(cfg.api_key, "env-key-123");
-        assert_eq!(cfg.key_source, KeySource::Env);
         assert_eq!(cfg.model, "env-model");
+    }
+
+    #[test]
+    fn env_key_survives_profile_switch() {
+        // .env 用户的核心场景（9.6 复核发现）：env 是最高优先级的全局
+        // 覆盖——/model 切换重新物化快照后必须仍然生效，而不是回落到
+        // 目标档案的 key（空档案会直接变离线）。
+        let mut cfg = ModelConfig {
+            models: vec![
+                ModelProfile {
+                    name: "a".into(),
+                    endpoint: "https://a/v1".into(),
+                    api_key: "sk-a".into(),
+                    model: "m-a".into(),
+                    ..Default::default()
+                },
+                ModelProfile {
+                    name: "b".into(),
+                    endpoint: "https://b/v1".into(),
+                    api_key: String::new(),
+                    model: "m-b".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        cfg.materialize();
+        assert_eq!(cfg.api_key, "sk-a");
+        assert_eq!(cfg.key_source, KeySource::ConfigFile);
+
+        // SAFETY: unique test-only var; no other test reads RUSTLINGS_API_KEY.
+        unsafe {
+            std::env::set_var("RUSTLINGS_API_KEY", "sk-from-env");
+        }
+        cfg.materialize();
+        assert_eq!(cfg.api_key, "sk-from-env");
+        assert_eq!(cfg.key_source, KeySource::Env);
+
+        // Switch to profile "b" (empty key): the env key MUST stay.
+        cfg.apply_profile("b").unwrap();
+        assert_eq!(cfg.api_key, "sk-from-env", "env overlay survives the switch");
+        assert_eq!(cfg.key_source, KeySource::Env);
+        // And an env key never lands in the file.
+        cfg.sync_snapshot_to_active();
+        assert!(cfg.models.iter().find(|m| m.name == "b").unwrap().api_key.is_empty());
+        unsafe {
+            std::env::remove_var("RUSTLINGS_API_KEY");
+        }
     }
 
     #[test]

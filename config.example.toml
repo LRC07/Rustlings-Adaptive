@@ -11,7 +11,8 @@
 #   3. cargo run，开始对话
 #
 # 也可以用 .env（RUSTLINGS_API_KEY / RUSTLINGS_ENDPOINT / RUSTLINGS_MODEL，
-# 优先级高于档案值），或运行后 /config 交互修改。
+# 优先级高于档案值，且切换档案后依然生效——适合多档案共用一个 Key），
+# 或运行后 /config 交互修改。
 
 # 当前生效的档案名（缺省 = 第一个档案；切换用 /model <名> 或改这里）
 active = "openai"
