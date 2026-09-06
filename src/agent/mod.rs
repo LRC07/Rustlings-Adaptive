@@ -118,6 +118,29 @@ pub trait ChatTurnCaller: Send + Sync {
         let _ = max_tokens;
         self.chat_turn(messages, tools)
     }
+
+    /// Streaming variant (C1): content deltas flow through
+    /// `out.on_content` as they arrive. The default delegates to the
+    /// bounded turn and emits the whole content once — mocks and
+    /// non-streaming callers are unaffected; the real client speaks
+    /// SSE and falls back here exactly once when streaming is not
+    /// supported by the endpoint.
+    fn chat_turn_streaming(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[Tool],
+        max_tokens: Option<u32>,
+        out: &mut crate::llm::StreamOut,
+    ) -> Result<TurnOutput> {
+        let result = self.chat_turn_bounded(messages, tools, max_tokens);
+        if let Ok(o) = &result
+            && let Some(c) = &o.content
+            && !c.is_empty()
+        {
+            (out.on_content)(c);
+        }
+        result
+    }
 }
 
 impl ChatTurnCaller for crate::llm::LlmClient {
@@ -132,6 +155,24 @@ impl ChatTurnCaller for crate::llm::LlmClient {
         max_tokens: Option<u32>,
     ) -> Result<TurnOutput> {
         crate::llm::LlmClient::chat_turn_bounded(self, messages, tools, max_tokens)
+    }
+
+    fn chat_turn_streaming(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[Tool],
+        max_tokens: Option<u32>,
+        out: &mut crate::llm::StreamOut,
+    ) -> Result<TurnOutput> {
+        match crate::llm::LlmClient::chat_turn_streaming(self, messages, tools, max_tokens, out) {
+            Ok(o) => Ok(o),
+            // A real interruption propagates; anything else (endpoint
+            // without SSE / incompatible stream_options / parse
+            // hiccups) falls back ONCE to the non-streaming turn,
+            // which also restores exact usage accounting.
+            Err(e) if is_interrupted() => Err(e),
+            Err(_) => crate::llm::LlmClient::chat_turn_bounded(self, messages, tools, max_tokens),
+        }
     }
 }
 
@@ -230,12 +271,15 @@ pub const WINDOW_MESSAGES: usize = 40;
 const TOOL_RESULT_CHARS: usize = 1500;
 
 /// Run one user turn. `progress` receives short status strings for the
-/// CLI spinner ("思考中…", "工具 check_code…").
+/// CLI spinner ("思考中…", "工具 check_code…"); `on_delta` (C1) receives
+/// content deltas the moment they stream in — the CLI renders them
+/// live, or ignores them entirely when stdout is not a terminal.
 pub fn run_turn(
     history: &[ChatMessage],
     input: &str,
     env: &AgentEnv,
     progress: &dyn Fn(&str),
+    on_delta: &mut dyn FnMut(&str),
 ) -> Result<TurnOutcome> {
     let mut msgs: Vec<ChatMessage> = history.to_vec();
     // The system prompt is rebuilt from the canonical constant on every
@@ -293,9 +337,18 @@ pub fn run_turn(
         }
 
         progress("思考中…");
+        // C1: streaming call — content deltas flow through on_delta;
+        // the trait impl falls back to a non-streaming turn once when
+        // the endpoint cannot stream. Usage accounting is unchanged
+        // (usage arrives in the stream tail or via the fallback).
         let out = env
             .caller
-            .chat_turn(&window(&msgs, env.cfg.context_len), &tools::tool_schemas())
+            .chat_turn_streaming(
+                &window(&msgs, env.cfg.context_len),
+                &tools::tool_schemas(),
+                None,
+                &mut crate::llm::StreamOut { on_content: on_delta, should_stop: &is_interrupted },
+            )
             .map_err(|e| {
                 if is_interrupted() {
                     anyhow!("已打断")

@@ -515,15 +515,12 @@ pub enum StreamFrame {
 /// buffer is byte-level and lines are only decoded when complete (a
 /// line ending at '\n' is always valid UTF-8: 0x0A never appears
 /// inside a multi-byte sequence).
+#[derive(Default)]
 pub struct SseBuffer {
     buf: Vec<u8>,
 }
 
-impl Default for SseBuffer {
-    fn default() -> Self {
-        Self { buf: Vec::new() }
-    }
-}
+
 
 impl SseBuffer {
     /// Feed one raw chunk; returns complete `data:` payloads (prefix

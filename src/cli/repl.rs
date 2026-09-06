@@ -804,7 +804,11 @@ fn agent_turn(
                 *slot = s.to_string();
             }
         };
-        let result = agent::run_turn(&history, &input, &env, &progress);
+        // C1 block 2: the streaming path exists; the CLI-side live
+        // renderer lands in block 4 — until then deltas are ignored
+        // here and the reply renders as a whole on Done (unchanged).
+        let mut on_delta = |_d: &str| {};
+        let result = agent::run_turn(&history, &input, &env, &progress, &mut on_delta);
         let _ = tx.send(result);
     });
 
