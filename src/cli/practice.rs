@@ -96,7 +96,7 @@ pub(crate) fn enter(ctx: &PracticeCtx, opts: EnterOpts, debrief: Option<&Debrief
         // 9.6 实测：斜杠命令在做题页会被吞（"/stats …" 报未知命令、
         // "/exit" 触发一次编译）。给明确的逃生口指引。
         if line.starts_with('/') {
-            println!("  做题页内不处理斜杠命令——按 b 回对话后再使用（/exit 也在对话页）。");
+            println!("  做题页内不处理斜杠命令——按 q 回对话后再使用（/exit 也在对话页）。");
             continue;
         }
         if line == "b" || line == "q" || line == "back" {
@@ -122,7 +122,9 @@ pub(crate) fn enter(ctx: &PracticeCtx, opts: EnterOpts, debrief: Option<&Debrief
                         ExerciseExit::Chat => return None,
                         ExerciseExit::List => {}
                     },
-                    None => println!("  所有练习已完成！"),
+                    None => {
+                        println!("  所有练习已完成！可 /stats 复盘薄弱点，或 q 回对话让教练安排巩固。")
+                    }
                 }
                 continue;
             }
@@ -637,7 +639,9 @@ fn run_exercise(
                             hint_idx = 0;
                             break;
                         }
-                        None => println!("  所有练习已完成！"),
+                        None => {
+                        println!("  所有练习已完成！可 /stats 复盘薄弱点，或 q 回对话让教练安排巩固。")
+                    }
                     }
                 }
                 "b" | "back" => return ExerciseExit::List,

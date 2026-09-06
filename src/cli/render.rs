@@ -262,7 +262,7 @@ pub(crate) fn chat_header(session_id: &str, model: &str, spent: f64, budget: Opt
         None => String::new(),
     };
     dim(&format!(
-        "── {session_id} ｜ {model} ｜ 累计 ${spent:.4}{budget_part} ｜ /help 帮助 ──"
+        "── {session_id} ｜ {model} ｜ 累计 ${spent:.4}{budget_part} ｜ Ctrl+J 换行 ｜ /help 帮助 ──"
     ))
 }
 

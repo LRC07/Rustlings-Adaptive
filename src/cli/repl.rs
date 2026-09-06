@@ -1072,34 +1072,64 @@ fn print_usage(cfg: &ModelConfig, tracker: &Arc<Mutex<UsageTracker>>) {
     let t = tracker.lock().unwrap_or_else(|p| p.into_inner());
     let s = t.session_totals();
     let a = t.all_totals();
-    println!();
-    println!("{}", render::header("用量与花费"));
     let reasoning_note = |r: u64| {
         if r > 0 { format!("（其中推理 {r}）") } else { String::new() }
     };
-    println!(
-        "  本次会话: {} 次调用 ｜ 输入 {} tok ｜ 输出 {} tok{} ｜ ${:.4}",
-        s.calls, s.input_tokens, s.output_tokens, reasoning_note(s.reasoning_tokens), s.cost_usd
-    );
-    for (phase, pt) in t.session_by_phase() {
-        println!(
-            "    · {phase:<10} {} 次 ｜ 输入 {} tok ｜ 输出 {} tok{} ｜ ${:.6}",
-            pt.calls, pt.input_tokens, pt.output_tokens, reasoning_note(pt.reasoning_tokens), pt.cost_usd
-        );
-    }
-    println!(
-        "  历史累计: {} 次调用 ｜ 输入 {} tok ｜ 输出 {} tok{} ｜ ${:.4}",
-        a.calls, a.input_tokens, a.output_tokens, reasoning_note(a.reasoning_tokens), a.cost_usd
-    );
-    println!("  明细文件: {}", t.path().display());
-    match cfg.budget_usd() {
+    let budget_cell = match cfg.budget_usd() {
         Some(b) => {
             let remaining = (b - a.cost_usd).max(0.0);
             let pct = if b > 0.0 { a.cost_usd / b * 100.0 } else { f64::INFINITY };
-            println!("  预算: ${:.2} ｜ 已用 {:.1}% ｜ 剩余 ${:.4}", b, pct, remaining);
+            format!(
+                "${b:.2} ｜ 已用 {:.1}% ｜ 剩余 ${remaining:.4}",
+                if pct.is_finite() { pct } else { 100.0 }
+            )
         }
-        None => println!("  预算: 未设置（/config 中可设置；达到上限后自动拦截调用）"),
+        None => "未设置（/config 4 可设置；达到上限后自动拦截调用）".to_string(),
+    };
+    let summary = vec![
+        (
+            "本次会话".to_string(),
+            format!("{} 次调用 ｜ ${:.4}", s.calls, s.cost_usd),
+        ),
+        (
+            "历史累计".to_string(),
+            format!(
+                "{} 次调用 ｜ 输入 {} tok ｜ 输出 {} tok{} ｜ ${:.4}",
+                a.calls,
+                a.input_tokens,
+                a.output_tokens,
+                reasoning_note(a.reasoning_tokens),
+                a.cost_usd
+            ),
+        ),
+        ("预算".to_string(), budget_cell),
+    ];
+    let mut phases: Vec<String> = t
+        .session_by_phase()
+        .into_iter()
+        .map(|(phase, pt)| {
+            format!(
+                "{phase:<10} {} 次 ｜ 输入 {} tok ｜ 输出 {} tok{} ｜ ${:.6}",
+                pt.calls,
+                pt.input_tokens,
+                pt.output_tokens,
+                reasoning_note(pt.reasoning_tokens),
+                pt.cost_usd
+            )
+        })
+        .collect();
+    if phases.is_empty() {
+        phases.push("（本次会话还没有模型调用）".to_string());
     }
+    let sections = vec![render::PanelSection {
+        title: "按用途（本次会话）".to_string(),
+        lines: phases,
+    }];
+    println!();
+    for row in render::panel("用量与花费", &summary, &sections) {
+        println!("{row}");
+    }
+    println!("{}", render::dim(&format!("  明细：{}（R6 逐调用记账）", t.path().display())));
 }
 
 /// `/stats` — learner profile page (M6): SM-2 due overview, weakest
@@ -1108,7 +1138,6 @@ fn print_usage(cfg: &ModelConfig, tracker: &Arc<Mutex<UsageTracker>>) {
 /// print, never clears the screen.
 fn print_stats(practice_ctx: &practice::PracticeCtx, arg: Option<&str>) {
     println!();
-    println!("{}", render::header("学习画像"));
     // 9.6 实测：`/stats 显示到期…`（疑问句）silently ran the bare
     // page, swallowing the question. Reject unknown subcommands
     // instead — and point at the "drop the slash to ASK the coach" path.
@@ -1116,6 +1145,7 @@ fn print_stats(practice_ctx: &practice::PracticeCtx, arg: Option<&str>) {
         && !a.is_empty()
         && a.strip_prefix("wrong").is_none()
     {
+        println!("{}", render::header("学习画像"));
         println!("  未知子命令「{a}」。用法：/stats ｜ /stats wrong <概念|错误码>");
         println!("  如果你想问的是「{}」，请去掉行首的 / 直接发给教练。", a);
         return;
@@ -1124,6 +1154,7 @@ fn print_stats(practice_ctx: &practice::PracticeCtx, arg: Option<&str>) {
     let profile = &store.profile;
 
     if profile.concepts.is_empty() && profile.error_codes.is_empty() {
+        println!("{}", render::header("学习画像"));
         println!("  还没有学习信号：做题（/practice）或对话出题后，这里会出现");
         println!("  概念掌握度（SM-2）、高频错误码与错题本。");
         return;
@@ -1133,6 +1164,7 @@ fn print_stats(practice_ctx: &practice::PracticeCtx, arg: Option<&str>) {
     if let Some(rest) = arg.and_then(|a| a.strip_prefix("wrong").map(str::trim)) {
         let index = crate::exercise::index::ExerciseIndex::load(&practice_ctx.root);
         let nb = crate::profile::notebook_from_index(&index, Some(rest));
+        println!("{}", render::header("学习画像"));
         println!("  复习队列（{} 题，过滤「{rest}」）：", nb.len());
         if nb.is_empty() {
             println!("    （没有匹配的错题）");
@@ -1154,23 +1186,23 @@ fn print_stats(practice_ctx: &practice::PracticeCtx, arg: Option<&str>) {
 
     // SM-2 due overview.
     let due = profile.due_concepts(chrono::Utc::now());
-    if due.is_empty() {
-        println!("  到期复习：暂无（SM-2 会为已学概念安排变式巩固节奏）");
-    } else {
-        println!("  {} 到期复习：", render::bold(&due.len().to_string()));
-        for c in &due {
-            println!("    · {}", cname(c));
-        }
-        println!("    （对话中说「来一道 XX 的变式题」即可巩固）");
+    let mut due_lines: Vec<String> = due
+        .iter()
+        .map(|c| format!("· {}", cname(c)))
+        .collect();
+    if due_lines.is_empty() {
+        due_lines.push("暂无（SM-2 会为已学概念安排变式巩固节奏）".to_string());
     }
 
     // Weakest concepts.
-    println!("  概念弱项（按失败次数）：");
     let weak = profile.weakest(5);
+    let mut weak_lines: Vec<String> = Vec::new();
     if weak.is_empty() {
-        println!("    （还没有失败记录，状态不错）");
+        weak_lines.push("（还没有失败记录，状态不错）".to_string());
     } else {
-        println!("{}", render::dim("    （强度 = SM-2 的 EF 值，1.3–2.5，越高记得越牢；复习 = 下次到期日）"));
+        weak_lines.push(
+            render::dim("强度 = SM-2 的 EF 值，1.3–2.5，越高记得越牢；复习 = 下次到期日").to_string(),
+        );
     }
     // Align the concept column so the metric columns line up.
     let names: Vec<String> = weak.iter().map(|(c, _, _)| cname(c)).collect();
@@ -1180,32 +1212,67 @@ fn print_stats(practice_ctx: &practice::PracticeCtx, arg: Option<&str>) {
         let ef = s.map(|s| format!("强度 {:.1}", s.sm2.ef)).unwrap_or_default();
         let due_str =
             s.and_then(|s| s.sm2.due.as_deref()).map(due_cn).unwrap_or_else(|| "—".into());
-        println!(
-            "    {} ｜ 失败 {fails}/{attempts} ｜ {ef} ｜ 复习 {due_str}",
+        weak_lines.push(format!(
+            "{} ｜ 失败 {fails}/{attempts} ｜ {ef} ｜ 复习 {due_str}",
             render::pad_display(name, name_w)
-        );
+        ));
     }
 
     // Top error codes (coarse track).
     let codes = profile.top_error_codes(5);
-    if !codes.is_empty() {
-        let list: Vec<String> = codes.iter().map(|(c, n)| format!("{c} ×{n}")).collect();
-        println!("  高频错误码：{}", list.join(" · "));
-    }
 
     // Wrong-answer notebook.
     let index = crate::exercise::index::ExerciseIndex::load(&practice_ctx.root);
     let nb = crate::profile::notebook_from_index(&index, None);
-    println!(
-        "  复习队列（{} 题，含已通过 ✓——过了的也留着巩固；/stats wrong <概念|错误码> 过滤）：",
-        nb.len()
-    );
+    let mut nb_lines: Vec<String> = Vec::new();
     for e in nb.iter().take(8) {
-        print_notebook_row(e);
+        let mark = if e.passed {
+            render::green("✓").to_string()
+        } else {
+            render::red(&format!("✗{}", e.attempts))
+        };
+        let mut meta = e.concepts.join("、");
+        if let Some(code) = &e.last_error {
+            meta.push_str(&format!(" ｜ {code}"));
+        }
+        nb_lines.push(format!("{mark} 《{}》  {}", e.title, meta));
     }
     if nb.len() > 8 {
-        println!("    …共 {} 题（用 /stats wrong 过滤）", nb.len());
+        nb_lines.push(format!("…共 {} 题（用 /stats wrong 过滤）", nb.len()));
     }
+    if nb_lines.is_empty() {
+        nb_lines.push("（空）".to_string());
+    }
+
+    let mut summary = vec![(
+        "复习队列".to_string(),
+        format!("{} 题（含已通过 ✓，过了的也留着巩固）", nb.len()),
+    )];
+    if !codes.is_empty() {
+        let list: Vec<String> = codes.iter().map(|(c, n)| format!("{c} ×{n}")).collect();
+        summary.push(("高频错误码".to_string(), list.join(" · ")));
+    }
+    let sections = vec![
+        render::PanelSection {
+            title: format!("到期复习（{} 个）", due.len()),
+            lines: due_lines,
+        },
+        render::PanelSection {
+            title: "概念弱项（按失败次数）".to_string(),
+            lines: weak_lines,
+        },
+        render::PanelSection {
+            title: "复习队列（最近）".to_string(),
+            lines: nb_lines,
+        },
+    ];
+    for row in render::panel("学习画像", &summary, &sections) {
+        println!("{row}");
+    }
+    println!(
+        "{}",
+        render::dim("  下一步：对话中说「来一道 XX 的变式题」巩固；/stats wrong <概念|错误码> 过滤错题")
+    );
 }
 
 fn due_cn(due: &str) -> String {
@@ -1222,6 +1289,8 @@ fn due_cn(due: &str) -> String {
     }
 }
 
+/// One notebook row for the `/stats wrong` filtered view (the main
+/// page renders its rows inline into the panel).
 fn print_notebook_row(e: &crate::profile::NotebookEntry) {
     let mark = if e.passed {
         render::green("✓").to_string()
@@ -1247,7 +1316,7 @@ fn cmd_config(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
         println!("{}", render::header("模型配置"));
         let active_name = cfg.active.clone().unwrap_or_default();
         println!(
-            "  输入编号修改对应项（1..7），回车返回；修改写回当前档案「{}」",
+            "  输入编号修改对应项（1..7），回车或 q 返回；修改写回当前档案「{}」",
             render::cyan(&active_name)
         );
         println!();
@@ -1307,29 +1376,33 @@ fn cmd_config(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
             println!("  · 模型档案  : {}（/model <名> 切换）", names.join(" / "));
         }
         let Some(line) = read_line_or_leave("配置> ") else { return };
+        if line.trim().starts_with('/') {
+            println!("  配置页内不处理斜杠命令——按 q 返回对话后再使用（/exit 同）。");
+            continue;
+        }
         match line.as_str() {
-            "" => return,
+            "" | "q" | "b" | "back" => return,
             "1" => {
-                if let Some(v) = read_line_or_leave("新 endpoint: ") {
+                if let Some(v) = read_line_or_leave("新 endpoint > ") {
                     cfg.endpoint = v;
                     save_and_rebuild(cfg, client);
                 }
             }
             "2" => {
-                if let Some(v) = read_line_or_leave("新 model: ") {
+                if let Some(v) = read_line_or_leave("新 model > ") {
                     cfg.model = v;
                     save_and_rebuild(cfg, client);
                 }
             }
             "3" => {
-                if let Some(v) = read_line_or_leave("新 api_key（输入明文，回车确认）: ") {
+                if let Some(v) = read_line_or_leave("新 api_key（输入明文，回车确认）> ") {
                     cfg.api_key = v;
                     cfg.key_source = crate::config::KeySource::ConfigFile;
                     save_and_rebuild(cfg, client);
                 }
             }
             "4" => {
-                if let Some(v) = read_line_or_leave("新预算（数字=USD；'无' 取消预算）: ") {
+                if let Some(v) = read_line_or_leave("新预算（数字=USD；'无' 取消预算）> ") {
                     if v == "无" || v == "off" || v == "none" {
                         cfg.budget = None;
                     } else if let Ok(n) = v.parse::<f64>() {
@@ -1346,7 +1419,7 @@ fn cmd_config(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
                 }
             }
             "5" => {
-                if let Some(v) = read_line_or_leave("新编辑器命令（如 'code --wait'；'无' 恢复自动）: ") {
+                if let Some(v) = read_line_or_leave("新编辑器命令（如 'code --wait'；'无' 恢复自动）> ") {
                     if v == "无" || v == "none" {
                         cfg.editor = None;
                     } else {
@@ -1358,7 +1431,7 @@ fn cmd_config(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
             "6" => {
                 println!("  说明：推理型模型（如 DeepSeek V4）默认开思考且思维链按输出 token 计费、");
                 println!("  不受 max_tokens 约束；关掉可立刻省下大量 token 与等待时间。");
-                if let Some(v) = read_line_or_leave("新思考模式（auto=沿用端点默认 / on / off）: ") {
+                if let Some(v) = read_line_or_leave("新思考模式（auto=沿用端点默认 / on / off）> ") {
                     match crate::config::ThinkMode::from_word(&v) {
                         Some(m) => {
                             cfg.think_mode = m;
@@ -1709,6 +1782,10 @@ fn sessions_list(
         match read_line("会话> ") {
             Line::Text(s) => {
                 let t = s.trim();
+                if t.starts_with('/') {
+                    println!("  会话页内不处理斜杠命令——按 q 返回对话后再使用（/exit 同）。");
+                    continue;
+                }
                 match t {
                     "n" | "N" => {
                         page = (page + 1).min(total_pages - 1);
@@ -1816,7 +1893,9 @@ fn switch_ui(cfg: &mut ModelConfig, arg: Option<&str>) {
         "view" | "scroll" => apply_ui_mode(cfg, mode),
         "" => {
             loop {
-                println!();
+                if render::ansi_enabled() {
+                    clear_viewport();
+                }
                 println!(
                     "{}",
                     render::header(&format!(
@@ -1861,20 +1940,105 @@ fn apply_ui_mode(cfg: &mut ModelConfig, mode: &str) {
     }
 }
 
-/// `/topics` — the taxonomy listing, exposed for humans (the agent has
-/// the `list_concepts` tool; this is the same data).
+/// `/topics` — the taxonomy as a MASTERY TREE (M9j): the concept graph
+/// drawn parent→child with per-concept practice marks from the local
+/// profile. ● 练过（全对） ◐ 有失败 ○ 未练，⏰ SM-2 到期。This is the
+/// visual evidence for "Adaptive": weak spots light up in the graph.
 fn topics_page() {
     match crate::taxonomy::ConceptGraph::load(std::path::Path::new("taxonomy/concepts.toml")) {
         Ok(g) => {
-            println!();
-            println!("{}", render::header("概念图谱（出题主题的权威列表）"));
+            let profile = crate::profile::ProfileStore::load_or_create();
+            let due: std::collections::BTreeSet<String> =
+                profile.profile.due_concepts(chrono::Utc::now()).into_iter().collect();
+            // children edges (parents are upwards): parent id → children.
+            let mut children: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+            let mut roots: Vec<&str> = Vec::new();
             for id in g.ids() {
-                let name = g.get(id).map(|n| n.name.as_str()).unwrap_or("");
-                for piece in render::wrap_line(&format!("  {id} ｜ {name}"), render::term_width()) {
-                    println!("{piece}");
+                let parents = g.get(id).map(|n| n.parents.as_slice()).unwrap_or(&[]);
+                let live: Vec<&str> =
+                    parents.iter().filter(|p| g.get(p).is_some()).map(|p| p.as_str()).collect();
+                if live.is_empty() {
+                    roots.push(id);
+                } else {
+                    for p in live {
+                        children.entry(p).or_default().push(id);
+                    }
+                }
+            }
+            let mut out = String::new();
+            // DFS from roots; visited guards against hand-edit cycles.
+            let mut visited: std::collections::BTreeSet<&str> = Default::default();
+            #[allow(clippy::too_many_arguments)]
+            fn walk<'a>(
+                id: &'a str,
+                depth: usize,
+                g: &'a crate::taxonomy::ConceptGraph,
+                children: &std::collections::BTreeMap<&'a str, Vec<&'a str>>,
+                visited: &mut std::collections::BTreeSet<&'a str>,
+                profile: &crate::profile::Profile,
+                due: &std::collections::BTreeSet<String>,
+                out: &mut String,
+            ) {
+                if !visited.insert(id) {
+                    return;
+                }
+                let node = g.get(id);
+                let name = node.map(|n| n.name.as_str()).unwrap_or("");
+                let m = match profile.concepts.get(id) {
+                    Some(s) if s.fails > 0 => render::yellow("◐").to_string(),
+                    Some(_) => render::green("●").to_string(),
+                    None => render::dim("○").to_string(),
+                };
+                let due_mark = if due.contains(id) { render::cyan(" ⏰") } else { String::new() };
+                let stat = profile
+                    .concepts
+                    .get(id)
+                    .map(|s| format!(" ｜ 失败 {}/{}", s.fails, s.attempts))
+                    .unwrap_or_default();
+                let indent = "  ".repeat(depth + 1);
+                for piece in
+                    render::wrap_line(&format!("{indent}{m} {id} ｜ {name}{stat}{due_mark}"), render::term_width())
+                {
+                    out.push_str(&piece);
+                    out.push('\n');
+                }
+                if let Some(kids) = children.get(id) {
+                    for k in kids {
+                        walk(k, depth + 1, g, children, visited, profile, due, out);
+                    }
+                }
+            }
+            for r in &roots {
+                walk(r, 0, &g, &children, &mut visited, &profile.profile, &due, &mut out);
+            }
+            // Nodes not reached from the roots (hand-edit cycles) are
+            // appended flat so nothing silently disappears.
+            for id in g.ids() {
+                if !visited.contains(id.as_str()) {
+                    for piece in render::wrap_line(
+                        &format!("  {} {id} ｜ {}", render::dim("○"), g.get(id).map(|n| n.name.as_str()).unwrap_or("")),
+                        render::term_width(),
+                    ) {
+                        out.push_str(&piece);
+                        out.push('\n');
+                    }
                 }
             }
             println!();
+            println!("{}", render::header("概念图谱（掌握度树）"));
+            print!("{out}");
+            println!();
+            println!(
+                "  {} 已练（无失败）  {} 有失败（弱项）  {} 未练  {} 到期复习",
+                render::green("●"),
+                render::yellow("◐"),
+                render::dim("○"),
+                render::cyan("⏰")
+            );
+            println!(
+                "{}",
+                render::dim("  说「来一道 <概念> 的题」或 /generate <概念> 即可定向练习")
+            );
         }
         Err(e) => println!("  概念图谱加载失败：{e:#}"),
     }
