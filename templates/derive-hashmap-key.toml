@@ -12,8 +12,8 @@ hints = ["HashMap 的键要求 Eq + Hash（见 entry 的 bound 报错）。", "�
 body = '''
 // 把标签当 HashMap 的键来计数 —— 编译器会逐个指出缺的 trait。
 //
-// TODO: 给 Tag 补一行 derive（想清楚：做键要什么？打印要什么？
-//       == 比较要什么？），其余代码不动。
+// TODO: 让 Tag 能直接做 HashMap 的键、也能被打印
+//       （想想这两个用途各自要求什么），其余代码不动。
 #[derive(Clone)]
 pub enum Tag {
     Bug,

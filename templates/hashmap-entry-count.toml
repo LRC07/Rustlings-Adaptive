@@ -12,7 +12,7 @@ use std::collections::HashMap;
 // 统计每个单词出现的次数。
 // 场景：日志关键词频度分析。你最初写的是「先 get 再 insert」，
 // 但那会对每个词做两次哈希定位，而且持有引用时插入会撞上借用冲突。
-// TODO: 用 entry 完成计数：键不存在则置 0，然后 +1。
+// TODO: 让计数逻辑既正确又高效。
 // 要求：循环体只做一次哈希定位，且不 clone 任何东西。
 pub fn counts(words: Vec<String>) -> HashMap<String, usize> {
     let mut m = HashMap::new();

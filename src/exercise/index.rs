@@ -48,16 +48,24 @@ fn apply_result(meta: &mut ExerciseMeta, passed: bool, first_error: Option<&str>
     if passed {
         meta.status = Status::Passed;
         meta.last_error = None;
-    } else if meta.status != Status::Passed {
-        let times = match meta.status {
-            Status::Failed { times } if counts_failure => times + 1,
-            Status::Failed { times } => times,
-            _ => 1,
-        };
-        meta.status = Status::Failed { times };
-        if let Some(code) = first_error {
-            meta.last_error = Some(code.to_string());
+        return;
+    }
+    if meta.status == Status::Passed {
+        return; // never demote
+    }
+    if let Some(code) = first_error {
+        meta.last_error = Some(code.to_string());
+    }
+    match meta.status {
+        Status::Failed { times } if counts_failure => {
+            meta.status = Status::Failed { times: times + 1 };
         }
+        Status::Failed { times } => meta.status = Status::Failed { times },
+        // M9n 实测：进题自动首跑/批量验证的失败不是学习者的失败——
+        // Pending 不因验证性运行转成 Failed（否则卡片显示
+        // "✗1 次失败（0 次尝试）"）。真正的尝试才会建立失败计数。
+        _ if counts_failure => meta.status = Status::Failed { times: 1 },
+        _ => {}
     }
 }
 
@@ -668,23 +676,34 @@ mod tests {
             constraints: Vec::new(),
             review_verdict: None,
         });
-        // Verification runs of unchanged code: state transitions, but
-        // neither attempts nor the ✗N failure count ever move (the
-        // "失败 7 次"/"[✗3]" regressions).
+        // Verification runs of unchanged code: attempts and ✗N never
+        // move; a Pending entry even stays Pending (9.6 终测：进题
+        // 自动首跑失败曾把卡片打成 "✗1 次失败（0 次尝试）").
         idx.record_run("generated/r.rs", false, Some("E0382"));
-        assert_eq!(idx.get("generated/r.rs").unwrap().status, Status::Failed { times: 1 });
+        assert_eq!(idx.get("generated/r.rs").unwrap().status, Status::Pending);
         assert_eq!(idx.get("generated/r.rs").unwrap().attempts, 0);
+        assert_eq!(
+            idx.get("generated/r.rs").unwrap().last_error.as_deref(),
+            Some("E0382"),
+            "错误码仍要可见（卡片展示首跑失败原因）"
+        );
         idx.record_run("generated/r.rs", false, Some("E0382"));
+        assert_eq!(idx.get("generated/r.rs").unwrap().status, Status::Pending);
+        // A real attempt after edits counts — and only it establishes
+        // the failure count.
+        idx.record_attempt("generated/r.rs", false, Some("E0308"));
+        assert_eq!(idx.get("generated/r.rs").unwrap().attempts, 1);
         assert_eq!(idx.get("generated/r.rs").unwrap().status, Status::Failed { times: 1 });
-        idx.record_run("generated/r.rs", false, Some("E0382"));
-        assert_eq!(idx.get("generated/r.rs").unwrap().attempts, 0);
+        // Unchanged rerun of a failed attempt: no inflation.
+        idx.record_run("generated/r.rs", false, Some("E0308"));
+        assert_eq!(idx.get("generated/r.rs").unwrap().attempts, 1);
         assert_eq!(idx.get("generated/r.rs").unwrap().status, Status::Failed { times: 1 });
         idx.record_run("generated/r.rs", true, None);
         assert_eq!(idx.get("generated/r.rs").unwrap().status, Status::Passed);
-        assert_eq!(idx.get("generated/r.rs").unwrap().attempts, 0);
+        assert_eq!(idx.get("generated/r.rs").unwrap().attempts, 1);
         // A real attempt after edits still counts, from any state.
         idx.record_attempt("generated/r.rs", true, None);
-        assert_eq!(idx.get("generated/r.rs").unwrap().attempts, 1);
+        assert_eq!(idx.get("generated/r.rs").unwrap().attempts, 2);
     }
 
     #[test]

@@ -12,8 +12,8 @@ hints = ["两处报错分别指向两个缺失的 trait。", "assert_eq! 需要 
 body = '''
 // 测试里的 assert_eq! 与 {:?} 打印都在抱怨 Point（E0277）。
 //
-// TODO: 给 Point 补一行 derive，把缺失的 trait 一次带齐；
-//       其余代码不动。
+// TODO: 让 Point 满足测试对它的全部要求（其余代码不动，
+//       测试与 main 也不改）。
 #[derive(Clone)]
 pub struct Point {
     pub x: i32,

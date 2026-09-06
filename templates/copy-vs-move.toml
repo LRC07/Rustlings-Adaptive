@@ -16,7 +16,7 @@ body = '''
 // 但 Record 整体不是 Copy——按值传进函数就永远离开原变量了。
 //
 // TODO: 不改动 bump 的函数体，不使用 clone，让 main_flow 通过
-// 测试（提示：bump 只需要“读”）。
+// 测试。
 #[derive(Debug)]
 struct Record {
     id: u32,

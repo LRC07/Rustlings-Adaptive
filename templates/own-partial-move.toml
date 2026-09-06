@@ -13,8 +13,8 @@ body = '''
 // 归档配置：name 要搬进归档，retries 留下统计。
 // 下面的实现先搬走 name，又把整个 c 传给 show —— E0382。
 //
-// TODO: 修好 split：先把字段全部取出，再组装返回值；
-//       show 与 stats 保持不变。禁止 clone。
+// TODO: 修好 split，让 show 与 stats 保持原样工作。
+//       禁止 clone。
 pub struct Config {
     pub name: String,
     pub retries: u32,

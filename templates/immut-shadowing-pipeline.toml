@@ -12,8 +12,8 @@ hints = ["每步 let x = ... 遮蔽上一步，类型可以变。", "解析失�
 body = '''
 // 数据清洗：trim → 解析（失败按 0）→ 翻倍。
 //
-// TODO: 用遮蔽改写流水线：三步都用 `let x = ...`；
-//       禁止 mut、禁止 unwrap。
+// TODO: 在禁止 mut 与 unwrap 的前提下完成三步加工；
+//       中间结果的类型变了也要能继续往后走。
 //       现在的实现坏输入会 panic（测试里有 "abc"）。
 pub fn pipeline(raw: &str) -> i32 {
     let x = raw.trim();

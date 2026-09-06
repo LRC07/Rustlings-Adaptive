@@ -12,8 +12,8 @@ use std::cell::Cell;
 // 场景：读取站点主题色；缺失时回退到 default_color()。
 // default_color 很贵（要重建整张调色板），测试用计数器盯着它：
 // 只要有主题色，它就绝不允许被调用。
-// TODO: 补全 theme_color——unwrap_or 的参数是立刻求值的，
-// 选一个惰性的写法，让两个测试同时成立。
+// TODO: 补全 theme_color，让两个测试同时成立
+//       （主题存在时，昂贵的默认值构造绝不能发生）。
 #[derive(Debug)]
 struct Theme {
     color: Option<String>,
