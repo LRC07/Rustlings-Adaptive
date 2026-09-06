@@ -51,45 +51,65 @@ pub(crate) fn render(src: &str, width: usize, ansi: bool) -> String {
     if !ansi {
         return src.to_string();
     }
-    let p = Painter { ansi: true };
+    let mut st = LineRenderer::new(width, true);
     let mut out = String::new();
-    let mut in_fence = false;
     for line in src.lines() {
+        out.push_str(&st.line(line));
+    }
+    // Fence left open by the model: close it visibly instead of
+    // styling the rest of the transcript as code forever.
+    if st.in_fence {
+        let p = Painter { ansi };
+        out.push_str(&p.dim("```"));
+        out.push('\n');
+    }
+    out
+}
+
+/// Single-line rendering state shared by `render` (whole reply) and
+/// `StreamMd` (streaming deltas) — one code path, one visual language.
+pub(crate) struct LineRenderer {
+    width: usize,
+    ansi: bool,
+    in_fence: bool,
+}
+
+impl LineRenderer {
+    pub(crate) fn new(width: usize, ansi: bool) -> Self {
+        Self { width, ansi, in_fence: false }
+    }
+
+    /// Render one complete line (caller consumed its '\n'); output
+    /// includes the trailing newline.
+    pub(crate) fn line(&mut self, line: &str) -> String {
+        let p = Painter { ansi: self.ansi };
         let trimmed = line.trim_start();
         if trimmed.starts_with("```") {
-            in_fence = !in_fence;
-            out.push_str(&p.dim(line));
-            out.push('\n');
-            continue;
+            self.in_fence = !self.in_fence;
+            return format!("{}\n", p.dim(line));
         }
-        if in_fence {
+        if self.in_fence {
             // Code keeps its shape: no wrap, no inline styling.
-            out.push_str(line);
-            out.push('\n');
-            continue;
+            return format!("{line}\n");
         }
         if trimmed.is_empty() {
-            out.push('\n');
-            continue;
+            return "\n".into();
         }
         if let Some(rest) = trimmed.strip_prefix('#') {
             let text = rest.trim_start_matches('#').trim();
-            out.push_str(&styled_line(&p, text, width, 0, Style::Bold, true));
-            out.push('\n');
-            continue;
+            return format!("{}\n", styled_line(&p, text, self.width, 0, Style::Bold, true));
         }
         if trimmed == "---" || trimmed == "***" {
-            out.push_str(&p.dim(&"─".repeat(24)));
-            out.push('\n');
-            continue;
+            return format!("{}\n", p.dim(&"─".repeat(24)));
         }
         if let Some(rest) = trimmed.strip_prefix("> ").or(trimmed.strip_prefix('>')) {
-            for l in styled_line(&p, rest.trim(), width, 2, Style::Quote, false).lines() {
+            let mut out = String::new();
+            for l in styled_line(&p, rest.trim(), self.width, 2, Style::Quote, false).lines() {
                 out.push_str(&p.dim("│ "));
                 out.push_str(l);
                 out.push('\n');
             }
-            continue;
+            return out;
         }
         // Lists: `- `/`* `/`+ ` become "• ", ordered items keep their
         // marker; continuation lines align under the marker (2 cols).
@@ -98,7 +118,8 @@ pub(crate) fn render(src: &str, width: usize, ansi: bool) -> String {
             Some(_) => ("• ", 2usize),
             None => ("", 0usize),
         };
-        let body = styled_line(&p, rest, width, indent, Style::Plain, false);
+        let body = styled_line(&p, rest, self.width, indent, Style::Plain, false);
+        let mut out = String::new();
         if marker.is_some() {
             for (i, l) in body.lines().enumerate() {
                 if i == 0 {
@@ -114,14 +135,64 @@ pub(crate) fn render(src: &str, width: usize, ansi: bool) -> String {
             out.push_str(&body);
             out.push('\n');
         }
+        out
     }
-    // Fence left open by the model: close it visibly instead of
-    // styling the rest of the transcript as code forever.
-    if in_fence {
-        out.push_str(&p.dim("```"));
-        out.push('\n');
+}
+
+/// Streaming markdown renderer (C1): feed content deltas, get styled
+/// output as soon as a line completes. The trailing partial line is
+/// held until it terminates (or `finish`). `ansi = false` (pipes) just
+/// passes deltas through untouched.
+/// (Wired into the REPL in block 4 — temporary allow.)
+#[allow(dead_code)]
+pub(crate) struct StreamMd {
+    ansi: bool,
+    buf: String,
+    st: LineRenderer,
+}
+
+impl StreamMd {
+    /// (Wired into the REPL in block 4 — temporary allow.)
+    #[allow(dead_code)]
+    pub(crate) fn new(width: usize, ansi: bool) -> Self {
+        Self { ansi, buf: String::new(), st: LineRenderer::new(width, ansi) }
     }
-    out
+
+    /// Feed one content delta; returns everything printable now.
+    pub(crate) fn feed(&mut self, delta: &str) -> String {
+        if !self.ansi {
+            return delta.to_string();
+        }
+        self.buf.push_str(delta);
+        let mut out = String::new();
+        while let Some(pos) = self.buf.find('\n') {
+            let line: String = self.buf.drain(..=pos).collect();
+            let line = line.trim_end_matches('\n');
+            out.push_str(&self.st.line(line));
+        }
+        out
+    }
+
+    /// End of the reply: flush the unterminated tail (and close an
+    /// open fence visibly, like `render`).
+    #[allow(dead_code)]
+    pub(crate) fn finish(&mut self) -> String {
+        let mut out = String::new();
+        if !self.ansi {
+            return out;
+        }
+        if !self.buf.is_empty() {
+            let tail = std::mem::take(&mut self.buf);
+            out.push_str(&self.st.line(&tail));
+        }
+        if self.st.in_fence {
+            let p = Painter { ansi: self.ansi };
+            out.push_str(&p.dim("```"));
+            out.push('\n');
+            self.st.in_fence = false;
+        }
+        out
+    }
 }
 
 fn list_item(line: &str) -> (Option<char>, &str) {
@@ -251,6 +322,39 @@ fn flush(plain: &mut String, spans: &mut Vec<(String, Style)>, base: Style) {
 mod tests {
     use super::*;
     use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn stream_md_matches_whole_render() {
+        // Feeding the same reply in arbitrary deltas must produce the
+        // same output as rendering the whole reply at once.
+        let src = "## 标题\n\n第一段：`E0382` 与 **重点**。\n\n- 列表一\n- 列表二\n\n```rust\nfn f() {}\n```\n尾行无换行";
+        let want = render(src, 60, true);
+        let mut sm = StreamMd::new(60, true);
+        let mut got = String::new();
+        // Deltas cut mid-line and mid-fence-marker.
+        for chunk in ["## 标", "题\n\n第一段：`E0382` 与 **重", "点**。\n\n- 列表一\n- 列表", "二\n\n```rust\nfn f() {}\n``", "`\n尾行无换行"] {
+            got.push_str(&sm.feed(chunk));
+        }
+        got.push_str(&sm.finish());
+        assert_eq!(got, want, "streamed output must equal whole-render");
+    }
+
+    #[test]
+    fn stream_md_finish_flushes_tail_and_open_fence() {
+        let mut sm = StreamMd::new(60, true);
+        let mut got = sm.feed("```rust\nfn f() {");
+        got.push_str(&sm.finish());
+        assert!(got.contains("fn f() {"), "{got}");
+        assert!(got.contains("```"), "open fence closed: {got}");
+    }
+
+    #[test]
+    fn stream_md_passthrough_without_ansi() {
+        let mut sm = StreamMd::new(60, false);
+        assert_eq!(sm.feed("abc"), "abc");
+        assert_eq!(sm.feed("**x**"), "**x**");
+        assert_eq!(sm.finish(), "");
+    }
 
     #[test]
     fn plain_source_untouched_without_ansi() {
