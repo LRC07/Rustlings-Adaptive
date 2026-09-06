@@ -1,71 +1,101 @@
-# rustlings-adaptive 模型配置
+# rustlings-adaptive 模型配置（评测推荐版，2026-09-06）
 #
-# 概念只有一个：档案（[[models]]）。
-#   - 程序实际使用 `active` 指向的那个档案；/model <名> 切换 = 移动指针
-#   - /config 交互修改 = 直接编辑当前档案
+# ─────────────────────────────────────────────────────────────────
+# 校内同学（清华）零成本上手：
+#   1. 登录 https://easycompute.cs.tsinghua.edu.cn/login 领取免费
+#      token（全校已统一发放额度）
+#   2. 在聚合平台 https://ai.paratera.com/#/lms/api 创建 API Key
+#   3. 把 Key 粘到下面任一位置：
+#      a) 推荐：项目根目录建 .env，写一行 RUSTLINGS_API_KEY=sk-...
+#         （一处覆盖全部档案，/model 切换后依然生效）
+#      b) 或逐档案填 api_key = ""
+#   4. cp config.example.toml config.toml，cargo run 即可
+# 校外/其他来源：任意 OpenAI 兼容端点皆可（DeepSeek / Kimi 官方 /
+# Ollama / vLLM…），把 endpoint 与模型 id 换成你自己的即可。
+# ─────────────────────────────────────────────────────────────────
+#
+# 配置概念只有一个：档案（[[models]]）。
+#   - 程序使用 active 指向的档案；/model <名> 切换 = 移动指针
+#   - [routing]（可选）把不同环节路由到不同档案，见下方说明
 #   - 每个模型在文件里只出现一次，没有隐藏的继承规则
 #
-# 快速开始（只用一个模型）：
-#   1. 把本文件复制为 config.toml（已被 .gitignore 排除，不会泄露 Key）
-#   2. 在第一个 [[models]] 里填好 endpoint / api_key / model
-#   3. cargo run，开始对话
-#
-# 也可以用 .env（RUSTLINGS_API_KEY / RUSTLINGS_ENDPOINT / RUSTLINGS_MODEL，
-# 优先级高于档案值，且切换档案后依然生效——适合多档案共用一个 Key），
-# 或运行后 /config 交互修改。
+# 【分场景模型结论】（12 档实测，详见项目反馈文档）
+#   对话 + 出题   → qwen38f-off（~$0.0001/回合，出题 6.6s 概念命中准；
+#                    想要更厚的讲解，把 chat 路由到 m3）
+#   评审门 + 复盘 → k3-low（唯一交互级复盘档：gate 14-32s，四维评分
+#                    最合理；约 $0.018/次，贵但值）
+#   出题备选      → glm-53f-low（E0382/E0597 命中准；E0308 会漂移）
+#   ⚠ qwen38f-off 做复盘时评审门偶发 5 分钟长尾——复盘请路由 k3-low。
 
-# 当前生效的档案名（缺省 = 第一个档案；切换用 /model <名> 或改这里）
-active = "openai"
+active = "qwen38f-off"
 
+# 分场景路由（可选）：三个字段都可省略，省略 = 沿用 active。
+[routing]
+chat = "qwen38f-off"      # 对话 / 工具环 / 假设实验室
+generate = "qwen38f-off"  # 出题（/generate 与教练的 generate_exercise）
+review = "k3-low"         # 评审门 + 复盘（解释校核/四维对比/挑战提示）
+
+# ---- 1. 对话+出题主力：全场性价比最高 ----
 [[models]]
-name = "openai"
-# 必填：任意 OpenAI 兼容端点（OpenAI / DeepSeek / Kimi / Ollama / vLLM…）
-endpoint = "https://api.openai.com/v1"
-# 必填。本地端点（Ollama 等）不需要真 Key，填任意占位即可（如 "ollama"）
+name = "qwen38f-off"
+endpoint = "https://llmapi.paratera.com"
+api_key = ""                               # 建议走 .env（见顶部说明）
+model = "Qwen3.8-Flash"
+context_len = 1000000                      # 上下文窗口（tokens）
+prices = { input = 0.03, output = 0.20 }   # 每 1M token 价格（USD），按平台价格页核对
+think_mode = "off"                         # auto = 沿用端点默认 | on | off
+# reasoning_effort = "low"                 # 仅思考开启时有效（low/high/max）
+# llm_timeout_secs = 480                   # 单次请求超时（慢端点可调高）
+# stream = true                            # 流式打字机；端点异常可设 false
+
+# ---- 2. 对话质感档：教学最厚（概念标签/假设实验提议/对比表）----
+# 想要更厚重的讲解时，把上面 [routing] 的 chat 改成 "m3"。
+[[models]]
+name = "m3"
+endpoint = "https://llmapi.paratera.com"
 api_key = ""
-# 必填：模型 id
-model = "gpt-4o-mini"
-# 上下文窗口（tokens）。缺省 128000
-context_len = 128000
-# 每次请求超时秒数。缺省 480；出题的长输出在慢端点上可调高
-llm_timeout_secs = 480
-# 每 1M token 价格（USD），程序据此记账并在超预算时拦截。
-# 缺省 = 内置示例价（输入 0.15 / 输出 0.60）——请改成你的模型定价页，
-# 否则花费统计失真
-prices = { input = 0.15, output = 0.60 }
-# 思考模式：auto = 沿用端点默认（拿不准就用它）｜ on = 强制开 ｜ off = 强制关。
-# 缺省 auto
-think_mode = "auto"
-# 推理强度：low / high / max，仅思考开启时有效。缺省不发（端点默认）
-reasoning_effort = "low"
-# 回复流式输出（打字机效果，首字秒级可见）。缺省 true；
-# 个别端点对 stream 支持异常时可设 false（程序也会自动回退一次）
-# stream = true
+model = "MiniMax-M3"
+context_len = 192000
+prices = { input = 0.30, output = 1.20 }   # est. 请核对
+# MiniMax-M3 的 thinking 只有 adaptive/disabled 两档，缺省 auto 即可
 
-# 需要更多模型就再各加一个档案，把 active 改成对应 name 即可切换：
+# ---- 3. 评审门+复盘专用：唯一交互级复盘档 ----
 [[models]]
-name = "local"
-endpoint = "http://localhost:11434/v1"
-api_key = "ollama"
-model = "qwen2.5:7b"
-context_len = 32000
-prices = { input = 0.0, output = 0.0 }
-think_mode = "off"
+name = "k3-low"
+endpoint = "https://llmapi.paratera.com"
+api_key = ""
+model = "Kimi-K3"
+context_len = 1000000
+prices = { input = 2.82, output = 14.08 }  # 官方 ¥20/¥100 每 1M（缓存输入价程序暂未区分）
+think_mode = "on"
+reasoning_effort = "low"
 
-# 云上模型示例（DeepSeek），照样子加一段：
-#
-# [[models]]
-# name = "deepseek"
-# endpoint = "https://api.deepseek.com/v1"
-# api_key = "sk-..."
-# model = "deepseek-chat"
-# prices = { input = 0.27, output = 1.09 }
+# ---- 4. 出题备选：E0382/E0597 命中准（13-22s），E0308 会漂移 ----
+[[models]]
+name = "glm-53f-low"
+endpoint = "https://llmapi.paratera.com"
+api_key = ""
+model = "GLM-5.3-Flash-2"
+context_len = 200000
+prices = { input = 0.10, output = 0.40 }   # est. 请核对
+think_mode = "on"
+reasoning_effort = "low"
 
 # ---- 全局设置（不属于任何模型）----
 
-# 累计花费达到即拦截 LLM 调用；删掉整段 = 不设预算
+# 累计花费达到即拦截所有模型调用；删掉整段 = 不设预算
 [budget]
-usd = 5.0
+usd = 10.0
 
 # 练习编辑器（缺省自动：$EDITOR → $VISUAL → code --wait → vi）
 # editor = "code --wait"
+
+# 本地端点示例（免费但较慢，无 Key 需求，填占位即可）：
+# [[models]]
+# name = "local"
+# endpoint = "http://localhost:11434/v1"
+# api_key = "ollama"
+# model = "qwen2.5:7b"
+# context_len = 32000
+# prices = { input = 0.0, output = 0.0 }
+# think_mode = "off"

@@ -202,6 +202,12 @@ pub fn is_interrupted() -> bool {
 /// Everything a turn (and its tools) needs from the outside.
 pub struct AgentEnv {
     pub caller: Arc<dyn ChatTurnCaller>,
+    /// Generate-phase caller (M9l routing): used by the
+    /// `generate_exercise` tool so the generation model can differ from
+    /// the chat model. Falls back to `caller` construction semantics —
+    /// the CLI always fills it (chat caller when generate is unrouted).
+    pub gen_caller: Arc<dyn ChatTurnCaller>,
+    pub gen_cfg: ModelConfig,
     pub tracker: Arc<Mutex<UsageTracker>>,
     pub cfg: ModelConfig,
     /// Repo root (templates/, taxonomy/, exercises/ live under it).
@@ -624,6 +630,8 @@ mod tests {
 
     fn test_env(caller: Arc<dyn ChatTurnCaller>) -> AgentEnv {
         AgentEnv {
+            gen_caller: caller.clone(),
+            gen_cfg: ModelConfig::default(),
             caller,
             tracker: Arc::new(Mutex::new(usage::UsageTracker::from_path(
                 std::env::temp_dir().join(format!("rs_agent_usage_{}.json", std::process::id())),

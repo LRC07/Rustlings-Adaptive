@@ -375,6 +375,12 @@ fn render_gate(o: &review::GateOutcome) {
     }
 
     println!("  · 最终判定：{}", render::bold(o.verdict.label_cn()));
+    if o.llm.is_some() {
+        println!(
+            "{}",
+            render::dim("    （模型单次评审，判定与分数可能有波动；四维分数供参考）")
+        );
+    }
     // 9.6 实测 B5：a passing verdict with constraint violations felt
     // too lenient — make the warning loud at the verdict itself.
     if s.has_constraint_violations() {
@@ -414,10 +420,15 @@ fn severity_kind_cn(f: &review::Finding) -> String {
 /// Prompt that never leaves the debrief: Ctrl-C cancels the line,
 /// EOF/empty handled by the caller's own semantics.
 fn ask(prompt: &str) -> Option<String> {
+    // M9l bug6 fix: keystrokes typed while an LLM spinner held the
+    // foreground must not leak into the debrief prompts — a stray
+    // Enter here hand-motivates a whole paid exercise generation.
+    crate::cli::flush_stdin();
     match read_line(prompt) {
         Line::Text(s) => Some(s),
         Line::Interrupted => {
             println!("  ^C 已取消本行输入");
+            crate::cli::flush_stdin();
             None
         }
         Line::Eof => None,
@@ -580,6 +591,9 @@ fn step2_challenge(
                 }
                 None => println!("  （本题没有持久化的参考解）"),
             },
+            other if other.starts_with('/') => {
+                println!("  复盘页内不处理斜杠命令——按 Enter 结束复盘，回对话后再使用（/exit 同）。")
+            }
             "r" => {
                 let res = crate::exercise::compile_and_run(ex);
                 if !res.passed {
@@ -751,7 +765,13 @@ fn step4_follow_up(
     let hints_cell =
         if used_hints { render::yellow("用了分级提示").to_string() } else { "未使用".to_string() };
     let mut summary = vec![
-        ("最终判定".to_string(), render::bold(outcome.verdict.label_cn())),
+        (
+            "最终判定".to_string(),
+            render::bold(&format!(
+                "{}（模型单次评审，可能有波动）",
+                outcome.verdict.label_cn()
+            )),
+        ),
         ("解释校核".to_string(), explanation_cell),
         ("分级提示".to_string(), hints_cell),
         (
@@ -825,7 +845,7 @@ fn step4_follow_up(
                 ),
             };
             Some(format!(
-                "我刚完成练习《{}》的复盘。\n· 评审判定：{verdict_cn}\n· {check}{hint_note}{fail_note}\n· 系统判断：{}\n\n{ask}",
+                "我刚完成练习《{}》的复盘。\n· 评审判定：{verdict_cn}\n· {check}{hint_note}{fail_note}\n· 系统判断：{}\n\n{ask}\n（如果你不想继续做题，直接告诉我即可。）",
                 meta.title,
                 follow_up.label_cn(),
             ))

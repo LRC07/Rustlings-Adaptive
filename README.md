@@ -26,9 +26,11 @@
   失败会收到主动提示，教练可随时查询画像定向出题。
 - **用量与预算**：每次调用按用途（对话/出题/评审/复盘）分项记账，
   实时展示花费，预算到顶自动拦截。
-- **多模型**：OpenAI 兼容端点皆可（OpenAI / DeepSeek / Kimi / 本地
-  Ollama / vLLM…），`/model` 多档案切换（`new` 交互新建、`rm` 确认
-  后删除），思考模式与推理强度按档案可配。
+- **多模型 + 分场景路由**：OpenAI 兼容端点皆可（OpenAI / DeepSeek /
+  Kimi / 本地 Ollama / vLLM…），`/model` 多档案切换（`new` 交互新建、
+  `rm` 确认后删除），思考模式与推理强度按档案可配；`[routing]` 可把
+  对话 / 出题 / 复盘评审分别路由到不同模型（对话用快的、复盘用强的，
+  账本按各环节实际模型分项记账）。
 
 ## 安装与运行
 
@@ -65,6 +67,34 @@ rustlings-adaptive      # 注意：仍需在项目根目录（含 exercises/ 与
    （也可用 `RUSTLINGS_ENDPOINT` / `RUSTLINGS_MODEL` 覆盖，优先级更高）；
 3. **程序内配置页**：运行后 `/config`，交互修改 endpoint / model /
    api_key / 预算 / 编辑器 / 思考模式 / 流式输出，修改写回当前档案。
+
+**分功能配置模型（推荐）**：不同环节对模型的要求不同——对话要快、
+出题要便宜且准、复盘评审要强推理。在 `config.toml` 的 `[routing]`
+表里按环节指定档案（省略的字段沿用 `active`）：
+
+```toml
+[routing]
+chat = "qwen38f-off"      # 对话 / 工具环 / 假设实验室
+generate = "qwen38f-off"  # 出题
+review = "k3-low"         # 评审门 + 复盘
+```
+
+各环节推荐档位（12 档实测结论，示例配置已内置对应档案）：
+
+| 环节 | 推荐 | 理由 |
+|---|---|---|
+| 对话 + 出题 | `qwen38f-off` | ~$0.0001/回合，出题 6.6s 且概念命中准；要更厚讲解可切 `m3` |
+| 评审门 + 复盘 | `k3-low` | 唯一交互级复盘档：14–32s，四维评分最合理（约 $0.018/次） |
+| 出题备选 | `glm-53f-low` | E0382/E0597 命中准；E0308 会漂移 |
+
+**校内同学（清华）零成本上手**：
+1. 登录 [easycompute.cs.tsinghua.edu.cn](https://easycompute.cs.tsinghua.edu.cn/login)
+   领取学校发放的免费 token 额度；
+2. 在聚合平台 [ai.paratera.com](https://ai.paratera.com/#/lms/api)
+   创建 API Key，复制到 `.env`（或示例配置的 `api_key` 字段）即可
+   直接使用示例中的全部模型；
+3. 其他来源：任意 OpenAI 兼容端点皆可（DeepSeek / Kimi 官方 /
+   Ollama / vLLM…），替换 `endpoint` 与模型 id 即可。
 
 > `config.toml` 与 `.env` 含 API Key，已被 `.gitignore` 排除，请勿提交。
 > 预算：累计花费达到 `[budget].usd` 后，后续模型调用被自动拦截。

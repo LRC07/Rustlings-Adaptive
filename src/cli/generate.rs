@@ -21,11 +21,13 @@ use super::{practice, read_line_or_leave, render};
 pub(crate) fn cmd_generate(
     cfg: &ModelConfig,
     tracker: &Arc<Mutex<UsageTracker>>,
-    client: &Option<LlmClient>,
     ctx: &practice::PracticeCtx,
     session: Option<(&str, &[String])>,
     arg: Option<&str>,
 ) -> Option<PathBuf> {
+    // M9l routing: `cfg` arrives as the GENERATE snapshot (the REPL
+    // materializes it), so prices/thinking/timeout here are the routed
+    // profile's own. The client is built from it below.
     println!();
     println!("{}", render::header("生成练习"));
     let topic_text = match arg {
@@ -114,6 +116,7 @@ pub(crate) fn cmd_generate(
         }
     }
 
+    let client = crate::cli::make_client(cfg);
     let llm: Option<&mut dyn generator::LlmCaller> = match client.as_ref() {
         Some(cl) => Some(&mut CliCaller {
             client: cl,
@@ -225,9 +228,11 @@ pub(crate) fn cmd_generate(
             // Path comparison uses canonicalize(): the generator's path
             // carries a "./" prefix while discover() yields plain
             // relative paths, so raw equality would always miss.
+            let rev_cfg = cfg.snapshot_for_phase(crate::config::Phase::Review);
+            let rev_client = crate::cli::make_client(&rev_cfg);
             let deps = super::debrief::DebriefDeps {
-                client: client.as_ref(),
-                cfg,
+                client: rev_client.as_ref(),
+                cfg: &rev_cfg,
                 tracker: tracker.clone(),
                 editor: cfg.editor.as_deref(),
             };

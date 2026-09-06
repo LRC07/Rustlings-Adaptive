@@ -358,10 +358,12 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
     };
     // M9h (level 信号): learner profile steers L2/L3 drafts.
     let learner = generator::LearnerContext::from_local(&env.root.join("exercises"));
+    // M9l routing: generation bills under the generate phase's own
+    // model/prices (falls back to the chat caller when unrouted).
     let mut bridge = CallerBridge {
-        caller: env.caller.clone(),
-        input_price: env.cfg.prices.input,
-        output_price: env.cfg.prices.output,
+        caller: env.gen_caller.clone(),
+        input_price: env.gen_cfg.prices.input,
+        output_price: env.gen_cfg.prices.output,
         acc: UsageAcc::default(),
     };
     let outcome = match generator::generate_full(
@@ -712,6 +714,8 @@ mod tests {
             std::env::temp_dir().join(format!("rs_tools_usage_{}.json", std::process::id())),
         );
         AgentEnv {
+            gen_caller: Arc::new(FailingCaller),
+            gen_cfg: crate::config::ModelConfig::default(),
             caller: Arc::new(FailingCaller),
             tracker: Arc::new(std::sync::Mutex::new(tracker)),
             cfg: crate::config::ModelConfig::default(),

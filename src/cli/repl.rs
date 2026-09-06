@@ -43,7 +43,7 @@ pub(crate) fn run() {
         }
     };
     let tracker = Arc::new(Mutex::new(UsageTracker::load_or_create()));
-    let mut client = make_client(&cfg);
+    let mut client = make_client(&cfg.snapshot_for_phase(crate::config::Phase::Chat));
     install_ctrlc();
 
     // M9c (方案 C): legacy config layouts are migrated on load; persist
@@ -164,7 +164,9 @@ pub(crate) fn run() {
                     include_fixtures: arg == Some("all"),
                     session_paths: &session.exercises,
                 };
-                let deps = debrief_deps(&cfg, &tracker, &client);
+                let rev_cfg = cfg.snapshot_for_phase(crate::config::Phase::Review);
+                let rev_client = make_client(&rev_cfg);
+                let deps = debrief_deps(&rev_cfg, &tracker, &rev_client);
                 match practice::enter(&practice_ctx, opts, Some(&deps)) {
                     Some(msg) => {
                         repaint_chat(&session, &cfg, &tracker);
@@ -177,9 +179,8 @@ pub(crate) fn run() {
             Cmd::Generate(arg) => {
                 agent::reset_interrupt();
                 let gen_path = generate::cmd_generate(
-                    &cfg,
+                    &cfg.snapshot_for_phase(crate::config::Phase::Generate),
                     &tracker,
-                    &client,
                     &practice_ctx,
                     Some((session.id.as_str(), session.exercises.as_slice())),
                     arg,
@@ -316,7 +317,7 @@ fn handle_model(arg: Option<&str>, cfg: &mut ModelConfig, client: &mut Option<Ll
                 ),
                 Err(e) => println!("  已切换但写回 config.toml 失败：{e:#}"),
             }
-            *client = make_client(cfg);
+            *client = make_client(&cfg.snapshot_for_phase(crate::config::Phase::Chat));
         }
         Err(e) => {
             println!("  切换失败：{e:#}");
@@ -355,6 +356,17 @@ fn model_panel(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
                 host_of(&m.endpoint)
             );
         }
+        if !cfg.routing.is_empty() {
+            let pick = |n: &Option<String>| {
+                n.as_deref().map(|s| s.to_string()).unwrap_or_else(|| format!("（默认 {}）", cfg.active.clone().unwrap_or_default()))
+            };
+            println!(
+                "  分场景路由：对话 {} ｜ 出题 {} ｜ 评审 {}",
+                pick(&cfg.routing.chat),
+                pick(&cfg.routing.generate),
+                pick(&cfg.routing.review)
+            );
+        }
         println!();
         println!("  [数字] 切换 ｜ [n] 新建 ｜ [d <名>] 删除 ｜ [q] 返回对话");
         let Some(line) = read_line_or_leave("模型> ") else { return };
@@ -385,7 +397,7 @@ fn model_panel(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
                             ),
                             Err(e) => println!("  已切换但写回 config.toml 失败：{e:#}"),
                         }
-                        *client = make_client(cfg);
+                        *client = make_client(&cfg.snapshot_for_phase(crate::config::Phase::Chat));
                         return; // switched → back to the conversation
                     }
                 }
@@ -456,7 +468,7 @@ fn model_new(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
                 if let Err(e) = cfg.save_to_default_file() {
                     println!("  切换成功但写回失败：{e:#}");
                 }
-                *client = make_client(cfg);
+                *client = make_client(&cfg.snapshot_for_phase(crate::config::Phase::Chat));
                 println!("  当前档案：「{name}」｜ {} @ {}", cfg.model, host_of(&cfg.endpoint));
             }
         }
@@ -498,7 +510,7 @@ fn model_remove(cfg: &mut ModelConfig, client: &mut Option<LlmClient>, name: &st
                 Ok(()) => println!("  已删除「{name}」。当前档案：「{}」", cfg.active.clone().unwrap_or_default()),
                 Err(e) => println!("  已删除但写回失败：{e:#}"),
             }
-            *client = make_client(cfg);
+            *client = make_client(&cfg.snapshot_for_phase(crate::config::Phase::Chat));
         }
         Err(e) => println!("  删除失败：{e:#}"),
     }
@@ -856,10 +868,19 @@ fn agent_turn(
     let open_loop_note = if *open_loop_seen == 1 { detected_note.clone() } else { None };
     let remind_in_footer = detected_note.is_some() && *open_loop_seen <= 2;
     drop(detected_note);
+    // M9l routing: the chat caller rides the chat snapshot; the
+    // generate tool rides the generate snapshot (falls back to active).
+    let gen_snapshot = cfg.snapshot_for_phase(crate::config::Phase::Generate);
+    let gen_caller = match make_client(&gen_snapshot) {
+        Some(c) => Arc::new(c),
+        None => Arc::new(cl.clone()) as Arc<dyn crate::agent::ChatTurnCaller>,
+    };
     let env = AgentEnv {
+        gen_caller,
+        gen_cfg: gen_snapshot,
         caller: Arc::new(cl.clone()),
         tracker: tracker.clone(),
-        cfg: cfg.clone(),
+        cfg: cfg.snapshot_for_phase(crate::config::Phase::Chat),
         root: PathBuf::from("."),
         session_id: Some(session.id.clone()),
         practice_note,
@@ -1041,7 +1062,9 @@ fn agent_turn(
                                 include_fixtures: false,
                                 session_paths: &session.exercises,
                             };
-                            let deps = debrief_deps(cfg, tracker, client);
+                            let rev_cfg = cfg.snapshot_for_phase(crate::config::Phase::Review);
+                            let rev_client = make_client(&rev_cfg);
+                            let deps = debrief_deps(&rev_cfg, tracker, &rev_client);
                             if let Some(msg) = practice::enter_at(practice_ctx, &offer.path, opts, Some(&deps)) {
                                 repaint_chat(session, cfg, tracker);
                                 println!("{} [问教练] 把练习代码带回对话", super::render::bold("你>"));
@@ -1462,7 +1485,7 @@ fn save_and_rebuild(cfg: &ModelConfig, client: &mut Option<LlmClient>) {
         Ok(()) => println!("  已写入 {}", crate::config::CONFIG_FILE),
         Err(e) => println!("  写入配置失败：{e:#}"),
     }
-    *client = make_client(cfg);
+    *client = make_client(&cfg.snapshot_for_phase(crate::config::Phase::Chat));
 }
 
 /// `/sessions` — list, view one trajectory, switch into a past
@@ -2039,6 +2062,7 @@ fn topics_page() {
                 "{}",
                 render::dim("  说「来一道 <概念> 的题」或 /generate <概念> 即可定向练习")
             );
+            println!("{}", render::dim("  （此页展示完即回到对话，直接输入问题继续即可）"));
         }
         Err(e) => println!("  概念图谱加载失败：{e:#}"),
     }

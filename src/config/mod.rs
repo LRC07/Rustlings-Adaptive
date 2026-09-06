@@ -17,7 +17,7 @@
 
 use std::fs;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 pub const CONFIG_FILE: &str = "config.toml";
@@ -238,6 +238,46 @@ pub struct ModelProfile {
     pub stream: Option<bool>,
 }
 
+/// Which call site a model is picked for (M9l per-scenario routing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    /// Coach conversation, tool loop, borrowlab interpretation.
+    Chat,
+    /// Exercise generation (`/generate` + the agent tool's repair loop).
+    Generate,
+    /// Review gate + debrief (four-dimension comparison, explanation
+    /// check, challenge hints).
+    Review,
+}
+
+/// Per-scenario model routing (M9l): each phase may point at a
+/// different `[[models]]` profile; unset phases fall back to `active`.
+/// Optional entirely — with no `[routing]` table every phase uses the
+/// active profile exactly as before.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Routing {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generate: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<String>,
+}
+
+impl Routing {
+    pub fn is_empty(&self) -> bool {
+        self.chat.is_none() && self.generate.is_none() && self.review.is_none()
+    }
+
+    fn name_for(&self, phase: Phase) -> Option<&str> {
+        match phase {
+            Phase::Chat => self.chat.as_deref(),
+            Phase::Generate => self.generate.as_deref(),
+            Phase::Review => self.review.as_deref(),
+        }
+    }
+}
+
 /// Model configuration (R3). FILE SHAPE (M9c): `active` + global
 /// settings + `[[models]]` — the model fields below are NOT serialized;
 /// they are the runtime snapshot of the active profile, materialized by
@@ -271,6 +311,11 @@ pub struct ModelConfig {
     /// Never a copy — switching moves this pointer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<String>,
+
+    /// Per-scenario model routing (M9l): which profile serves chat /
+    /// generate / review. Unset phases fall back to `active`.
+    #[serde(default, skip_serializing_if = "Routing::is_empty")]
+    pub routing: Routing,
     /// Cumulative spend cap (checked before every LLM call). Global.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<Budget>,
@@ -305,6 +350,7 @@ impl Default for ModelConfig {
             llm_timeout_secs: None,
             streaming: default_streaming(),
             active: None,
+            routing: Routing::default(),
             budget: None,
             editor: None,
             ui: UiConfig::default(),
@@ -338,7 +384,28 @@ impl ModelConfig {
             }
         };
         cfg.materialize();
+        cfg.validate_routing()?;
         Ok(cfg)
+    }
+
+    /// Routing names must point at existing profiles — a typo would
+    /// otherwise silently route a phase to the fallback forever.
+    fn validate_routing(&self) -> Result<()> {
+        for (phase, name) in [
+            ("chat", &self.routing.chat),
+            ("generate", &self.routing.generate),
+            ("review", &self.routing.review),
+        ] {
+            if let Some(n) = name
+                && !self.models.iter().any(|m| &m.name == n)
+            {
+                bail!(
+                    "[routing] {phase} = \"{n}\" 没有对应的 [[models]] 档案；可用：{}",
+                    self.models.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join("、")
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Migrate a legacy layout: top-level model fields + `[[models]]`.
@@ -485,6 +552,14 @@ impl ModelConfig {
             _ => self.models[0].name.clone(),
         };
         let p = self.models.iter().find(|m| m.name == name).cloned().unwrap();
+        self.active = Some(name);
+        self.materialize_profile(p);
+    }
+
+    /// Copy one profile into the runtime snapshot fields, then apply
+    /// the env overlay. Shared by `materialize` (active) and
+    /// `snapshot_for_phase` (per-scenario routing, M9l).
+    fn materialize_profile(&mut self, p: ModelProfile) {
         self.endpoint = p.endpoint;
         self.api_key = p.api_key;
         self.model = p.model;
@@ -494,7 +569,6 @@ impl ModelConfig {
         self.prices = p.prices;
         self.llm_timeout_secs = p.llm_timeout_secs;
         self.streaming = p.stream != Some(false);
-        self.active = Some(name);
         // Env overlay on top of the profile, then derive the key source
         // from whether THIS materialization actually had an env key.
         let env_key = self.apply_env_overrides("RUSTLINGS_");
@@ -505,6 +579,24 @@ impl ModelConfig {
         } else {
             KeySource::ConfigFile
         };
+    }
+
+    /// Materialized snapshot for a routed phase (M9l): profile fields
+    /// (model/key/endpoint/prices/thinking/stream) come from the
+    /// profile the phase routes to; falls back to `self` unchanged when
+    /// that phase is not routed (zero-config parity). Clients built
+    /// from the result bill under the routed model's own prices.
+    pub fn snapshot_for_phase(&self, phase: Phase) -> ModelConfig {
+        let Some(name) = self.routing.name_for(phase) else {
+            return self.clone();
+        };
+        let mut out = self.clone();
+        match self.models.iter().find(|m| m.name == name) {
+            Some(p) => out.materialize_profile(p.clone()),
+            // Load-time validation makes this unreachable; be lenient.
+            None => out.routing = Routing::default(),
+        }
+        out
     }
 
     /// Write the snapshot back into the active profile, then serialize.
@@ -676,6 +768,63 @@ prices = { input = 0.0, output = 0.0 }
         let pre_models = &text2[..text2.find("[[models]]").unwrap()];
         assert!(!pre_models.contains("endpoint"), "snapshot leaked: {text2}");
         assert!(text2.contains("active = \"local\""));
+    }
+
+    #[test]
+    fn routing_falls_back_and_snapshots_profiles() {
+        let text = r#"
+active = "a"
+
+[routing]
+chat = "a"
+review = "b"
+
+[[models]]
+name = "a"
+endpoint = "https://x"
+api_key = "k"
+model = "m-a"
+prices = { input = 0.1, output = 0.2 }
+
+[[models]]
+name = "b"
+endpoint = "https://y"
+api_key = "k"
+model = "m-b"
+prices = { input = 2.0, output = 3.0 }
+think_mode = "on"
+reasoning_effort = "low"
+"#;
+        let mut cfg: ModelConfig = toml::from_str(text).unwrap();
+        cfg.materialize(); // production load() always materializes first
+        assert_eq!(cfg.routing.chat.as_deref(), Some("a"));
+        assert!(cfg.routing.generate.is_none());
+        // Unrouted phase → falls back to the active snapshot unchanged.
+        let gen_snap = cfg.snapshot_for_phase(Phase::Generate);
+        assert_eq!(gen_snap.model, "m-a");
+        assert_eq!(gen_snap.prices.input, 0.1);
+        // Routed phase → the routed profile's own fields.
+        let rev = cfg.snapshot_for_phase(Phase::Review);
+        assert_eq!(rev.model, "m-b");
+        assert_eq!(rev.prices.input, 2.0);
+        assert_eq!(rev.think_mode, ThinkMode::On);
+        // Routing must survive a save round-trip.
+        let out = toml::to_string_pretty(&cfg).unwrap();
+        assert!(out.contains("[routing]"), "{out}");
+        assert!(out.contains("review = \"b\""));
+    }
+
+    #[test]
+    fn routing_rejects_unknown_profile_names() {
+        let mut cfg = ModelConfig::default();
+        cfg.models.push(ModelProfile {
+            name: "a".into(),
+            ..Default::default()
+        });
+        cfg.routing.generate = Some("nope".into());
+        assert!(cfg.validate_routing().is_err());
+        cfg.routing.generate = Some("a".into());
+        assert!(cfg.validate_routing().is_ok());
     }
 
     #[test]
