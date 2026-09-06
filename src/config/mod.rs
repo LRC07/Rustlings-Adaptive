@@ -34,6 +34,11 @@ fn default_context_len() -> u32 {
     128_000
 }
 
+/// Streaming is ON unless a profile explicitly opts out.
+fn default_streaming() -> bool {
+    true
+}
+
 fn default_input_price() -> f64 {
     0.15
 }
@@ -104,6 +109,7 @@ impl Default for ModelProfile {
             prices: Prices::default(),
             think_mode: ThinkMode::Auto,
             reasoning_effort: None,
+            stream: None,
         }
     }
 }
@@ -225,6 +231,11 @@ pub struct ModelProfile {
     /// None → no effort parameter is sent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Streaming (C1): true/default = SSE streaming for coach replies;
+    /// set false for endpoints that mishandle `stream: true` — the
+    /// client also falls back automatically once on stream errors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
 }
 
 /// Model configuration (R3). FILE SHAPE (M9c): `active` + global
@@ -251,6 +262,9 @@ pub struct ModelConfig {
     pub prices: Prices,
     #[serde(skip, default)]
     pub llm_timeout_secs: Option<u64>,
+    /// Snapshot of the active profile's streaming switch (default on).
+    #[serde(skip, default = "default_streaming")]
+    pub streaming: bool,
 
     // ---- file fields ----
     /// Which profile is in effect; None/default = the first profile.
@@ -289,6 +303,7 @@ impl Default for ModelConfig {
             reasoning_effort: None,
             prices: Prices::default(),
             llm_timeout_secs: None,
+            streaming: default_streaming(),
             active: None,
             budget: None,
             editor: None,
@@ -422,6 +437,7 @@ impl ModelConfig {
                     prices: lg.prices,
                     think_mode: lg.think_mode,
                     reasoning_effort: lg.reasoning_effort,
+                    stream: None,
                 });
                 name
             }
@@ -461,6 +477,7 @@ impl ModelConfig {
                 prices: Prices::default(),
                 think_mode: ThinkMode::Auto,
                 reasoning_effort: None,
+                stream: None,
             });
         }
         let name = match &self.active {
@@ -476,6 +493,7 @@ impl ModelConfig {
         self.reasoning_effort = p.reasoning_effort;
         self.prices = p.prices;
         self.llm_timeout_secs = p.llm_timeout_secs;
+        self.streaming = p.stream != Some(false);
         self.active = Some(name);
         // Env overlay on top of the profile, then derive the key source
         // from whether THIS materialization actually had an env key.

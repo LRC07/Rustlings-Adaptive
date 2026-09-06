@@ -38,6 +38,9 @@ prices = { input = 0.15, output = 0.60 }
 think_mode = "auto"
 # 推理强度：low / high / max，仅思考开启时有效。缺省不发（端点默认）
 reasoning_effort = "low"
+# 回复流式输出（打字机效果，首字秒级可见）。缺省 true；
+# 个别端点对 stream 支持异常时可设 false（程序也会自动回退一次）
+# stream = true
 
 # 需要更多模型就再各加一个档案，把 active 改成对应 name 即可切换：
 [[models]]

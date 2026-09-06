@@ -162,6 +162,9 @@ pub struct LlmClient {
     /// Reasoning effort ("low"/"high"/"max") when thinking is on;
     /// `None` = endpoint default (high on DeepSeek V4).
     reasoning_effort: Option<String>,
+    /// Streaming toggle (C1, per-profile `stream`): false → the
+    /// streaming entry point simply runs the bounded non-streaming turn.
+    streaming: bool,
 }
 
 /// Build the chat/completions URL from a base endpoint. Accepts both
@@ -192,6 +195,7 @@ impl LlmClient {
             model: model.to_string(),
             thinking: None,
             reasoning_effort: None,
+            streaming: true,
         }
     }
 
@@ -206,6 +210,13 @@ impl LlmClient {
     /// latency/cost against output quality on thinking models.
     pub fn with_reasoning_effort(mut self, effort: Option<String>) -> Self {
         self.reasoning_effort = effort;
+        self
+    }
+
+    /// C1: per-profile streaming switch (`stream: false` for endpoints
+    /// that mishandle SSE).
+    pub fn with_streaming(mut self, streaming: bool) -> Self {
+        self.streaming = streaming;
         self
     }
 
@@ -259,6 +270,9 @@ impl LlmClient {
         max_tokens: Option<u32>,
         out: &mut StreamOut,
     ) -> Result<TurnOutput> {
+        if !self.streaming {
+            return self.chat_turn_bounded(messages, tools, max_tokens);
+        }
         let mut body = build_request_body(
             &self.model,
             messages,

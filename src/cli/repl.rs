@@ -366,6 +366,7 @@ fn model_new(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
         },
         api_key: api_key.trim().to_string(),
         model: if model.trim().is_empty() { crate::config::default_model() } else { model.trim().to_string() },
+        stream: None,
         ..Default::default()
     };
     if let Err(e) = cfg.create_profile(profile) {
