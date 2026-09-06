@@ -2,9 +2,11 @@
 //!
 //! Scope is deliberately the subset the model actually emits in this
 //! chat: fenced code blocks, `#` headings, `-`/`*`/ordered lists, `>`
-//! quotes, `**bold**`, inline `` `code` ``. Hand-rolled instead of a
-//! markdown crate: ~200 lines, no new dependency, and the lookahead
-//! scanner never swallows literal markers (e.g. `a ** b` or `3*4`).
+//! quotes, `**bold**`, inline `` `code` ``, and GFM pipe tables (M9i:
+//! buffered whole-table so column widths align; cells wrap inside
+//! their column instead of being cut). Hand-rolled instead of a
+//! markdown crate: no new dependency, and the lookahead scanner never
+//! swallows literal markers (e.g. `a ** b` or `3*4`).
 //!
 //! Wrapping is width-aware (CJK) and happens per block after inline
 //! segmentation, so ANSI codes never break the width math. Piped
@@ -20,6 +22,8 @@ enum Style {
     Code,
     Quote,
 }
+
+use crate::cli::render::{pad_display, visible_width, wrap_line_ansi};
 
 /// Parameterized painter: honors the caller's ANSI decision (the
 /// render.rs helpers use the global gate, which is off under tests).
@@ -56,6 +60,8 @@ pub(crate) fn render(src: &str, width: usize, ansi: bool) -> String {
     for line in src.lines() {
         out.push_str(&st.line(line));
     }
+    // A table candidate held to the very end was just a text line.
+    out.push_str(&st.flush_pending());
     // Fence left open by the model: close it visibly instead of
     // styling the rest of the transcript as code forever.
     if st.in_fence {
@@ -66,22 +72,109 @@ pub(crate) fn render(src: &str, width: usize, ansi: bool) -> String {
     out
 }
 
+/// Table assembly state (M9i): a table is a MULTI-line construct, but
+/// `LineRenderer::line` is fed one line at a time — so a possible
+/// header is held until the next line confirms (separator row) or
+/// refutes it, and a confirmed table buffers rows until a non-row line
+/// ends it. Living in `LineRenderer` keeps `render` and `StreamMd` on
+/// one code path (the streaming renderer needs no extra machinery).
+enum TableState {
+    /// One line held as a table-header candidate (not yet confirmed).
+    Candidate(String),
+    /// Confirmed: header (first) + separator + body rows, raw.
+    Rows(Vec<String>),
+}
+
 /// Single-line rendering state shared by `render` (whole reply) and
 /// `StreamMd` (streaming deltas) — one code path, one visual language.
 pub(crate) struct LineRenderer {
     width: usize,
     ansi: bool,
     in_fence: bool,
+    table: Option<TableState>,
 }
 
 impl LineRenderer {
     pub(crate) fn new(width: usize, ansi: bool) -> Self {
-        Self { width, ansi, in_fence: false }
+        Self { width, ansi, in_fence: false, table: None }
     }
 
     /// Render one complete line (caller consumed its '\n'); output
-    /// includes the trailing newline.
+    /// includes the trailing newline. May return "" while a table is
+    /// being assembled (the rows render when the table ends).
     pub(crate) fn line(&mut self, line: &str) -> String {
+        // A fence line never belongs to a table; it resolves any
+        // pending state first (a fence inside a table ends the table).
+        if line.trim_start().starts_with("```") {
+            let mut out = self.flush_pending();
+            self.in_fence = !self.in_fence;
+            let p = Painter { ansi: self.ansi };
+            out.push_str(&p.dim(line));
+            out.push('\n');
+            return out;
+        }
+        if self.in_fence {
+            // Code keeps its shape: no wrap, no inline styling.
+            return format!("{line}\n");
+        }
+        match self.table.take() {
+            Some(TableState::Rows(mut rows)) => {
+                if is_table_candidate(line) {
+                    rows.push(line.to_string());
+                    self.table = Some(TableState::Rows(rows));
+                    String::new()
+                } else {
+                    // Table ended: render it, then the terminator line
+                    // (which may itself open a new candidate).
+                    let mut out = render_table(&rows, self.width, self.ansi);
+                    if is_table_candidate(line) {
+                        self.table = Some(TableState::Candidate(line.to_string()));
+                    } else {
+                        out.push_str(&self.render_line(line));
+                    }
+                    out
+                }
+            }
+            Some(TableState::Candidate(head)) => {
+                if is_separator_row(line) {
+                    self.table = Some(TableState::Rows(vec![head, line.to_string()]));
+                    String::new()
+                } else {
+                    // Not a table after all: the held line renders as
+                    // plain text; this line may start a new candidate.
+                    let mut out = self.render_line(&head);
+                    if is_table_candidate(line) {
+                        self.table = Some(TableState::Candidate(line.to_string()));
+                    } else {
+                        out.push_str(&self.render_line(line));
+                    }
+                    out
+                }
+            }
+            None => {
+                if is_table_candidate(line) {
+                    self.table = Some(TableState::Candidate(line.to_string()));
+                    String::new()
+                } else {
+                    self.render_line(line)
+                }
+            }
+        }
+    }
+
+    /// Flush held table state at end-of-reply: a lone candidate was
+    /// just a text line; a confirmed table renders in full.
+    pub(crate) fn flush_pending(&mut self) -> String {
+        match self.table.take() {
+            None => String::new(),
+            Some(TableState::Candidate(head)) => self.render_line(&head),
+            Some(TableState::Rows(rows)) => render_table(&rows, self.width, self.ansi),
+        }
+    }
+
+    /// The original single-line renderer (fences, headings, lists,
+    /// quotes, plain paragraphs) — no table awareness.
+    fn render_line(&mut self, line: &str) -> String {
         let p = Painter { ansi: self.ansi };
         let trimmed = line.trim_start();
         if trimmed.starts_with("```") {
@@ -180,6 +273,7 @@ impl StreamMd {
             let tail = std::mem::take(&mut self.buf);
             out.push_str(&self.st.line(&tail));
         }
+        out.push_str(&self.st.flush_pending());
         if self.st.in_fence {
             let p = Painter { ansi: self.ansi };
             out.push_str(&p.dim("```"));
@@ -313,6 +407,137 @@ fn flush(plain: &mut String, spans: &mut Vec<(String, Style)>, base: Style) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tables (M9i): GFM pipe tables, buffered whole so column widths align.
+// ---------------------------------------------------------------------------
+
+/// A line that could take part in a table: non-empty, has a pipe, and
+/// is not some other block construct (fence lines never get here).
+fn is_table_candidate(line: &str) -> bool {
+    let t = line.trim();
+    if t.is_empty() || !t.contains('|') {
+        return false;
+    }
+    if t.starts_with('#') || t.starts_with('>') {
+        return false;
+    }
+    if t == "---" || t == "***" {
+        return false;
+    }
+    list_item(t).0.is_none()
+}
+
+/// GFM alignment/dash separator row: only `| - :` and whitespace, with
+/// at least one dash and one pipe (a bare `---` is a rule, not a row).
+fn is_separator_row(line: &str) -> bool {
+    let t = line.trim();
+    t.contains('-')
+        && t.contains('|')
+        && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t'))
+}
+
+/// Split one row into cells: surrounding pipes stripped, cells
+/// trimmed. Escaped `\|` is not supported (models don't emit it here).
+fn split_row(line: &str) -> Vec<String> {
+    let t = line.trim();
+    let t = t.strip_prefix('|').unwrap_or(t);
+    let t = t.strip_suffix('|').unwrap_or(t);
+    t.split('|').map(|c| c.trim().to_string()).collect()
+}
+
+fn paint_inline(p: &Painter, line: &str, base: Style) -> String {
+    inline_parse(line, base)
+        .into_iter()
+        .map(|(text, style)| match style {
+            Style::Bold => p.bold(&text),
+            Style::Code => p.cyan(&text),
+            Style::Plain | Style::Quote => text,
+        })
+        .collect()
+}
+
+/// Render buffered table rows as an aligned text table: `│` column
+/// separators (dim), a `─┼─` rule under the header, cells styled by the
+/// inline scanner (header row bold), cells wider than their column
+/// WRAP inside it instead of being cut. Column widths shrink
+/// proportionally (floor 3 cells) when the table exceeds the width.
+fn render_table(rows: &[String], width: usize, ansi: bool) -> String {
+    let p = Painter { ansi };
+    let grid: Vec<Vec<String>> = rows
+        .iter()
+        .filter(|r| !is_separator_row(r))
+        .map(|r| split_row(r))
+        .collect();
+    if grid.is_empty() {
+        return String::new();
+    }
+    let n = grid.iter().map(|r| r.len()).max().unwrap_or(0).max(1);
+    let grid: Vec<Vec<String>> = grid
+        .into_iter()
+        .map(|mut r| {
+            r.resize(n, String::new());
+            r
+        })
+        .collect();
+    // Painted cells (header bold) and their natural widths.
+    let painted: Vec<Vec<String>> = grid
+        .iter()
+        .enumerate()
+        .map(|(ri, row)| row.iter().map(|c| paint_inline(&p, c, if ri == 0 { Style::Bold } else { Style::Plain })).collect())
+        .collect();
+    let gap = 3usize; // " │ "
+    let overhead = gap * n.saturating_sub(1);
+    let mut widths: Vec<usize> = (0..n)
+        .map(|j| painted.iter().map(|row| visible_width(&row[j])).max().unwrap_or(0).max(1))
+        .collect();
+    // Shrink proportionally (floor 3 cells) when the table is too wide.
+    let avail = width.saturating_sub(overhead).max(n * 3);
+    let total: usize = widths.iter().sum();
+    if total > avail {
+        let scaled: Vec<usize> =
+            widths.iter().map(|w| (*w * avail / total).max(3)).collect();
+        // Rounding plus the floor may overshoot: trim the widest until fit.
+        let mut sum: usize = scaled.iter().sum();
+        let mut out = scaled;
+        while sum > avail {
+            let (mi, _) = out.iter().enumerate().max_by_key(|(_, w)| *w).unwrap_or((0, &0));
+            if out[mi] <= 3 {
+                break;
+            }
+            out[mi] -= 1;
+            sum -= 1;
+        }
+        widths = out;
+    }
+    // Emit rows: each row wraps to its column heights, zipped line-wise.
+    let mut out = String::new();
+    for (ri, row) in painted.iter().enumerate() {
+        let wrapped: Vec<Vec<String>> = row
+            .iter()
+            .zip(&widths)
+            .map(|(c, w)| wrap_line_ansi(c, *w))
+            .collect();
+        let height = wrapped.iter().map(|v| v.len()).max().unwrap_or(1);
+        for k in 0..height {
+            for (j, w) in widths.iter().enumerate() {
+                let piece = wrapped[j].get(k).map(String::as_str).unwrap_or("");
+                let cell = pad_display(piece, *w);
+                if j > 0 {
+                    out.push_str(&p.dim(" │ "));
+                }
+                out.push_str(&cell);
+            }
+            out.push('\n');
+        }
+        if ri == 0 {
+            let sep: Vec<String> = widths.iter().map(|w| "─".repeat(*w)).collect();
+            out.push_str(&p.dim(&sep.join("─┼─")));
+            out.push('\n');
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,5 +646,111 @@ mod tests {
         assert!(lines.len() >= 2, "{out}");
         assert!(lines[0].contains("• "));
         assert!(lines[1].starts_with("    "), "{out}");
+    }
+
+    // --- tables (M9i) ----------------------------------------------------
+
+    fn strip_codes(s: &str) -> String {
+        s.replace("\x1B[1m", "").replace("\x1B[36m", "").replace("\x1B[2m", "").replace("\x1B[0m", "")
+    }
+
+    #[test]
+    fn tables_render_aligned_with_rule_and_no_raw_pipes() {
+        let src = "| 维度 | 用户解 | 参考解 |\n|---|:---:|---:|\n| 行数 | 12 | 10 |\n| clippy | 0 条 | 0 条 |";
+        let out = render(src, 80, true);
+        let plain = strip_codes(&out);
+        assert!(plain.contains('│'), "column separators: {plain}");
+        assert!(plain.contains('┼'), "header rule: {plain}");
+        assert!(!plain.contains('|'), "raw pipes gone: {plain}");
+        assert!(plain.contains("维度"), "{plain}");
+        assert!(plain.contains("参考解"), "{plain}");
+        // Every physical line has the same display width (aligned).
+        let ws: Vec<usize> = out.lines().map(visible_width).collect();
+        assert!(ws.iter().all(|w| *w == ws[0]), "unaligned: {out:?}");
+    }
+
+    #[test]
+    fn table_cells_wrap_inside_their_column() {
+        let long = "很长的单元格内容".repeat(6);
+        let src = format!("| 列 | 内容 |\n|---|---|\n| a | {long} |");
+        let out = render(&src, 40, true);
+        let ws: Vec<usize> = out.lines().map(visible_width).collect();
+        assert!(ws.iter().all(|w| *w <= 40), "overflow: {out:?}");
+        // The full cell text survives (wrapped, not truncated).
+        let joined: String = strip_codes(&out).replace(['│', ' ', '\n'], "");
+        assert!(joined.contains(&long), "cell content must survive: {out}");
+        assert!(out.lines().count() > 3, "wrapped to several rows: {out:?}");
+    }
+
+    #[test]
+    fn wide_table_shrinks_proportionally() {
+        let src = "| aaaaaaaa | bbbbbbbb | cccccccc |\n|---|---|---|\n| 1 | 2 | 3 |";
+        let out = render(src, 30, true);
+        for l in out.lines() {
+            assert!(visible_width(l) <= 30, "too wide: {l:?}");
+        }
+        assert!(out.contains('a'), "{out}");
+    }
+
+    #[test]
+    fn pipe_sentence_is_not_a_table() {
+        // A single pipe line with no separator after it stays text.
+        let src = "对比 A | B 两种写法\n\n下一段正文";
+        let out = render(src, 80, true);
+        assert!(out.contains("对比 A | B 两种写法"), "{out}");
+        assert!(!out.contains('│'), "{out}");
+    }
+
+    #[test]
+    fn table_candidate_flushed_at_eof() {
+        // Source ends on a held candidate line: render() and StreamMd
+        // finish() must both flush it as plain text.
+        let src = "正文\n结尾带竖线 | 的行";
+        let want = render(src, 80, true);
+        assert!(want.contains("结尾带竖线 | 的行"), "{want}");
+        let mut sm = StreamMd::new(80, true);
+        let mut got = sm.feed(src);
+        got.push_str(&sm.finish());
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn fence_lines_are_immune_to_tables() {
+        let src = "| 表格前 |\n```rust\nlet v = a | b;\n```\n后文";
+        let out = render(src, 80, true);
+        assert!(out.contains("let v = a | b;"), "fence content verbatim: {out}");
+        assert!(out.contains("后文"), "{out}");
+    }
+
+    #[test]
+    fn table_inline_styling_survives_in_cells() {
+        let src = "| 维度 | 结果 |\n|---|---|\n| 惯用性 | **4/5**，可用 `map` |";
+        let out = render(src, 80, true);
+        assert!(out.contains("\x1B[1m4/5\x1B[0m"), "bold in cell: {out}");
+        assert!(out.contains("\x1B[36mmap\x1B[0m"), "code in cell: {out}");
+    }
+
+    #[test]
+    fn stream_md_table_matches_whole_render() {
+        // A table fed in nasty deltas (cut inside the separator row and
+        // mid-cell) must equal the whole-render byte for byte.
+        let src = "前言\n\n| 维度 | 用户解 | 参考解 |\n|---|:---:|---|\n| 行数 | 12 | 10 |\n\n尾行";
+        let want = render(src, 60, true);
+        let mut sm = StreamMd::new(60, true);
+        let mut got = String::new();
+        for chunk in ["前言\n\n| 维度 | 用", "户解 | 参考解|\n|---|:---", ":|---|\n| 行数 | 12 |", " 10 |\n\n尾行"] {
+            got.push_str(&sm.feed(chunk));
+        }
+        got.push_str(&sm.finish());
+        assert_eq!(got, want, "streamed table must equal whole-render");
+    }
+
+    #[test]
+    fn table_ends_when_a_non_row_line_arrives() {
+        let src = "| a | b |\n|---|---|\n| 1 | 2 |\n正文继续";
+        let out = render(src, 80, true);
+        let plain = strip_codes(&out);
+        assert!(plain.contains('┼'), "{plain}");
+        assert!(plain.contains("正文继续"), "{plain}");
     }
 }
