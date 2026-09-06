@@ -12,6 +12,7 @@
 //! abandons the turn and returns to the prompt. Every completed turn
 //! is appended to the session JSON file (R5).
 
+use anyhow::Context;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
@@ -200,6 +201,7 @@ pub(crate) fn run() {
                 repaint_chat(&session, &cfg, &tracker);
             }
             Cmd::Sessions(arg) => handle_sessions(arg.as_deref(), &mut session, &cfg, &tracker),
+            Cmd::Reset => cmd_reset(&mut session, &cfg, &practice_ctx, &tracker),
             Cmd::Unknown(raw) => {
                 let hint = render::suggest_command(&raw, KNOWN_COMMANDS)
                     .map(|s| format!("你是不是想用 {s}？"))
@@ -260,13 +262,22 @@ fn current_spent(tracker: &Arc<Mutex<UsageTracker>>) -> f64 {
     tracker.lock().unwrap_or_else(|p| p.into_inner()).all_totals().cost_usd
 }
 
-/// `/model` — list or switch named model profiles (M4.6). Switching
-/// applies the profile onto the active config, writes it back and
-/// rebuilds the client so the next turn uses the new endpoint.
+/// `/model` — list, switch, create (`new`) or remove (`rm <名>`) named
+/// model profiles (M4.6 + M9d). Switching moves the pointer, writes it
+/// back and rebuilds the client so the next turn uses the new endpoint.
 fn handle_model(arg: Option<&str>, cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
+    let arg = arg.map(str::trim).filter(|s| !s.is_empty());
+    match arg {
+        Some("new") => return model_new(cfg, client),
+        Some(rest) if rest == "rm" || rest.starts_with("rm ") => {
+            let name = rest.strip_prefix("rm").map(str::trim).unwrap_or("");
+            return model_remove(cfg, client, name);
+        }
+        _ => {}
+    }
     if cfg.models.is_empty() {
-        println!("  尚未配置模型档案：在 config.toml 里加 [[models]]（name/endpoint/api_key/model），");
-        println!("  示例见 config.example.toml；配好后 `/model <名>` 一键切换。");
+        println!("  尚未配置模型档案：/model new 交互创建，或在 config.toml 里加");
+        println!("  [[models]]（示例见 config.example.toml）；配好后 `/model <名>` 切换。");
         return;
     }
     let Some(name) = arg else {
@@ -290,8 +301,7 @@ fn handle_model(arg: Option<&str>, cfg: &mut ModelConfig, client: &mut Option<Ll
                 host_of(&m.endpoint)
             );
         }
-        println!("  切换：/model <档案名>（* = 当前生效，唯一）；档案就在 config.toml 的");
-        println!("  [[models]] 里逐个填写；think_mode / reasoning_effort 可按模型调推理档位。");
+        println!("  切换：/model <档案名>（* = 当前生效，唯一）｜ new 新建 ｜ rm <名> 删除");
         println!();
         return;
     };
@@ -314,6 +324,128 @@ fn handle_model(arg: Option<&str>, cfg: &mut ModelConfig, client: &mut Option<Ll
             println!("  切换失败：{e:#}");
             println!("  输入 /model 查看可用档案。");
         }
+    }
+}
+
+/// `/model new` (M9d): a four-question wizard. prices/think_mode etc.
+/// start at their built-in defaults and can be tuned afterwards (hand
+/// edit or `/config`).
+fn model_new(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
+    println!();
+    println!("{}", render::header("新建模型档案"));
+    println!("  逐项填写，回车确认（Ctrl-C 取消）。prices / think_mode 等先用内置默认，");
+    println!("  之后可在 config.toml 或 /config 里调整。");
+    let Some(name) = read_line_or_leave("  1/4 档案名（用于 /model <名> 切换，如 openai / local）: ") else {
+        return;
+    };
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        println!("  档案名不能为空，已取消。");
+        return;
+    }
+    if cfg.models.iter().any(|m| m.name == name) {
+        println!("  已存在同名档案「{name}」（/model 查看），换一个名字。");
+        return;
+    }
+    let Some(endpoint) =
+        read_line_or_leave("  2/4 endpoint（OpenAI 兼容地址，回车 = OpenAI 官方）: ")
+    else {
+        return;
+    };
+    let Some(model) = read_line_or_leave("  3/4 模型 id（回车 = gpt-4o-mini）: ") else { return };
+    let Some(api_key) = read_line_or_leave("  4/4 api_key（本地端点如 Ollama 可填占位，如 ollama）: ")
+    else {
+        return;
+    };
+    let profile = crate::config::ModelProfile {
+        name: name.clone(),
+        endpoint: if endpoint.trim().is_empty() {
+            crate::config::default_endpoint()
+        } else {
+            endpoint.trim().to_string()
+        },
+        api_key: api_key.trim().to_string(),
+        model: if model.trim().is_empty() { crate::config::default_model() } else { model.trim().to_string() },
+        ..Default::default()
+    };
+    if let Err(e) = cfg.create_profile(profile) {
+        println!("  创建失败：{e:#}");
+        return;
+    }
+    if let Err(e) = cfg.save_to_default_file() {
+        println!("  已创建但写回失败：{e:#}");
+        return;
+    }
+    println!("  ✓ 档案「{name}」已创建。");
+    match read_line_or_leave("  立即切换到该档案？[Y/n] ") {
+        Some(s) if s.trim().eq_ignore_ascii_case("n") => {
+            println!("  保留当前档案；随时 /model {name} 切换。");
+        }
+        _ => {
+            if cfg.apply_profile(&name).is_ok() {
+                if let Err(e) = cfg.save_to_default_file() {
+                    println!("  切换成功但写回失败：{e:#}");
+                }
+                *client = make_client(cfg);
+                println!("  当前档案：「{name}」｜ {} @ {}", cfg.model, host_of(&cfg.endpoint));
+            }
+        }
+    }
+}
+
+/// `/model rm <名>` (M9d): show the full profile, require explicit
+/// confirmation, refuse to remove the last one; removing the active
+/// profile falls the pointer back to the first one.
+fn model_remove(cfg: &mut ModelConfig, client: &mut Option<LlmClient>, name: &str) {
+    if name.is_empty() {
+        println!("  用法：/model rm <档案名>（/model 查看列表）");
+        return;
+    }
+    let Some(p) = cfg.models.iter().find(|m| m.name == name).cloned() else {
+        println!("  没有名为「{name}」的档案（/model 查看列表）。");
+        return;
+    };
+    println!();
+    println!("  即将删除档案「{}」：", render::bold(&p.name));
+    println!("    endpoint : {}", p.endpoint);
+    println!("    model    : {}", p.model);
+    println!(
+        "    api_key  : {}",
+        if p.api_key.is_empty() { "（档案内无 key）".to_string() } else { cfg_mask_of(&p.api_key) }
+    );
+    if cfg.is_active_profile(&p) {
+        println!("    （当前正在使用该档案，删除后回退到第一个档案）");
+    }
+    let Some(ans) = read_line_or_leave("  确认删除？此操作不可撤销 [y/N] ") else { return };
+    if !ans.trim().eq_ignore_ascii_case("y") {
+        println!("  已取消。");
+        return;
+    }
+    match cfg.remove_profile(name) {
+        Ok(_) => {
+            cfg.materialize();
+            match cfg.save_to_default_file() {
+                Ok(()) => println!("  已删除「{name}」。当前档案：「{}」", cfg.active.clone().unwrap_or_default()),
+                Err(e) => println!("  已删除但写回失败：{e:#}"),
+            }
+            *client = make_client(cfg);
+        }
+        Err(e) => println!("  删除失败：{e:#}"),
+    }
+}
+
+/// Mask for an arbitrary key (profile display): same shape as
+/// `ModelConfig::masked_key` but works without a config around.
+fn cfg_mask_of(key: &str) -> String {
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() <= 8 {
+        "****".to_string()
+    } else {
+        format!(
+            "{}****{}",
+            chars[..3].iter().collect::<String>(),
+            chars[chars.len() - 4..].iter().collect::<String>()
+        )
     }
 }
 
@@ -390,13 +522,14 @@ enum Cmd<'a> {
     Stats(Option<&'a str>),
     Config,
     Sessions(Option<String>),
+    Reset,
     Unknown(String),
     Chat,
 }
 
 /// Full command words offered for near-miss suggestions (M4.2).
 const KNOWN_COMMANDS: &[&str] =
-    &["new", "clear", "practice", "generate", "model", "usage", "stats", "config", "sessions", "topics", "help", "exit"];
+    &["new", "clear", "practice", "generate", "model", "usage", "stats", "config", "sessions", "topics", "reset", "help", "exit"];
 
 fn parse_command(line: &str) -> Cmd<'_> {
     if !line.starts_with('/') {
@@ -421,6 +554,7 @@ fn parse_command(line: &str) -> Cmd<'_> {
         ("stats", a) => Cmd::Stats(a),
         ("config", _) | ("c", _) => Cmd::Config,
         ("sessions", a) | ("s", a) => Cmd::Sessions(a.map(str::to_string)),
+        ("reset", _) => Cmd::Reset,
         (raw, _) => Cmd::Unknown(raw.to_string()),
     }
 }
@@ -440,12 +574,13 @@ fn print_help() {
     println!("    /practice   做题模式（本会话/按主题/全库分区，/practice all 含种子题；");
     println!("                题目页可 [a] 问教练、[f] 反馈难度）");
     println!("    /generate   直接生成练习（可带主题：/g E0382；离线也可用）");
-    println!("    /model      模型档案：/model 列表，/model <名> 一键切换");
+    println!("    /model      模型档案：/model 列表，/model <名> 切换；new 新建、rm <名> 删除");
     println!("    /usage      用量与花费（本次会话 / 累计 / 预算余量）");
     println!("    /stats      学习画像：SM-2 到期复习、概念弱项、高频错误码、错题本");
     println!("                （/stats wrong <概念|错误码> 过滤错题本）");
+    println!("    /reset      学习记录重置：会话/画像/做题状态 → 归档（练习保留）");
     println!("    /config     模型配置页（endpoint / model / api_key / 预算 / 编辑器）");
-    println!("    /sessions   会话列表；/sessions <序号> 查看该会话的完整轨迹");
+    println!("    /sessions   会话列表；/sessions <序号> 查看轨迹；clear <序号>|all 归档清理");
     println!("    /exit       退出");
     println!("  模型调用的累计花费达到预算上限时会被自动拦截。");
     println!();
@@ -1116,6 +1251,59 @@ fn handle_sessions(arg: Option<&str>, session: &mut Session, cfg: &ModelConfig, 
     };
     let mut words = arg.split_whitespace();
     match words.next().unwrap_or("") {
+        "clear" => {
+            // M9d: session cleanup with ARCHIVE semantics (nothing is
+            // truly deleted — files move to ~/.rustlings_adaptive/archive).
+            let word = words.next().unwrap_or("");
+            match word {
+                "all" => {
+                    println!(
+                        "  将把全部 {} 个会话移入归档（~/.rustlings_adaptive/archive/，可找回），",
+                        infos.len()
+                    );
+                    let Some(ans) = read_line_or_leave("  然后开启一个新会话。确认？[y/N] ") else { return };
+                    if !ans.trim().eq_ignore_ascii_case("y") {
+                        println!("  已取消。");
+                        return;
+                    }
+                    match archive_dir_for() {
+                        Ok(dir) => match move_session_files(&dir.join("sessions"), &|_| true) {
+                            Ok(n) => {
+                                *session = Session::new(&cfg.model);
+                                println!("  已归档 {n} 个会话 → {}；当前为新会话。", dir.join("sessions").display());
+                                repaint_chat(session, cfg, tracker);
+                            }
+                            Err(e) => println!("  归档失败：{e:#}"),
+                        },
+                        Err(e) => println!("  归档失败：{e:#}"),
+                    }
+                }
+                n => match n.parse::<usize>() {
+                    Ok(i) if (1..=infos.len()).contains(&i) => {
+                        let target = &infos[i - 1];
+                        if target.id == session.id {
+                            println!("  当前会话不能直接清除——先 /new 开新会话再来。");
+                            return;
+                        }
+                        println!("  将归档会话 {}（{} 条消息，可在 archive/ 找回）。", target.id, target.messages);
+                        let Some(ans) = read_line_or_leave("  确认？[y/N] ") else { return };
+                        if !ans.trim().eq_ignore_ascii_case("y") {
+                            println!("  已取消。");
+                            return;
+                        }
+                        match archive_dir_for() {
+                            Ok(dir) => match move_session_files(&dir.join("sessions"), &|id| id == target.id) {
+                                Ok(1) => println!("  已归档会话 {}。", target.id),
+                                Ok(n) => println!("  已归档 {n} 个文件。"),
+                                Err(e) => println!("  归档失败：{e:#}"),
+                            },
+                            Err(e) => println!("  归档失败：{e:#}"),
+                        }
+                    }
+                    _ => println!("  用法：/sessions clear <序号> ｜ /sessions clear all"),
+                },
+            }
+        }
         "load" => {
             match parse_index(words.next(), infos.len()) {
                 Some(n) => match Session::load(&infos[n - 1].path) {
@@ -1178,6 +1366,111 @@ fn handle_sessions(arg: Option<&str>, session: &mut Session, cfg: &ModelConfig, 
 fn parse_index(word: Option<&str>, len: usize) -> Option<usize> {
     let n = word?.parse::<usize>().ok()?;
     (n >= 1 && n <= len).then_some(n)
+}
+
+// ---------------------------------------------------------------------------
+// Data archiving (M9d): "clear" never deletes — files move into
+// ~/.rustlings_adaptive/archive/<timestamp>/ and can be recovered by hand.
+// ---------------------------------------------------------------------------
+
+/// Timestamped archive directory under the data root.
+fn archive_dir_for() -> anyhow::Result<std::path::PathBuf> {
+    let sessions = agent::session::sessions_dir();
+    let base = sessions.parent().context("无法定位数据目录")?;
+    let stamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    Ok(base.join("archive").join(stamp.to_string()))
+}
+
+/// Move every file in `sessions_dir` whose session id matches `keep`
+/// into `dest_dir`. Returns the number of files moved (json + md).
+fn move_session_files(dest_dir: &Path, keep: &dyn Fn(&str) -> bool) -> anyhow::Result<usize> {
+    use std::fs;
+    let sessions = agent::session::sessions_dir();
+    let mut moved = 0;
+    if !sessions.exists() {
+        return Ok(0);
+    }
+    std::fs::create_dir_all(dest_dir)?;
+    for entry in fs::read_dir(&sessions)?.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        let Some(id) = name.strip_suffix(".json") else { continue };
+        if !keep(id) {
+            continue;
+        }
+        let dest = dest_dir.join(name);
+        fs::rename(&path, &dest).with_context(|| format!("移动 {}", path.display()))?;
+        moved += 1;
+        // The exported markdown, if any, travels with it.
+        let md = path.with_extension("md");
+        if md.exists()
+            && let Ok(()) = fs::rename(&md, dest_dir.join(md.file_name().unwrap_or_default()))
+        {
+            moved += 1;
+        }
+    }
+    Ok(moved)
+}
+
+/// `/reset` (M9d): a full, guarded reset of LEARNER data — session
+/// history, the profile (SM-2/notebook/error codes) and the exercise
+/// solve state — by archiving all of it. Exercise FILES survive (only
+/// their status zeroes out); usage.json (the cost ledger) survives.
+fn cmd_reset(
+    session: &mut Session,
+    cfg: &ModelConfig,
+    practice_ctx: &practice::PracticeCtx,
+    tracker: &Arc<Mutex<UsageTracker>>,
+) {
+    println!();
+    println!("{}", render::header("重置学习记录"));
+    let sessions_dir = agent::session::sessions_dir();
+    let Some(base) = sessions_dir.parent() else { return };
+    let n_sessions = Session::list().len();
+    let index = crate::exercise::index::ExerciseIndex::load(&practice_ctx.root);
+    let n_exercises = index.iter().filter(|m| !m.path.starts_with("fixtures")).count();
+    println!("  将把以下数据移入归档目录（不删除，可手动找回；练习文件本身保留）：");
+    println!("    · 会话历史 ×{n_sessions}");
+    println!("    · 学习画像 profile.json / miss_log.json（SM-2、错题本、错误码统计）");
+    println!("    · 做题状态 index.json（尝试次数 / ✗ 次数 / 反馈，{n_exercises} 题）");
+    println!("  用量账本 usage.json 保留，不受影响。");
+    let Some(ans) = read_line_or_leave("  确认重置？[y/N] ") else { return };
+    if !ans.trim().eq_ignore_ascii_case("y") {
+        println!("  已取消。");
+        return;
+    }
+    let Ok(archive_dir) = archive_dir_for() else {
+        println!("  无法定位数据目录。");
+        return;
+    };
+    let mut moved = 0usize;
+    match move_session_files(&archive_dir.join("sessions"), &|_| true) {
+        Ok(n) => moved += n,
+        Err(e) => println!("  （会话归档失败：{e:#}）"),
+    }
+    // Existence must be checked BEFORE the rename (afterwards the file
+    // is gone and the count silently misses it — M9d 冒烟抓到).
+    for file in ["profile.json", "miss_log.json"] {
+        let p = base.join(file);
+        if !p.exists() {
+            continue;
+        }
+        match std::fs::rename(&p, archive_dir.join(file)) {
+            Ok(()) => moved += 1,
+            Err(e) => println!("  （{file} 归档失败：{e:#}）"),
+        }
+    }
+    let index_path = crate::exercise::index::index_path(&practice_ctx.root);
+    if index_path.exists() {
+        match std::fs::rename(&index_path, archive_dir.join("index.json")) {
+            Ok(()) => moved += 1,
+            Err(e) => println!("  （index.json 归档失败：{e:#}）"),
+        }
+    }
+    *session = Session::new(&cfg.model);
+    println!("  已归档 {moved} 项 → {}。", archive_dir.display());
+    println!("  学习记录从零开始：/stats、/sessions 均为空；生成的练习仍在，可重做。");
+    repaint_chat(session, cfg, tracker);
 }
 
 /// `/sessions` with no argument: paged interactive list. Global

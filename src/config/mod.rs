@@ -22,11 +22,11 @@ use serde::{Deserialize, Serialize};
 
 pub const CONFIG_FILE: &str = "config.toml";
 
-fn default_endpoint() -> String {
+pub fn default_endpoint() -> String {
     "https://api.openai.com/v1".to_string()
 }
 
-fn default_model() -> String {
+pub fn default_model() -> String {
     "gpt-4o-mini".to_string()
 }
 
@@ -90,6 +90,22 @@ pub enum ThinkMode {
     Auto,
     On,
     Off,
+}
+
+impl Default for ModelProfile {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            endpoint: default_endpoint(),
+            api_key: String::new(),
+            model: default_model(),
+            context_len: default_context_len(),
+            llm_timeout_secs: None,
+            prices: Prices::default(),
+            think_mode: ThinkMode::Auto,
+            reasoning_effort: None,
+        }
+    }
 }
 
 impl ThinkMode {
@@ -173,7 +189,12 @@ impl UiConfig {
 /// built-in defaults apply those defaults — there is no hidden
 /// "inherit from the top level" rule anymore; fill each profile in
 /// full (`config.example.toml` documents every default).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+///
+/// Default is implemented BY HAND (not derived): `context_len: u32`
+/// would otherwise default to 0 — `#[serde(default = …)]` does not
+/// apply to `..Default::default()` constructors, and a zero context
+/// window silently breaks the chat trim (M9d 冒烟抓到).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelProfile {
     /// Switch target: `/model fast`, and the `active` pointer value.
     pub name: String,
@@ -535,6 +556,40 @@ impl ModelConfig {
         self.active.as_deref() == Some(p.name.as_str())
     }
 
+    /// Add a new profile (M9d): name must be unique and non-empty. The
+    /// caller decides whether to switch to it.
+    pub fn create_profile(&mut self, p: ModelProfile) -> Result<()> {
+        let name = p.name.trim().to_string();
+        if name.is_empty() {
+            anyhow::bail!("档案名不能为空");
+        }
+        if self.models.iter().any(|m| m.name == name) {
+            anyhow::bail!("已存在同名档案「{name}」");
+        }
+        self.models.push(ModelProfile { name, ..p });
+        Ok(())
+    }
+
+    /// Remove a profile (M9d). Refuses to remove the last one (a config
+    /// with zero profiles has no active model); returns the removed
+    /// profile. The CALLER moves the pointer if the removed profile was
+    /// active — re-materializing afterwards.
+    pub fn remove_profile(&mut self, name: &str) -> Result<ModelProfile> {
+        if self.models.len() <= 1 {
+            anyhow::bail!("至少要保留一个模型档案");
+        }
+        let idx = self
+            .models
+            .iter()
+            .position(|m| m.name == name)
+            .with_context(|| format!("没有名为「{name}」的模型档案"))?;
+        let removed = self.models.remove(idx);
+        if self.active.as_deref() == Some(&removed.name) {
+            self.active = None; // falls back to the first profile on materialize
+        }
+        Ok(removed)
+    }
+
     /// Env overrides: RUSTLINGS_API_KEY / RUSTLINGS_ENDPOINT / RUSTLINGS_MODEL.
     /// Prefixed so tests can exercise the logic without touching real vars.
     /// Returns whether the API key was overridden (drives key_source and
@@ -682,6 +737,47 @@ model = "mini"
         assert!(key_from_env);
         assert_eq!(cfg.api_key, "env-key-123");
         assert_eq!(cfg.model, "env-model");
+    }
+
+    #[test]
+    fn create_and_remove_profiles() {
+        let mut cfg = ModelConfig::default();
+        cfg.materialize(); // one default profile
+        // Create: unique name enforced.
+        cfg.create_profile(ModelProfile {
+            name: "second".into(),
+            endpoint: "https://b/v1".into(),
+            api_key: "sk-b".into(),
+            model: "m-b".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let dup = cfg.create_profile(ModelProfile {
+            name: " second ".into(),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(dup.to_string().contains("同名"), "{dup}");
+        let empty = cfg.create_profile(ModelProfile { name: "  ".into(), ..Default::default() }).unwrap_err();
+        assert!(empty.to_string().contains("不能为空"), "{empty}");
+
+        // Remove the ACTIVE profile → pointer falls back to the first.
+        cfg.apply_profile("second").unwrap();
+        let removed = cfg.remove_profile("second").unwrap();
+        assert_eq!(removed.model, "m-b");
+        assert_eq!(cfg.models.len(), 1);
+        assert_eq!(cfg.active.as_deref(), None, "pointer reset for fallback");
+        cfg.materialize();
+        assert_eq!(cfg.active.as_deref(), Some("main"));
+        assert!(cfg.is_active_profile(&cfg.models[0]));
+
+        // Unknown name → clear error.
+        assert!(cfg.remove_profile("nope").is_err());
+
+        // Last profile is protected.
+        let mut single = ModelConfig::default();
+        single.materialize();
+        assert!(single.remove_profile("main").is_err());
     }
 
     #[test]

@@ -27,7 +27,8 @@
 - **用量与预算**：每次调用按用途（对话/出题/评审/复盘）分项记账，
   实时展示花费，预算到顶自动拦截。
 - **多模型**：OpenAI 兼容端点皆可（OpenAI / DeepSeek / Kimi / 本地
-  Ollama / vLLM…），`/model` 多档案一键切换，思考模式与推理强度可配。
+  Ollama / vLLM…），`/model` 多档案切换（`new` 交互新建、`rm` 确认
+  后删除），思考模式与推理强度按档案可配。
 
 ## 安装与运行
 
@@ -68,6 +69,9 @@ rustlings-adaptive      # 注意：仍需在项目根目录（含 exercises/ 与
 > `config.toml` 与 `.env` 含 API Key，已被 `.gitignore` 排除，请勿提交。
 > 预算：累计花费达到 `[budget].usd` 后，后续模型调用被自动拦截。
 > **未配置 Key 也能玩**：做题与离线出题（模板直配）全程可用。
+> **学习数据隔离**：会话、画像与用量按系统用户存储于
+> `~/.rustlings_adaptive/`——不同系统账号互不可见；多人共用一台
+> 机器时请使用各自的系统账号。
 
 ## 使用
 
@@ -79,8 +83,9 @@ REPL 命令：
 
 ```
 /new 新会话   /clear 清屏   /ui 界面模式   /topics 概念图谱
-/practice 做题   /generate 出题   /model 模型切换   /usage 用量
-/stats 学习画像   /config 配置   /sessions 会话轨迹   /help /exit
+/practice 做题   /generate 出题   /model 档案管理   /usage 用量
+/stats 学习画像   /reset 记录重置   /config 配置   /sessions 会话轨迹
+/help /exit
 ```
 
 - **做题子模式**（`/practice`）：本会话 / 按主题 / 全库三层分区；
@@ -93,7 +98,9 @@ REPL 命令：
 - **进度与打断**：LLM 调用/生成/编译显示实时 spinner（含轮次与耗时），
   Ctrl-C 随时打断。
 - **会话轨迹**：每回合落盘，重启自动恢复；`/sessions <n>` 回看、
-  `load` 切换、`export` 导出 Markdown。
+  `load` 切换、`export` 导出 Markdown、`clear <n>|all` 归档清理。
+- **学习记录重置**：`/reset` 把会话/画像/做题状态整体移入归档目录
+  （不删除，可找回），从零开始；练习文件与用量账本保留。
 - **学习画像**：`/stats` 查看 SM-2 到期复习、概念弱项、高频错误码、
   错题本（`/stats wrong <概念|错误码>` 过滤）。
 
