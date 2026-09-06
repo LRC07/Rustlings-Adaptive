@@ -45,16 +45,12 @@ pub(crate) fn run() {
     let mut client = make_client(&cfg);
     install_ctrlc();
 
-    // M4.8: give the active configuration a profile identity so /model
-    // lists everything and the user can always switch back.
-    if cfg.ensure_active_profile_recorded() {
+    // M9c (方案 C): legacy config layouts are migrated on load; persist
+    // the upgraded file once and say so.
+    if cfg.migrated {
         match cfg.save_to_default_file() {
-            Ok(()) => {
-                if let Some(last) = cfg.models.last() {
-                    println!("  已把当前模型记录为档案「{}」（/model 可查看与切换）", last.name);
-                }
-            }
-            Err(e) => eprintln!("  （模型档案写回失败：{e:#}）"),
+            Ok(()) => println!("  配置文件已升级：模型统一为 [[models]] 档案 + active 指针（原顶层配置已成为一个档案）。"),
+            Err(e) => eprintln!("  （配置升级写回失败：{e:#}）"),
         }
     }
 
@@ -294,8 +290,8 @@ fn handle_model(arg: Option<&str>, cfg: &mut ModelConfig, client: &mut Option<Ll
                 host_of(&m.endpoint)
             );
         }
-        println!("  切换：/model <档案名>（* = 当前）；写 config.toml 时给档案加");
-        println!("  think_mode / reasoning_effort 可按模型调推理档位（K3 默认 max 最贵）。");
+        println!("  切换：/model <档案名>（* = 当前生效，唯一）；档案就在 config.toml 的");
+        println!("  [[models]] 里逐个填写；think_mode / reasoning_effort 可按模型调推理档位。");
         println!();
         return;
     };
@@ -977,7 +973,11 @@ fn cmd_config(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
             clear_viewport();
         }
         println!("{}", render::header("模型配置"));
-        println!("  输入编号修改对应项（1..6），回车返回；修改会写回 config.toml");
+        let active_name = cfg.active.clone().unwrap_or_default();
+        println!(
+            "  输入编号修改对应项（1..6），回车返回；修改写回当前档案「{}」",
+            render::cyan(&active_name)
+        );
         println!();
         println!("  1. endpoint : {}", cfg.endpoint);
         println!("  2. model    : {}", cfg.model);
@@ -1013,9 +1013,19 @@ fn cmd_config(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
             "  · 界面      : {}（/ui view｜scroll 可切换）",
             if cfg.ui.mode_view() { "视口重绘" } else { "滚动" }
         );
-        if !cfg.models.is_empty() {
-            let names: Vec<&str> = cfg.models.iter().map(|m| m.name.as_str()).collect();
-            println!("  · 模型档案  : {}（/model <名> 一键切换）", names.join(" / "));
+        if cfg.models.len() > 1 {
+            let names: Vec<String> = cfg
+                .models
+                .iter()
+                .map(|m| {
+                    if cfg.is_active_profile(m) {
+                        format!("{}{}", m.name, render::green("*"))
+                    } else {
+                        m.name.clone()
+                    }
+                })
+                .collect();
+            println!("  · 模型档案  : {}（/model <名> 切换）", names.join(" / "));
         }
         let Some(line) = read_line_or_leave("配置> ") else { return };
         match line.as_str() {

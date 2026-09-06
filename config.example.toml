@@ -1,69 +1,67 @@
 # rustlings-adaptive 模型配置
 #
-# 快速开始：
-#   1. 把本文件复制为 config.toml（已 gitignore，不会泄露 Key）
-#   2. 填好下面"必填"三项
+# 概念只有一个：档案（[[models]]）。
+#   - 程序实际使用 `active` 指向的那个档案；/model <名> 切换 = 移动指针
+#   - /config 交互修改 = 直接编辑当前档案
+#   - 每个模型在文件里只出现一次，没有隐藏的继承规则
+#
+# 快速开始（只用一个模型）：
+#   1. 把本文件复制为 config.toml（已被 .gitignore 排除，不会泄露 Key）
+#   2. 在第一个 [[models]] 里填好 endpoint / api_key / model
 #   3. cargo run，开始对话
 #
 # 也可以用 .env（RUSTLINGS_API_KEY / RUSTLINGS_ENDPOINT / RUSTLINGS_MODEL，
-# 优先级更高），或运行后 /config 交互修改。
+# 优先级高于档案值），或运行后 /config 交互修改。
 
-# ---- 必填：任意 OpenAI 兼容端点（OpenAI / DeepSeek / Kimi / Ollama / vLLM…）----
-
-endpoint = "https://api.openai.com/v1"
-
-api_key = ""
-
-model = "gpt-4o-mini"
-
-# ---- 可选：都有合理默认，通常不用动 ----
-
-# 上下文窗口（tokens）
-# context_len = 128000
-
-# 每次请求超时秒数（默认 480）；出题的长输出在慢端点上可调高
-# llm_timeout_secs = 480
-
-# 思考模式与推理强度——质量与时间的权衡：越强越慢、越贵。
-#   think_mode        auto = 沿用端点默认（拿不准就用它）
-#                     on   = 强制开思考（解释更深，适合答疑）
-#                     off  = 强制关（最快，正确性由本地质量门兜底）
-#   reasoning_effort  low / high / max（仅思考开启时有效）
-# 建议先保持 auto 起步，嫌慢或贵再降档。
-# think_mode = "auto"
-# reasoning_effort = "low"
-
-# ---- 费用：照抄模型商定价页，程序据此记账并在超预算时拦截 ----
-
-[prices]
-input = 0.15      # 每 1M 输入 token
-output = 0.60     # 每 1M 输出 token
-
-[budget]
-usd = 5.0         # 累计花费达到即拦截；删掉整段 = 不设预算
-
-# ---- 推荐：常用模型各配一个档案，/model <名> 一键切换 ----
-# api_key 留空 = 沿用顶层 Key；llm_timeout_secs / prices 留空 = 沿用当前值。
-# /model 无参数 = 列出全部档案（* 标记当前）。
+# 当前生效的档案名（缺省 = 第一个档案；切换用 /model <名> 或改这里）
+active = "openai"
 
 [[models]]
 name = "openai"
+# 必填：任意 OpenAI 兼容端点（OpenAI / DeepSeek / Kimi / Ollama / vLLM…）
 endpoint = "https://api.openai.com/v1"
+# 必填。本地端点（Ollama 等）不需要真 Key，填任意占位即可（如 "ollama"）
 api_key = ""
+# 必填：模型 id
 model = "gpt-4o-mini"
+# 上下文窗口（tokens）。缺省 128000
+context_len = 128000
+# 每次请求超时秒数。缺省 480；出题的长输出在慢端点上可调高
+llm_timeout_secs = 480
+# 每 1M token 价格（USD），程序据此记账并在超预算时拦截。
+# 缺省 = 内置示例价（输入 0.15 / 输出 0.60）——请改成你的模型定价页，
+# 否则花费统计失真
+prices = { input = 0.15, output = 0.60 }
+# 思考模式：auto = 沿用端点默认（拿不准就用它）｜ on = 强制开 ｜ off = 强制关。
+# 缺省 auto
+think_mode = "auto"
+# 推理强度：low / high / max，仅思考开启时有效。缺省不发（端点默认）
+reasoning_effort = "low"
 
+# 需要更多模型就再各加一个档案，把 active 改成对应 name 即可切换：
 [[models]]
 name = "local"
 endpoint = "http://localhost:11434/v1"
+api_key = "ollama"
 model = "qwen2.5:7b"
+context_len = 32000
+prices = { input = 0.0, output = 0.0 }
+think_mode = "off"
 
-# 需要另一个云上模型时照这个样子加（示例 DeepSeek）：
+# 云上模型示例（DeepSeek），照样子加一段：
 #
 # [[models]]
 # name = "deepseek"
 # endpoint = "https://api.deepseek.com/v1"
 # api_key = "sk-..."
 # model = "deepseek-chat"
-# [models.prices]
-# input = 0.27
-# output = 1.09
+# prices = { input = 0.27, output = 1.09 }
+
+# ---- 全局设置（不属于任何模型）----
+
+# 累计花费达到即拦截 LLM 调用；删掉整段 = 不设预算
+[budget]
+usd = 5.0
+
+# 练习编辑器（缺省自动：$EDITOR → $VISUAL → code --wait → vi）
+# editor = "code --wait"

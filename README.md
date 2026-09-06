@@ -51,16 +51,19 @@ rustlings-adaptive      # 注意：仍需在项目根目录（含 exercises/ 与
 
 ## 配置
 
-模型调用需要一个 **OpenAI 兼容的 endpoint 与 API Key**。三种方式任选：
+模型调用需要一个 **OpenAI 兼容的 endpoint 与 API Key**。模型统一写在
+`[[models]]` 档案里（每个模型一段，字段含义与默认值见
+`config.example.toml`），`active` 指向当前生效的档案。三种方式任选：
 
-1. **配置文件（推荐）**：`cp config.example.toml config.toml`，然后编辑
-   `endpoint` / `api_key` / `model`；可配置多组 `[[models]]` 档案，运行中
-   `/model <名>` 一键切换；思考模式 `think_mode`（auto/on/off）与
-   `reasoning_effort` 可按端点调优（示例文件内有实测建议）；
+1. **配置文件（推荐）**：`cp config.example.toml config.toml`，在第一个
+   `[[models]]` 里填好 `endpoint` / `api_key` / `model` 即可；多模型就
+   各加一段，`/model <名>` 一键切换（移动 `active` 指针，档案内容永远
+   不被覆盖）；`think_mode`（auto/on/off）、`reasoning_effort`、
+   `context_len`、`prices` 均按档案独立配置；
 2. **环境变量**：项目根目录建 `.env`，写 `RUSTLINGS_API_KEY=sk-...`
    （也可用 `RUSTLINGS_ENDPOINT` / `RUSTLINGS_MODEL` 覆盖，优先级更高）；
 3. **程序内配置页**：运行后 `/config`，交互修改 endpoint / model /
-   api_key / 预算 / 编辑器，写回 config.toml。
+   api_key / 预算 / 编辑器，修改写回当前档案。
 
 > `config.toml` 与 `.env` 含 API Key，已被 `.gitignore` 排除，请勿提交。
 > 预算：累计花费达到 `[budget].usd` 后，后续模型调用被自动拦截。
