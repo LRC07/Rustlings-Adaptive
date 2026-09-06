@@ -627,7 +627,7 @@ mod tests {
     #[test]
     fn plain_reply_updates_history_and_records_usage() {
         let env = test_env(Arc::new(Mock::new(vec![Ok(reply("E0382 是所有权移动"))])));
-        let out = run_turn(&[], "为什么报错", &env, &noop).unwrap();
+        let out = run_turn(&[], "为什么报错", &env, &noop, &mut |_| {}).unwrap();
         assert_eq!(out.reply.as_deref(), Some("E0382 是所有权移动"));
         assert!(out.tool_notes.is_empty());
         assert_eq!(out.calls, 1);
@@ -647,7 +647,7 @@ mod tests {
             Ok(calls_output(vec![call("c1", tools::TOOL_LIST_CONCEPTS, "{}")])),
             Ok(reply("概念图谱有这些主题…")),
         ])));
-        let out = run_turn(&[], "能出什么题", &env, &noop).unwrap();
+        let out = run_turn(&[], "能出什么题", &env, &noop, &mut |_| {}).unwrap();
         assert_eq!(out.reply.as_deref(), Some("概念图谱有这些主题…"));
         assert_eq!(out.history.len(), 5); // sys + user + asst(calls) + tool + asst
         assert_eq!(out.history[3].role, "tool");
@@ -663,7 +663,7 @@ mod tests {
             Ok(reply("{\"tool\": \"list_concepts\", \"arguments\": {}}")),
             Ok(reply("这些是可用主题")),
         ])));
-        let out = run_turn(&[], "主题", &env, &noop).unwrap();
+        let out = run_turn(&[], "主题", &env, &noop, &mut |_| {}).unwrap();
         assert_eq!(out.reply.as_deref(), Some("这些是可用主题"));
         // fallback feeds results as user messages
         assert_eq!(out.history.len(), 5);
@@ -677,7 +677,7 @@ mod tests {
             Ok(calls_output(vec![call("c1", "no_such_tool", "{}")])),
             Ok(reply("明白了，换个方式")),
         ])));
-        let out = run_turn(&[], "x", &env, &noop).unwrap();
+        let out = run_turn(&[], "x", &env, &noop, &mut |_| {}).unwrap();
         assert_eq!(out.history[3].role, "tool");
         assert!(out.history[3].content.as_deref().unwrap().contains("\"ok\":false"));
         assert!(out.tool_notes.iter().any(|n| n.contains("工具执行失败")));
@@ -687,7 +687,7 @@ mod tests {
     fn budget_exhausted_blocks_before_calling() {
         let mut env = test_env(Arc::new(Mock::new(vec![Ok(reply("不该被调用"))])));
         env.cfg.budget = Some(crate::config::Budget { usd: 0.0 });
-        let out = run_turn(&[], "问个问题", &env, &noop).unwrap();
+        let out = run_turn(&[], "问个问题", &env, &noop, &mut |_| {}).unwrap();
         assert!(out.reply.as_deref().unwrap().contains("被拦截"), "{out:?}");
         assert_eq!(out.calls, 0);
         assert!(out.history.iter().any(|m| m.role == "assistant" && m.content.as_deref().unwrap().contains("被拦截")));
