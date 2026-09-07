@@ -68,14 +68,15 @@ rustlings-adaptive      # 注意：仍需在项目根目录（含 exercises/ 与
 3. **程序内配置页**：运行后 `/config`，交互修改 endpoint / model /
    api_key / 预算 / 编辑器 / 思考模式 / 流式输出，修改写回当前档案。
 
-**分功能配置模型（推荐）**：不同环节对模型的要求不同——对话出题
-要响应快、成本低；复盘评审要能力强、能讲透道理。在 `config.toml`
-的 `[routing]` 表里按环节指定档案（省略的字段沿用 `active`）：
+**分功能配置模型（推荐）**：不同环节对模型的要求不同——对话要
+响应快、成本低；出题（尤其自由生成）与复盘评审要能力强。在
+`config.toml` 的 `[routing]` 表里按环节指定档案（省略的字段沿用
+`active`）：
 
 ```toml
 [routing]
 chat = "Qwen3.8-Flash"      # 对话 / 工具环 / 假设实验室
-generate = "Qwen3.8-Flash"  # 出题
+generate = "Kimi-K3"        # 出题（自由生成对模型能力敏感）
 review = "Kimi-K3"          # 评审门 + 复盘
 ```
 
@@ -83,9 +84,10 @@ review = "Kimi-K3"          # 评审门 + 复盘
 
 | 环节 | 需要什么样的模型 | 示例中的推荐 |
 |---|---|---|
-| 对话、出题 | 响应快、成本低、日常够用 | Qwen3.8-Flash |
+| 对话 | 响应快、成本低、日常够用 | Qwen3.8-Flash |
+| 出题 | 能力强：自由生成无模板兜底，题目质量直接决定练习体验（低频环节，贵一点值得）| Kimi-K3（思考 low）|
 | 评审门、复盘 | 能力强：评判细致、讲解透彻，可以慢一点 | Kimi-K3（开启思考）|
-| 想要更厚的讲解 | 表达详细、爱举例子 | MiniMax-M3 |
+| 对话的另一种选择 | 表达详细、爱举例子，教学更厚重 | MiniMax-M3 |
 
 **校内同学（清华）零成本上手**：
 1. 登录 [easycompute.cs.tsinghua.edu.cn](https://easycompute.cs.tsinghua.edu.cn/login)
