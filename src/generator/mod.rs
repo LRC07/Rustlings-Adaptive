@@ -10,7 +10,7 @@
 //! (defaults + candidate rotation), which keeps tests cheap and the
 //! tool usable without a key.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -944,16 +944,23 @@ fn finish_draft(
 /// (The LLM's template picker is deliberately NOT used here — it is
 /// already strict at tier 1; a loosely-picked skeleton risks dragging
 /// the draft off-topic. No keyword hit → fall through to tier 3.)
+/// Among candidates the MOST SPECIFIC hit wins (0909 反馈 A: score =
+/// keyword-hit count of its covering concept; ties keep file order).
 fn nearest_template<'a>(
     templates: &'a [template::Template],
     graph: &ConceptGraph,
     topic: &Topic,
 ) -> Result<&'a template::Template> {
-    let ids = keyword_candidates(templates, graph, &topic.prompt_text());
-    templates
-        .iter()
-        .find(|t| ids.contains(&t.id))
-        .ok_or_else(|| anyhow!("没有关键词命中的模板可作改编骨架"))
+    let pool = keyword_candidates(templates, graph, &topic.prompt_text());
+    let mut best: Option<(&template::Template, u32)> = None;
+    for t in templates.iter().filter(|t| pool.ids.contains(&t.id)) {
+        let s = pool.scores.get(&t.id).copied().unwrap_or(0);
+        match best {
+            Some((_, bs)) if bs >= s => {}
+            _ => best = Some((t, s)),
+        }
+    }
+    best.map(|(t, _)| t).ok_or_else(|| anyhow!("没有关键词命中的模板可作改编骨架"))
 }
 
 /// Hard cap on one draft round's completion tokens (M4.7): the whole
@@ -1308,12 +1315,12 @@ fn choose_template<'a>(
             // same-domain-different-technique template is rejected
             // (no_match → tiers 2/3). Without focus, keep the cheap path.
             if let (Some(f), Some(call)) = (focus, llm) {
-                if let Some(p) = llm_pick_template(templates, &topic.prompt_text(), Some(f), history, call, Some(&ids))? {
+                if let Some(p) = llm_pick_template(templates, &topic.prompt_text(), Some(f), history, call, Some(&ids), None)? {
                     return Ok(p);
                 }
                 bail!("概念「{id}」下没有训练「{f}」的模板；转为改编/自由生成");
             }
-            match pick_candidate(templates, &ids, history) {
+            match pick_candidate(templates, &ids, None, history) {
                 Some(p) => Ok(p),
                 None if ids.is_empty() => {
                     bail!("概念「{id}」还没有可用模板")
@@ -1336,12 +1343,12 @@ fn choose_template<'a>(
                 collect_concept_templates(graph, c, &mut ids);
             }
             if let (Some(f), Some(call)) = (focus, llm) {
-                if let Some(p) = llm_pick_template(templates, &topic.prompt_text(), Some(f), history, call, Some(&ids))? {
+                if let Some(p) = llm_pick_template(templates, &topic.prompt_text(), Some(f), history, call, Some(&ids), None)? {
                     return Ok(p);
                 }
                 bail!("错误码 {code} 相关模板没有训练「{f}」的；转为改编/自由生成");
             }
-            match pick_candidate(templates, &ids, history) {
+            match pick_candidate(templates, &ids, None, history) {
                 Some(p) => Ok(p),
                 None if ids.is_empty() => {
                     bail!("错误码 {code} 相关概念还没有可用模板")
@@ -1353,13 +1360,16 @@ fn choose_template<'a>(
             }
         }
         Topic::FreeText(text) => {
-            // Keyword pool first (cheap; also the drift anchor for the
-            // LLM pick), then the LLM (understands loose Chinese),
-            // then the deterministic pick over the pool.
-            let ids = keyword_candidates(templates, graph, text);
+            // Keyword pool first (cheap; also the drift anchor + the
+            // specificity ranking for the LLM pick), then the LLM
+            // (understands loose Chinese), then the deterministic pick
+            // over the pool — highest score first.
+            let pool = keyword_candidates(templates, graph, text);
             if let Some(call) = llm {
-                let anchor = if ids.is_empty() { None } else { Some(&ids) };
-                if let Some(p) = llm_pick_template(templates, text, focus, history, call, anchor)? {
+                // Empty pool → no anchor and FULL catalog (pool mode with
+                // zero members would blank the catalog out).
+                let pool_ref = if pool.ids.is_empty() { None } else { Some(&pool) };
+                if let Some(p) = llm_pick_template(templates, text, focus, history, call, pool_ref.as_ref().map(|p| &p.ids), pool_ref)? {
                     return Ok(p);
                 }
                 if focus.is_some() {
@@ -1372,8 +1382,8 @@ fn choose_template<'a>(
                     );
                 }
             }
-            pick_candidate(templates, &ids, history).ok_or_else(|| {
-                if ids.is_empty() {
+            pick_candidate(templates, &pool.ids, Some(&pool.scores), history).ok_or_else(|| {
+                if pool.ids.is_empty() {
                     anyhow!(
                         "没能根据「{text}」挑出模板；试试概念（如 trait.associated-types）、\
                          错误码（如 E0382）或更具体的关键词"
@@ -1393,14 +1403,23 @@ fn choose_template<'a>(
 /// first (stable order otherwise); a used template is only eligible as
 /// an explicit variant — and only when its slots can produce a
 /// different fill (a slot-less repeat would be the identical question).
+/// `scores` (0909 反馈 A) ranks candidates by keyword-hit specificity
+/// WITHIN each group (unused / used) — file order stays the final
+/// tie-break. None = no ranking signal (concept/error-code pools).
 fn pick_candidate<'a>(
     templates: &'a [template::Template],
     ids: &BTreeSet<String>,
+    scores: Option<&BTreeMap<String, u32>>,
     history: &GenHistory,
 ) -> Option<Pick<'a>> {
     let mut cands: Vec<&template::Template> =
         templates.iter().filter(|t| ids.contains(&t.id)).collect();
-    cands.sort_by_key(|t| history.times(&t.id) != 0); // stable: unused first
+    let score_of = |t: &template::Template| scores.and_then(|s| s.get(&t.id)).copied().unwrap_or(0);
+    cands.sort_by(|a, b| {
+        let ua = history.times(&a.id) != 0;
+        let ub = history.times(&b.id) != 0;
+        ua.cmp(&ub).then_with(|| score_of(b).cmp(&score_of(a)))
+    });
     cands.into_iter().find_map(|t| {
         let times = history.times(&t.id);
         if times == 0 {
@@ -1423,13 +1442,30 @@ fn collect_concept_templates(graph: &ConceptGraph, concept_id: &str, out: &mut B
     }
 }
 
+/// Free-text keyword pool with evidence (0909 反馈 A+B): "HashMap 所有权"
+/// used to drag the whole ownership subtree into an UNORDERED pool whose
+/// file-order pick was closure-fn-kinds. Now every candidate carries a
+/// specificity score — the needle-hit count of the most specific concept
+/// node covering it — and the LLM picker gets the hit reasons.
+struct KeywordPool {
+    /// Candidate ids (set semantics; the anchor only checks membership).
+    ids: BTreeSet<String>,
+    /// template id → score = needle-hit count of the most specific hit
+    /// node covering it (a node hitting BOTH keywords beats one hitting
+    /// a single generic keyword, regardless of subtree size).
+    scores: BTreeMap<String, u32>,
+    /// (concept id, concept name, matched needles) — the prompt's
+    /// keyword-analysis block.
+    reasons: Vec<(String, String, Vec<String>)>,
+}
+
 /// Deterministic free-text matching: taxonomy concept names/ids first
 /// (Chinese keywords live there), then template titles/ids/codes.
 fn keyword_candidates(
     templates: &[template::Template],
     graph: &ConceptGraph,
     text: &str,
-) -> BTreeSet<String> {
+) -> KeywordPool {
     let needles: Vec<String> = text
         .split(|c: char| c.is_whitespace() || "，。、？！,.:?？()（）".contains(c))
         .map(str::trim)
@@ -1438,22 +1474,37 @@ fn keyword_candidates(
         .collect();
 
     let mut ids = BTreeSet::new();
+    let mut scores: BTreeMap<String, u32> = BTreeMap::new();
+    let mut reasons: Vec<(String, String, Vec<String>)> = Vec::new();
     for node in graph.ids().filter_map(|id| graph.get(id)) {
         let hay = format!("{} {}", node.id, node.name).to_lowercase();
-        if needles.iter().any(|n| hay.contains(n)) {
-            collect_concept_templates(graph, &node.id, &mut ids);
+        let matched: Vec<String> =
+            needles.iter().filter(|n| hay.contains(*n)).cloned().collect();
+        if matched.is_empty() {
+            continue;
+        }
+        let k = matched.len() as u32;
+        reasons.push((node.id.clone(), node.name.clone(), matched));
+        let mut covered = BTreeSet::new();
+        collect_concept_templates(graph, &node.id, &mut covered);
+        for t in covered {
+            // Score = the MOST specific hit node covering the template.
+            scores.entry(t.clone()).and_modify(|s| *s = (*s).max(k)).or_insert(k);
+            ids.insert(t);
         }
     }
-    if !ids.is_empty() {
-        return ids;
-    }
-    for t in templates {
-        let hay = format!("{} {} {}", t.id, t.title, t.error_codes.join(" ")).to_lowercase();
-        if needles.iter().any(|n| hay.contains(n)) {
-            ids.insert(t.id.clone());
+    if ids.is_empty() {
+        // No concept matched: fall back to template title/id/error-code
+        // matching (score 1 — no specificity signal beyond the hit).
+        for t in templates {
+            let hay = format!("{} {} {}", t.id, t.title, t.error_codes.join(" ")).to_lowercase();
+            if needles.iter().any(|n| hay.contains(n)) {
+                scores.insert(t.id.clone(), 1);
+                ids.insert(t.id.clone());
+            }
         }
     }
-    ids
+    KeywordPool { ids, scores, reasons }
 }
 
 // ---------------------------------------------------------------------------
@@ -1472,28 +1523,85 @@ fn llm_pick_template<'a>(
     // candidate pool, the pick must come from it; None = no anchor
     // (loose requests keep full LLM judgment).
     anchor: Option<&BTreeSet<String>>,
+    // 0909 反馈 B: when the anchor comes from keyword matching, the
+    // picker sees ONLY pool members (ranked by specificity) plus the
+    // hit reasons — a bare 60-template catalog is how the request's
+    // signal got drowned in the first place.
+    pool: Option<&KeywordPool>,
 ) -> Result<Option<Pick<'a>>> {
-    let catalog: String = templates
-        .iter()
-        .map(|t| {
-            // M4.10: mark templates the learner already received so the
-            // pick can prefer fresh ones.
-            let used_note = match history.get(&t.id) {
-                Some(u) => format!(" | ALREADY USED x{} ({})", u.times,
-                    if u.all_passed { "all passed" } else { "not all passed" }),
-                None => String::new(),
-            };
+    let catalog: String = match pool {
+        Some(p) => {
+            // Ranked: specificity score desc, then file order (stable).
+            let mut ranked: Vec<&template::Template> =
+                templates.iter().filter(|t| p.ids.contains(&t.id)).collect();
+            ranked.sort_by(|a, b| {
+                let sa = p.scores.get(&a.id).copied().unwrap_or(0);
+                let sb = p.scores.get(&b.id).copied().unwrap_or(0);
+                sb.cmp(&sa)
+            });
+            ranked
+                .into_iter()
+                .map(|t| {
+                    let used_note = match history.get(&t.id) {
+                        Some(u) => format!(" | ALREADY USED x{}", u.times),
+                        None => String::new(),
+                    };
+                    let score = p.scores.get(&t.id).copied().unwrap_or(0);
+                    format!(
+                        "- {} | {} | {} | {} | keyword-score {score}{}",
+                        t.id,
+                        t.title,
+                        t.concepts.join(","),
+                        t.error_codes.join(","),
+                        used_note
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        None => templates
+            .iter()
+            .map(|t| {
+                // M4.10: mark templates the learner already received so the
+                // pick can prefer fresh ones.
+                let used_note = match history.get(&t.id) {
+                    Some(u) => format!(" | ALREADY USED x{} ({})",
+                        u.times,
+                        if u.all_passed { "all passed" } else { "not all passed" }),
+                    None => String::new(),
+                };
+                format!(
+                    "- {} | {} | {} | {}{}",
+                    t.id,
+                    t.title,
+                    t.concepts.join(","),
+                    t.error_codes.join(","),
+                    used_note
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    // 0909 反馈 B: the keyword-analysis block — which concepts the
+    // request's words actually hit, so the model can weigh specificity
+    // instead of vibing its way through the catalog.
+    let analysis = match pool {
+        Some(p) if !p.reasons.is_empty() => {
+            let lines = p
+                .reasons
+                .iter()
+                .map(|(id, name, words)| format!("- \"{}\" hits concept {}（{}）", words.join("\", \""), id, name))
+                .collect::<Vec<_>>()
+                .join("\n");
             format!(
-                "- {} | {} | {} | {}{}",
-                t.id,
-                t.title,
-                t.concepts.join(","),
-                t.error_codes.join(","),
-                used_note
+                "\n\nKeyword analysis of the request (hit concepts):\n{lines}\n\
+                 A concept hit by MORE of the request's keywords is the more specific match — \
+                 keyword-score in the catalog reflects this. Strongly prefer templates whose \
+                 concepts top this ranking.\n"
             )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+        }
+        _ => String::new(),
+    };
     let focus_block = match focus {
         Some(f) => format!(
             "\n\nSpecific technique the learner wants to train: {f}\n\
@@ -1503,10 +1611,11 @@ fn llm_pick_template<'a>(
         ),
         None => String::new(),
     };
+    let usage_note = if pool.is_some() { " | keyword-score" } else { " | usage" };
     let prompt = format!(
         "You are choosing a Rust practice exercise template for a learner.\n\n\
-         User request: {request}{focus_block}\n\n\
-         Available templates (id | title | concepts | error-codes | usage):\n{catalog}\n\n\
+         User request: {request}{focus_block}{analysis}\n\n\
+         Available templates (id | title | concepts | error-codes{usage_note}):\n{catalog}\n\n\
          Pick a template ONLY if it trains the SPECIFIC technique or behavior the request \
          asks for. A template that merely lives in the same concept domain while training \
          a different technique is a WRONG answer (e.g. an and_then+map chain exercise for \
@@ -2378,7 +2487,7 @@ fn add(a: i32, b: i32) -> i32 {
             Ok(reply(r#"{"template_id": "mini-add"}"#))
         };
         // Without an anchor the pick is accepted as before.
-        let p = llm_pick_template(&templates, "任意", None, &GenHistory::default(), &mut call, None)
+        let p = llm_pick_template(&templates, "任意", None, &GenHistory::default(), &mut call, None, None)
             .unwrap();
         assert!(p.is_some());
         // Anchor containing the pick → accepted.
@@ -2391,6 +2500,7 @@ fn add(a: i32, b: i32) -> i32 {
             &GenHistory::default(),
             &mut call,
             Some(&ok_anchor),
+            None,
         )
         .unwrap();
         assert!(p.is_some());
@@ -2404,9 +2514,77 @@ fn add(a: i32, b: i32) -> i32 {
             &GenHistory::default(),
             &mut call,
             Some(&other_anchor),
+            None,
         )
         .unwrap();
         assert!(p.is_none(), "off-topic pick must be rejected");
+    }
+
+    /// 0909 反馈 A（真实库数据门）: "HashMap 所有权" 的池里
+    /// hashmap-entry-count 必须以唯一最高分（双词命中 collections.hashmap）
+    /// 排在整棵 ownership 子树的模板（单词命中，1 分）之前——
+    /// 确定性落点从字母序的 closure-fn-kinds 变为 entry 模板。
+    #[test]
+    fn keyword_pool_ranks_by_specificity() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut graph =
+            crate::taxonomy::ConceptGraph::load(&root.join("taxonomy/concepts.toml")).unwrap();
+        let templates = template::load_dir(&root.join("templates")).unwrap();
+        let items: Vec<(&str, &[String])> =
+            templates.iter().map(|t| (t.id.as_str(), t.concepts.as_slice())).collect();
+        graph.link_templates(items).unwrap();
+
+        let pool = keyword_candidates(&templates, &graph, "HashMap 所有权");
+        assert!(pool.ids.contains("hashmap-entry-count"), "pool: {:?}", pool.ids);
+        assert!(pool.ids.contains("closure-fn-kinds"), "ownership subtree stays in the anchor pool");
+        assert_eq!(pool.scores.get("hashmap-entry-count"), Some(&2), "double keyword hit");
+        assert_eq!(pool.scores.get("closure-fn-kinds"), Some(&1), "single generic keyword");
+        let pick = pick_candidate(&templates, &pool.ids, Some(&pool.scores), &GenHistory::default())
+            .unwrap();
+        assert_eq!(pick.t.id, "hashmap-entry-count", "deterministic pick follows the score");
+    }
+
+    /// 0909 反馈 B（真实库数据门）: anchored picker sees ONLY pool
+    /// members (score-annotated, ranked) plus the keyword-analysis
+    /// block — the bare 60-template catalog drowned the request.
+    #[test]
+    fn llm_pick_prompt_carries_keyword_analysis() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut graph =
+            crate::taxonomy::ConceptGraph::load(&root.join("taxonomy/concepts.toml")).unwrap();
+        let templates = template::load_dir(&root.join("templates")).unwrap();
+        let items: Vec<(&str, &[String])> =
+            templates.iter().map(|t| (t.id.as_str(), t.concepts.as_slice())).collect();
+        graph.link_templates(items).unwrap();
+        let pool = keyword_candidates(&templates, &graph, "HashMap 所有权");
+
+        let prompts = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let rec = prompts.clone();
+        let mut call = move |p: &str| -> Result<LlmReply> {
+            rec.borrow_mut().push(p.to_string());
+            Ok(reply(r#"{"template_id": "hashmap-entry-count"}"#))
+        };
+        let pick = llm_pick_template(
+            &templates,
+            "HashMap 所有权",
+            None,
+            &GenHistory::default(),
+            &mut call,
+            Some(&pool.ids),
+            Some(&pool),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(pick.t.id, "hashmap-entry-count");
+
+        let prompt = prompts.borrow()[0].clone();
+        assert!(prompt.contains("Keyword analysis"), "{prompt}");
+        assert!(prompt.contains("collections.hashmap（HashMap 与所有权）"), "{prompt}");
+        assert!(prompt.contains("keyword-score 2"), "{prompt}");
+        assert!(!prompt.contains("as-cast-truncation"), "pool-filtered catalog: {prompt}");
+        let entry = prompt.find("hashmap-entry-count").unwrap();
+        let closure = prompt.find("closure-fn-kinds").unwrap();
+        assert!(entry < closure, "ranked catalog: entry (score 2) before closure (score 1)");
     }
 
     /// 0907 反馈 P4: free generation is ONE round per call — a rejected
