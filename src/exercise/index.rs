@@ -55,6 +55,9 @@ fn apply_result(meta: &mut ExerciseMeta, passed: bool, first_error: Option<&str>
     }
     if let Some(code) = first_error {
         meta.last_error = Some(code.to_string());
+        // Not cleared by a later pass: the wrongbook's error-code
+        // filter depends on it (0908 反馈).
+        meta.last_fail_error = Some(code.to_string());
     }
     match meta.status {
         Status::Failed { times } if counts_failure => {
@@ -168,6 +171,13 @@ pub struct ExerciseMeta {
     /// Last compile error code seen while solving ("E0382"); cleared on pass.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// Most recent failure's error code, NOT cleared by a later pass
+    /// (0908 反馈 [/stats wrong]): `last_error` is cleared on pass, so
+    /// wrongbook error-code filtering found nothing once the exercise
+    /// was solved. This one survives for the wrongbook filter. Old
+    /// index entries deserialize as None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_fail_error: Option<String>,
     /// Tiered static hints revealed one per `[h]` (M4.8); empty for
     /// free-form exercises without hints.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -348,6 +358,7 @@ impl ExerciseIndex {
                     attempts: 0,
                     status: Status::Pending,
                     last_error: None,
+                    last_fail_error: None,
                     hints,
                     feedback: None,
                     slots: Default::default(),
@@ -561,6 +572,7 @@ pub fn register_generated(
         attempts: 0,
         status: Status::Pending,
         last_error: None,
+        last_fail_error: None,
         hints: hints.to_vec(),
         feedback: None,
         slots: slots.clone(),
@@ -625,6 +637,7 @@ mod tests {
             attempts: 0,
             status: Status::Pending,
             last_error: None,
+            last_fail_error: None,
             hints: Vec::new(),
             feedback: None,
             slots: Default::default(),
@@ -636,12 +649,16 @@ mod tests {
         idx.record_attempt(key, false, Some("E0382"));
         assert_eq!(idx.get(key).unwrap().status, Status::Failed { times: 1 });
         assert_eq!(idx.get(key).unwrap().last_error.as_deref(), Some("E0382"));
+        assert_eq!(idx.get(key).unwrap().last_fail_error.as_deref(), Some("E0382"));
         idx.record_attempt(key, false, None);
         assert_eq!(idx.get(key).unwrap().status, Status::Failed { times: 2 });
         assert_eq!(idx.get(key).unwrap().attempts, 2);
         idx.record_attempt(key, true, None);
         assert_eq!(idx.get(key).unwrap().status, Status::Passed);
         assert_eq!(idx.get(key).unwrap().last_error, None, "pass clears the error");
+        // 0908 反馈 [/stats wrong]: the failure code survives the pass,
+        // or wrongbook error-code filtering finds nothing.
+        assert_eq!(idx.get(key).unwrap().last_fail_error.as_deref(), Some("E0382"));
         // Passed is sticky; attempts still count.
         idx.record_attempt(key, false, Some("E0308"));
         assert_eq!(idx.get(key).unwrap().status, Status::Passed);
@@ -669,6 +686,7 @@ mod tests {
             attempts: 0,
             status: Status::Pending,
             last_error: None,
+            last_fail_error: None,
             hints: Vec::new(),
             feedback: None,
             slots: Default::default(),
@@ -722,6 +740,7 @@ mod tests {
             attempts: 0,
             status: Status::Pending,
             last_error: None,
+            last_fail_error: None,
             hints: Vec::new(),
             feedback: None,
             slots: Default::default(),
@@ -753,6 +772,7 @@ mod tests {
                 attempts: 3,
                 status: Status::Failed { times: 2 },
                 last_error: Some("E0382".into()),
+                last_fail_error: None,
                 hints: Vec::new(),
                 feedback: Some(Feedback::JustRight),
                 slots: Default::default(),
@@ -818,6 +838,7 @@ mod tests {
             attempts: 0,
             status,
             last_error: None,
+            last_fail_error: None,
             hints: Vec::new(),
             feedback: None,
             slots: Default::default(),
@@ -862,6 +883,7 @@ mod tests {
                 attempts: 0,
                 status: Status::Passed,
                 last_error: None,
+                last_fail_error: None,
                 hints: Vec::new(),
                 feedback: None,
                 slots: Default::default(),

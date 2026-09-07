@@ -821,6 +821,7 @@ mod tests {
             hints: Vec::new(),
             feedback: None,
             last_error: None,
+            last_fail_error: None,
             slots: Default::default(),
             reference: None,
             constraints: Vec::new(),

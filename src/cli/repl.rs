@@ -1364,11 +1364,20 @@ fn print_stats(practice_ctx: &practice::PracticeCtx, arg: Option<&str>) {
 fn due_cn(due: &str) -> String {
     match chrono::DateTime::parse_from_rfc3339(due) {
         Ok(d) => {
-            let days = (d.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_days();
-            match days {
-                ..=0 => render::red("已到期").to_string(),
-                1 => "明天".to_string(),
-                n => format!("{n} 天后"),
+            // Exact-instant comparison (0908 反馈 [口径不一致]): the old
+            // num_days() truncation showed "已到期" for a due date LATER
+            // TODAY, while due_concepts() — the coach's authority — said
+            // not due. The two displays must not contradict.
+            let secs = (d.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_seconds();
+            if secs <= 0 {
+                render::red("已到期").to_string()
+            } else {
+                let days = (secs + 86_399) / 86_400;
+                match days {
+                    1 => "今天".to_string(),
+                    2 => "明天".to_string(),
+                    n => format!("{} 天后", n - 1),
+                }
             }
         }
         Err(_) => "—".to_string(),
@@ -2216,6 +2225,21 @@ mod tests {
     use super::*;
     use crate::llm::ChatMessage;
 
+    /// 0908 反馈 [口径不一致]: the /stats row formatter must agree with
+    /// the coach's exact-instant due_concepts() — a due LATER TODAY is
+    /// "今天", not "已到期" (the old num_days() truncation lied).
+    #[test]
+    fn due_cn_matches_the_coachs_exact_clock() {
+        let later_today = (chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339();
+        assert_eq!(due_cn(&later_today), "今天");
+        let tomorrow = (chrono::Utc::now() + chrono::Duration::hours(30)).to_rfc3339();
+        assert_eq!(due_cn(&tomorrow), "明天");
+        let in_3_days = (chrono::Utc::now() + chrono::Duration::hours(3 * 24)).to_rfc3339();
+        assert_eq!(due_cn(&in_3_days), "2 天后");
+        let overdue = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        assert!(due_cn(&overdue).contains("已到期"), "{}", due_cn(&overdue));
+    }
+
     fn user(text: &str) -> ChatMessage {
         ChatMessage::user(text.to_string())
     }
@@ -2344,6 +2368,7 @@ mod tests {
             attempts: 3,
             status: Status::Failed { times: 2 },
             last_error: Some("E0382".into()),
+            last_fail_error: None,
             hints: Vec::new(),
             feedback: None,
             slots: Default::default(),

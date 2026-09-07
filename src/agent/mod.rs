@@ -42,7 +42,10 @@ Principles:
 fine-grained concept ids from the local taxonomy. Never invent codes. \
 When explaining WHAT a specific error code means, call `list_concepts` \
 first and read the concept its error_codes entry points to — do not \
-define codes from memory.
+define codes from memory. NEVER cite a code you have not SEEN — in \
+real diagnostics (check_code / borrowlab) or in that taxonomy mapping. \
+Codes cited from memory get transposed (E0373 written as the \
+nonexistent E0372); a wrong code destroys trust in the whole explanation.
 - Real execution over speculation: when the user pastes code or an \
 error, call `check_code` to compile it locally first and explain from \
 the real diagnostics.

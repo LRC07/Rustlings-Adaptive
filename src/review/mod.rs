@@ -379,7 +379,9 @@ verdict 判据：clean=惯用且无显著问题；suggestions=能过但有明确
 suspicious=疑似绕过考点（如死代码里的 todo!、硬编码测试期望值、空壳实现、测试被改弱）。\
 findings 可为空数组；给不出具体改法就不要编造。\
 只报有行为或可维护性影响的点：纯注释增删、格式排版这类外观改动不算问题；\
-文件里的进度标记由系统自动管理，与学习者无关，不要提及。";
+文件里的进度标记由系统自动管理，与学习者无关，不要提及。\
+解答里保留的题面注释（如「这里会报 E0xxx」）描述的是未完成时的状态；\
+解答已通过全部测试，注释自然过时——不要据此质疑解答，也不要要求清理注释。";
 
 fn review_user_prompt(input: &ReviewInput) -> String {
     let mut p = String::new();
@@ -574,7 +576,8 @@ const QUIZ_SYSTEM: &str = "\
 真正理解了原理（而不是蒙对的）。严格只输出一个 JSON 对象（不要多余文字、不要代码围栏）：
 {\"question\":\"问题（中文，一句）\",\"options\":[{\"text\":\"选项内容（中文，短语或一句话）\",\"correct\":false,\"explain\":\"这个选项对/错的原理（中文，1-2 句，讲机制不复述选项）\"}]}
 要求：3-4 个选项；恰好 1 个 correct=true；干扰项必须像真实初学者的误解（优先取素材里的\
-误解/根因，不要凭空编造）；有失败快照时问「之前为什么没过」，一次通过时问「这题在考什么」。";
+误解/根因，不要凭空编造）；有失败快照时问「之前为什么没过」，一次通过时问「这题在考什么」。\
+题面注释描述的是未完成时的状态，解答通过后即过时——不要把过时注释当成矛盾或考点点。";
 
 fn quiz_user_prompt(input: &ReviewInput, last_fail: Option<&str>) -> String {
     let mut p = String::new();
@@ -801,7 +804,8 @@ maintenance=可维护性与扩展成本（加一种类型要改几处）、desig
 {\"rows\":[{\"dim\":\"idiom|readability|maintenance|design\",\"user_score\":1,\"ref_score\":5,\"user_note\":\"学习者的短评与具体改法（中文）\",\"ref_note\":\"参考解短评（中文）\"}],\"takeaway\":\"一句话点评取舍：什么时候学习者的写法也可以接受\"}
 评分只评代码本身；题目约束（如禁止 clone）下的写法不算缺点。\
 机器 clippy 计数可能包含题面自带代码触发的 lint（如题目固定了 &mut Vec 签名），\
-这类不算学习者的缺点，评分时注意甄别。";
+这类不算学习者的缺点，评分时注意甄别。\
+解答里保留的题面注释（如「这里会报错」）是未完成状态的遗留，不是学习者的代码问题。";
 
 fn cmp_user_prompt(input: &ReviewInput, machine: &MachineComparison) -> String {
     let mut p = String::new();

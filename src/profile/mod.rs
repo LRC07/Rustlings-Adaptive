@@ -79,6 +79,10 @@ pub struct NotebookEntry {
     pub concepts: Vec<String>,
     /// Last error code seen while solving (may be cleared once passed).
     pub last_error: Option<String>,
+    /// Most recent failure's error code, surviving a later pass
+    /// (0908 反馈 [/stats wrong]); drives wrongbook error-code filtering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_fail_error: Option<String>,
     /// Solve attempts recorded so far.
     pub attempts: u32,
     /// "failed" | "passed" — entries stay in the notebook even after a
@@ -344,6 +348,7 @@ pub fn notebook_from_index(
             title: m.title.clone(),
             concepts: m.concepts.clone(),
             last_error: m.last_error.clone(),
+            last_fail_error: m.last_fail_error.clone(),
             attempts: m.attempts,
             passed: m.status == crate::exercise::index::Status::Passed,
             review_verdict: m.review_verdict.clone(),
@@ -359,6 +364,13 @@ pub fn notebook_from_index(
                         .iter()
                         .any(|c| c.split('.').next().map(|d| d.contains(&fl)).unwrap_or(false))
                     || e.last_error
+                        .as_deref()
+                        .map(|c| c.to_ascii_lowercase().contains(&fl))
+                        .unwrap_or(false)
+                    // 0908 反馈 [/stats wrong]: last_error is cleared on
+                    // pass — without the surviving failure code, error-
+                    // code filtering found nothing for solved exercises.
+                    || e.last_fail_error
                         .as_deref()
                         .map(|c| c.to_ascii_lowercase().contains(&fl))
                         .unwrap_or(false)
@@ -493,6 +505,7 @@ mod tests {
             attempts,
             status,
             last_error: code.map(str::to_string),
+            last_fail_error: code.map(str::to_string),
             hints: Vec::new(),
             feedback: None,
             slots: Default::default(),
@@ -501,7 +514,12 @@ mod tests {
             review_verdict: None,
         };
         idx.upsert(mk("a", "题A", &["ownership.move"], Some("E0382"), Status::Failed { times: 2 }, 3));
-        idx.upsert(mk("b", "题B", &["borrow.shared-mut"], None, Status::Passed, 2));
+        // Passed AFTER failing with E0384: last_error cleared, the
+        // failure code survives (0908 反馈 [/stats wrong]).
+        let mut b = mk("b", "题B", &["borrow.shared-mut"], None, Status::Passed, 2);
+        b.last_error = None;
+        b.last_fail_error = Some("E0384".into());
+        idx.upsert(b);
         idx.upsert(mk("c", "题C", &["closures.traits"], None, Status::Passed, 0)); // never attempted
 
         let nb = notebook_from_index(&idx, None);
@@ -514,6 +532,12 @@ mod tests {
         assert_eq!(by_code.len(), 1);
         let by_domain = notebook_from_index(&idx, Some("borrow"));
         assert_eq!(by_domain.len(), 1);
+        // Error-code filter must ALSO find solved exercises via the
+        // surviving failure code (used to be always empty).
+        let by_hist_code = notebook_from_index(&idx, Some("E0384"));
+        assert_eq!(by_hist_code.len(), 1, "historical failure code matches");
+        assert_eq!(by_hist_code[0].path, "b");
+        assert!(by_hist_code[0].passed);
         let by_none = notebook_from_index(&idx, Some("closures"));
         assert!(by_none.is_empty(), "zero-attempt exercise is not in the notebook");
     }

@@ -1308,7 +1308,7 @@ fn choose_template<'a>(
             // same-domain-different-technique template is rejected
             // (no_match → tiers 2/3). Without focus, keep the cheap path.
             if let (Some(f), Some(call)) = (focus, llm) {
-                if let Some(p) = llm_pick_template(templates, &topic.prompt_text(), Some(f), history, call)? {
+                if let Some(p) = llm_pick_template(templates, &topic.prompt_text(), Some(f), history, call, Some(&ids))? {
                     return Ok(p);
                 }
                 bail!("概念「{id}」下没有训练「{f}」的模板；转为改编/自由生成");
@@ -1336,7 +1336,7 @@ fn choose_template<'a>(
                 collect_concept_templates(graph, c, &mut ids);
             }
             if let (Some(f), Some(call)) = (focus, llm) {
-                if let Some(p) = llm_pick_template(templates, &topic.prompt_text(), Some(f), history, call)? {
+                if let Some(p) = llm_pick_template(templates, &topic.prompt_text(), Some(f), history, call, Some(&ids))? {
                     return Ok(p);
                 }
                 bail!("错误码 {code} 相关模板没有训练「{f}」的；转为改编/自由生成");
@@ -1353,10 +1353,13 @@ fn choose_template<'a>(
             }
         }
         Topic::FreeText(text) => {
-            // LLM first (understands loose Chinese requests), then a
-            // deterministic keyword score over taxonomy names + titles.
+            // Keyword pool first (cheap; also the drift anchor for the
+            // LLM pick), then the LLM (understands loose Chinese),
+            // then the deterministic pick over the pool.
+            let ids = keyword_candidates(templates, graph, text);
             if let Some(call) = llm {
-                if let Some(p) = llm_pick_template(templates, text, focus, history, call)? {
+                let anchor = if ids.is_empty() { None } else { Some(&ids) };
+                if let Some(p) = llm_pick_template(templates, text, focus, history, call, anchor)? {
                     return Ok(p);
                 }
                 if focus.is_some() {
@@ -1369,7 +1372,6 @@ fn choose_template<'a>(
                     );
                 }
             }
-            let ids = keyword_candidates(templates, graph, text);
             pick_candidate(templates, &ids, history).ok_or_else(|| {
                 if ids.is_empty() {
                     anyhow!(
@@ -1458,12 +1460,18 @@ fn keyword_candidates(
 // LLM helpers
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn llm_pick_template<'a>(
     templates: &'a [template::Template],
     request: &str,
     focus: Option<&str>,
     history: &GenHistory,
     call: &mut (dyn LlmCaller + '_),
+    // 0908 反馈 [主题漂移]: "HashMap 所有权" got closure-fn-kinds — the
+    // LLM picker ignored the request. When keyword matching has a
+    // candidate pool, the pick must come from it; None = no anchor
+    // (loose requests keep full LLM judgment).
+    anchor: Option<&BTreeSet<String>>,
 ) -> Result<Option<Pick<'a>>> {
     let catalog: String = templates
         .iter()
@@ -1522,11 +1530,14 @@ fn llm_pick_template<'a>(
         return Ok(None);
     }
     let id = v.get("template_id").and_then(Value::as_str).map(str::to_string);
-    Ok(id.and_then(|id| templates.iter().find(|t| t.id == id)).map(|t| Pick {
-        t,
-        used_llm: true,
-        variant: history.times(&t.id) > 0,
-    }))
+    Ok(id
+        .and_then(|id| templates.iter().find(|t| t.id == id))
+        .filter(|t| anchor.map(|a| a.contains(&t.id)).unwrap_or(true))
+        .map(|t| Pick {
+            t,
+            used_llm: true,
+            variant: history.times(&t.id) > 0,
+        }))
 }
 
 fn llm_fill_slots(
@@ -2353,6 +2364,49 @@ fn add(a: i32, b: i32) -> i32 {
         assert_eq!(*calls.borrow(), 2, "repair loop retried once");
         assert_eq!(out.attempts, 2);
         assert_eq!(out.tier, Tier::Adapted { base: "mini-add".into() });
+    }
+
+    /// 0908 反馈 [主题漂移]: when keyword anchoring yields a candidate
+    /// pool, an LLM pick OUTSIDE it must be rejected (fall back to the
+    /// deterministic pick / no_match) instead of serving an off-topic
+    /// template ("HashMap 所有权" → closure-fn-kinds).
+    #[test]
+    fn llm_template_pick_respects_the_keyword_anchor() {
+        let fx = Fixture::new();
+        let templates = template::load_dir(&fx.paths().templates_dir).unwrap();
+        let mut call = |_prompt: &str| -> Result<LlmReply> {
+            Ok(reply(r#"{"template_id": "mini-add"}"#))
+        };
+        // Without an anchor the pick is accepted as before.
+        let p = llm_pick_template(&templates, "任意", None, &GenHistory::default(), &mut call, None)
+            .unwrap();
+        assert!(p.is_some());
+        // Anchor containing the pick → accepted.
+        let mut ok_anchor = BTreeSet::new();
+        ok_anchor.insert("mini-add".to_string());
+        let p = llm_pick_template(
+            &templates,
+            "任意",
+            None,
+            &GenHistory::default(),
+            &mut call,
+            Some(&ok_anchor),
+        )
+        .unwrap();
+        assert!(p.is_some());
+        // Anchor WITHOUT the pick → rejected as no_match.
+        let mut other_anchor = BTreeSet::new();
+        other_anchor.insert("some-other-template".to_string());
+        let p = llm_pick_template(
+            &templates,
+            "HashMap 所有权",
+            None,
+            &GenHistory::default(),
+            &mut call,
+            Some(&other_anchor),
+        )
+        .unwrap();
+        assert!(p.is_none(), "off-topic pick must be rejected");
     }
 
     /// 0907 反馈 P4: free generation is ONE round per call — a rejected

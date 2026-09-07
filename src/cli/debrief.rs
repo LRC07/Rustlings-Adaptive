@@ -804,7 +804,7 @@ fn step4_follow_up(
         println!("{row}");
     }
     println!("  [Enter] 回到对话（自动替你发一条消息，请教练安排下一题）");
-    println!("          [n] 留在做题页   [q] 返回做题页");
+    println!("          [n] 结束复盘，留在做题页（[q] 等效）");
 
     let ans = match read_line("复盘> ") {
         Line::Text(s) => s.trim().to_ascii_lowercase(),
@@ -939,6 +939,7 @@ fn f(x: u32) -> u32 {
             attempts: 1,
             status: crate::exercise::index::Status::Passed,
             last_error: None,
+            last_fail_error: None,
             hints: Vec::new(),
             feedback: None,
             slots: Default::default(),
