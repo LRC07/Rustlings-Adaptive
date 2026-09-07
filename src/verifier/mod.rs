@@ -570,19 +570,51 @@ mod tests {
     }
 
     #[test]
-    fn seed_exercises_act_as_fixtures() {
-        // traits1 is an unsolved template -> must fail;
-        // generics1 contains a full reference solution -> must pass 5 tests.
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let traits1 = fs::read_to_string(root.join("exercises/fixtures/traits/traits1.rs")).unwrap();
-        let generics1 = fs::read_to_string(root.join("exercises/fixtures/generics/generics1.rs")).unwrap();
-        let wd = temp_dir("seed");
-        let t = run_test_flow(&traits1, &wd, "traits1").unwrap();
-        assert!(!t.compiled, "unsolved traits1 should not compile");
+    fn verifier_end_to_end_on_inline_samples() {
+        // Replaces the former seed-fixture test (the shipped seeds were
+        // removed, 0907 反馈 P1): an unsolved sample must fail to compile
+        // with an extractable error code; a solved sample must pass all
+        // of its tests.
+        let unsolved = "\
+fn longest(a: String, b: String) -> String {
+    let keep = a;
+    let _again = a;
+    keep
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn t1() { assert_eq!(longest(\"a\".into(), \"bc\".into()), \"bc\"); }
+}
+";
+        let solved = "\
+// 完整解样例：全部测试通过。
+fn sum_all(v: &[i32]) -> i32 {
+    v.iter().sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn t1() { assert_eq!(sum_all(&[]), 0); }
+    #[test]
+    fn t2() { assert_eq!(sum_all(&[1]), 1); }
+    #[test]
+    fn t3() { assert_eq!(sum_all(&[1, 2]), 3); }
+    #[test]
+    fn t4() { assert_eq!(sum_all(&[-1, 1]), 0); }
+    #[test]
+    fn t5() { assert_eq!(sum_all(&[1, 2, 3]), 6); }
+}
+";
+        let wd = temp_dir("inline_samples");
+        let t = run_test_flow(unsolved, &wd, "unsolved").unwrap();
+        assert!(!t.compiled, "unsolved sample should not compile");
         assert!(t.diagnostics.iter().any(|d| d.is_error()));
-        // M4.5b C1: the first error-level code is extractable (the
-        // fixtures are development samples, not templates — the exact
-        // code is whatever the unfinished body happens to hit).
+        // M4.5b C1: the first error-level code is extractable.
         let first = t
             .diagnostics
             .iter()
@@ -590,7 +622,7 @@ mod tests {
             .and_then(|d| d.code.clone());
         assert!(matches!(first, Some(ref c) if c.starts_with('E')), "got {first:?}");
 
-        let g = run_test_flow(&generics1, &wd, "generics1").unwrap();
+        let g = run_test_flow(solved, &wd, "solved").unwrap();
         assert!(g.compiled);
         let test = g.test.unwrap();
         assert!(test.ok);

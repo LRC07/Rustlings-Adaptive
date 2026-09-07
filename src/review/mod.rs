@@ -195,9 +195,16 @@ pub fn impl_view(code: &str) -> &str {
 /// learner is NOT asked to remove — it carries zero review signal and
 /// used to be scolded as "scaffolding residue" by the LLM (9.6 手测).
 pub fn review_view(code: &str) -> String {
-    let no_marker =
-        code.lines().filter(|l| !l.contains("I AM NOT DONE")).collect::<Vec<_>>().join("\n");
-    impl_view(&no_marker).trim_end().to_string()
+    impl_view(&strip_marker(code)).trim_end().to_string()
+}
+
+/// Remove the rustlings progress marker lines. The marker is managed
+/// by the harness ("通过即自动完成，无需手动删除" — practice.rs) and
+/// must never reach the review/comparison/quiz/probe prompts: the LLM
+/// used to nit it or list "删标记" as an improvement direction
+/// (0907 反馈 P2).
+pub fn strip_marker(code: &str) -> String {
+    code.lines().filter(|l| !l.contains("I AM NOT DONE")).collect::<Vec<_>>().join("\n")
 }
 
 /// Run the deterministic layer over the user's full solution file.
@@ -370,7 +377,9 @@ const REVIEW_SYSTEM: &str = "\
 {\"verdict\":\"clean|suggestions|suspicious\",\"summary\":\"一句话总评\",\"findings\":[{\"kind\":\"idiom|readability|maintenance|design|logic\",\"severity\":\"minor|major\",\"message\":\"问题描述（中文，具体到行为止）\",\"better_way\":\"具体改法（中文）\"}]}
 verdict 判据：clean=惯用且无显著问题；suggestions=能过但有明确改进点；\
 suspicious=疑似绕过考点（如死代码里的 todo!、硬编码测试期望值、空壳实现、测试被改弱）。\
-findings 可为空数组；给不出具体改法就不要编造。";
+findings 可为空数组；给不出具体改法就不要编造。\
+只报有行为或可维护性影响的点：纯注释增删、格式排版这类外观改动不算问题；\
+文件里的进度标记由系统自动管理，与学习者无关，不要提及。";
 
 fn review_user_prompt(input: &ReviewInput) -> String {
     let mut p = String::new();
@@ -382,7 +391,7 @@ fn review_user_prompt(input: &ReviewInput) -> String {
     p.push_str("【题面】\n");
     p.push_str(input.body.trim());
     p.push_str("\n\n【学习者的解答（已通过全部测试）】\n```rust\n");
-    p.push_str(input.user_code.trim());
+    p.push_str(&strip_marker(&input.user_code));
     p.push_str("\n```\n");
     if let Some(r) = &input.reference {
         p.push_str("\n【参考解】\n```rust\n");
@@ -579,7 +588,7 @@ fn quiz_user_prompt(input: &ReviewInput, last_fail: Option<&str>) -> String {
         None => p.push_str("失败快照：无（一次通过，问题应问「这题在考什么」）\n"),
     }
     p.push_str(&format!("\n【题面】\n{}\n", input.body.trim()));
-    p.push_str(&format!("\n【学习者的最终解答】\n```rust\n{}\n```\n", input.user_code.trim()));
+    p.push_str(&format!("\n【学习者的最终解答】\n```rust\n{}\n```\n", strip_marker(&input.user_code)));
     if let Some(c) = &input.confusion {
         p.push_str(&format!("\n【本题针对的语言迁移直觉（出干扰项素材）】{c}\n"));
     }
@@ -790,7 +799,9 @@ maintenance=可维护性与扩展成本（加一种类型要改几处）、desig
 两个解都到 5 时就都给 5，不要为了拉开分差压分。\
 严格只输出 JSON（不要多余文字、不要代码围栏）：\
 {\"rows\":[{\"dim\":\"idiom|readability|maintenance|design\",\"user_score\":1,\"ref_score\":5,\"user_note\":\"学习者的短评与具体改法（中文）\",\"ref_note\":\"参考解短评（中文）\"}],\"takeaway\":\"一句话点评取舍：什么时候学习者的写法也可以接受\"}
-评分只评代码本身；题目约束（如禁止 clone）下的写法不算缺点。";
+评分只评代码本身；题目约束（如禁止 clone）下的写法不算缺点。\
+机器 clippy 计数可能包含题面自带代码触发的 lint（如题目固定了 &mut Vec 签名），\
+这类不算学习者的缺点，评分时注意甄别。";
 
 fn cmp_user_prompt(input: &ReviewInput, machine: &MachineComparison) -> String {
     let mut p = String::new();
@@ -800,7 +811,7 @@ fn cmp_user_prompt(input: &ReviewInput, machine: &MachineComparison) -> String {
     }
     p.push_str(&format!("\n【题面】\n{}\n", input.body.trim()));
     p.push_str("\n【学习者的解】\n```rust\n");
-    p.push_str(input.user_code.trim());
+    p.push_str(&strip_marker(&input.user_code));
     p.push_str("\n```\n");
     if let Some(r) = &input.reference {
         p.push_str("\n【参考解】\n```rust\n");
@@ -936,7 +947,7 @@ fn probe_user_prompt(input: &ReviewInput, suspicious_reason: &str) -> String {
         input.title,
         input.concepts.join("、"),
         input.body.trim(),
-        input.user_code.trim(),
+        strip_marker(&input.user_code),
         suspicious_reason,
     )
 }
@@ -1140,6 +1151,35 @@ mod tests {
         assert!(!view.contains("I AM NOT DONE"), "marker stripped: {view}");
         assert!(!view.contains("mod tests"), "test module stripped: {view}");
         assert!(view.contains("fn add"), "implementation kept: {view}");
+    }
+
+    /// 0907 反馈 P2: no LLM prompt may see the progress marker — the
+    /// reviewer used to nit "应删除该行" and the challenge listed
+    /// "删标记" as an improvement direction.
+    #[test]
+    fn prompts_never_see_the_progress_marker() {
+        let input = ReviewInput {
+            title: "标记".into(),
+            concepts: vec![],
+            body: "// 题\n".into(),
+            anti_patterns: vec![],
+            review_hints: None,
+            confusion: None,
+            reference: None,
+            user_code: "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n// I AM NOT DONE\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() { assert_eq!(add(1, 1), 2); }\n}\n".into(),
+            constraint_specs: vec![],
+            attempts: 0,
+        };
+        for (name, prompt) in [
+            ("review", review_user_prompt(&input)),
+            ("cmp", cmp_user_prompt(&input, &MachineComparison::default())),
+            ("quiz", quiz_user_prompt(&input, None)),
+            ("probe", probe_user_prompt(&input, "理由")),
+        ] {
+            assert!(!prompt.contains("I AM NOT DONE"), "{name} prompt saw the marker: {prompt}");
+            // The marker is stripped, everything else stays.
+            assert!(prompt.contains("fn add"), "{name} prompt lost the code");
+        }
     }
 
     #[test]

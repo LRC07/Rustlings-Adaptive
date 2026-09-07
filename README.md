@@ -176,7 +176,7 @@ src/config/     模型配置加载
 src/usage/      token/费用统计与预算拦截
 templates/      手写练习模板 ×60（TOML，覆盖并发/测试/转换等课件主题）
 taxonomy/       概念图谱定义
-exercises/      练习仓（内置样例题在 fixtures/；你生成的题落在 generated/）
+exercises/      练习仓（你生成的题落在 generated/，自动接线进 IDE）
 ```
 
 ## 测试

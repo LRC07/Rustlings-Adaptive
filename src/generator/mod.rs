@@ -529,7 +529,10 @@ pub fn generate_with_focus(
 /// Full-parameter entry for the agent tool: `mode` here is only the
 /// user-intent relay from M4.14 ("free" skips tiers 1/2 when the user
 /// explicitly asked for no-template generation); the strategy stays
-/// program-controlled otherwise.
+/// program-controlled otherwise. `free_preset_fail` (0907 反馈 P4) is
+/// the PREVIOUS free-round rejection reason: free generation runs ONE
+/// round per call and the tool asks the user before spending another —
+/// this preset is how the repair feedback survives across calls.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_full(
     topic: &Topic,
@@ -540,7 +543,18 @@ pub(crate) fn generate_full(
     learner: Option<&LearnerContext>,
     llm: Option<&mut dyn LlmCaller>,
     progress: Option<&mut dyn FnMut(GenerateStage)>,
+    free_preset_fail: &str,
 ) -> Result<Outcome> {
+    if matches!(mode, GenerateMode::Free) {
+        let Some(call) = llm else {
+            bail!("该模式需要 LLM；未配置 API Key");
+        };
+        let mut prog = progress;
+        if let Some(cb) = prog.as_mut() {
+            cb(GenerateStage { attempt: 1, total_attempts: 1, stage: "自由生成", note: None });
+        }
+        return generate_free(topic, focus, &load_linked_graph(paths)?, paths, learner, call, &mut prog, 1, free_preset_fail);
+    }
     generate_with_mode(topic, focus, mode, paths, history, learner, llm, progress)
 }
 
@@ -571,15 +585,11 @@ pub(crate) fn generate_with_mode(
         };
     }
 
-    let graph = ConceptGraph::load(&paths.taxonomy_file).context("概念图谱加载失败")?;
-    let mut graph = graph;
+    let graph = load_linked_graph(paths)?;
     let templates = template::load_dir(&paths.templates_dir).context("模板库加载失败")?;
     if templates.is_empty() {
         bail!("模板库为空（{}）", paths.templates_dir.display());
     }
-    let items: Vec<(&str, &[String])> =
-        templates.iter().map(|t| (t.id.as_str(), t.concepts.as_slice())).collect();
-    graph.link_templates(items).context("模板与概念图谱对不上")?;
 
     // Tier 1 always runs first (cheap; the other tiers need an LLM).
     if matches!(mode, GenerateMode::Auto | GenerateMode::Matched) {
@@ -617,8 +627,12 @@ pub(crate) fn generate_with_mode(
                 match generate_adapted(topic, focus, &templates, &graph, paths, learner, call, &mut progress) {
                     Ok(o) => Ok(o),
                     Err(tier2_err) => {
-                        stage!("自由生成", 1, LLM_ATTEMPTS);
-                        generate_free(topic, focus, &graph, paths, learner, call, &mut progress)
+                        // Free tier: ONE round (0907 反馈 P4) — burning
+                        // three expensive rounds inside the tool was the
+                        // "重试风暴" cost sink; further rounds are the
+                        // user's explicit choice (checkpoint in the tool).
+                        stage!("自由生成", 1, 1);
+                        generate_free(topic, focus, &graph, paths, learner, call, &mut progress, 1, "")
                             .map_err(|tier3_err| {
                                 anyhow!(
                                     "三层出题均失败。\n· 模板直配：{tier1_err:#}\n· 模板改编：{tier2_err:#}\n· 自由生成：{tier3_err:#}"
@@ -638,10 +652,25 @@ pub(crate) fn generate_with_mode(
             stage!("模板改编", 1, LLM_ATTEMPTS);
             generate_adapted(topic, focus, &templates, &graph, paths, learner, call, &mut progress)
         } else {
-            stage!("自由生成", 1, LLM_ATTEMPTS);
-            generate_free(topic, focus, &graph, paths, learner, call, &mut progress)
+            stage!("自由生成", 1, 1);
+            generate_free(topic, focus, &graph, paths, learner, call, &mut progress, 1, "")
         }
     }
+}
+
+/// Graph + template linkage shared by the mode entries (the draft
+/// prompt needs the concept id list; normalize_concepts needs the
+/// graph).
+fn load_linked_graph(paths: &Paths) -> Result<ConceptGraph> {
+    let mut graph = ConceptGraph::load(&paths.taxonomy_file).context("概念图谱加载失败")?;
+    let templates = template::load_dir(&paths.templates_dir).context("模板库加载失败")?;
+    if templates.is_empty() {
+        bail!("模板库为空（{}）", paths.templates_dir.display());
+    }
+    let items: Vec<(&str, &[String])> =
+        templates.iter().map(|t| (t.id.as_str(), t.concepts.as_slice())).collect();
+    graph.link_templates(items).context("模板与概念图谱对不上")?;
+    Ok(graph)
 }
 
 /// Append a tier-1 miss to the miss log (best-effort). Two kinds:
@@ -842,11 +871,18 @@ fn generate_adapted(
         call,
         progress,
         "模板改编",
+        LLM_ATTEMPTS,
+        "",
     )?;
     finish_draft(paths, draft, Tier::Adapted { base: base.id.clone() }, module_name, hints, attempts)
 }
 
-/// Tier 3: LLM produces an exercise from scratch.
+/// Tier 3: LLM produces an exercise from scratch. `max_rounds` is 1 in
+/// production (0907 反馈 P4: free rounds are the expensive kind — more
+/// rounds are the user's explicit choice via the tool's checkpoint);
+/// `preset_fail` carries the previous call's rejection reason so the
+/// repair feedback survives the per-round checkpoint loop.
+#[allow(clippy::too_many_arguments)]
 fn generate_free(
     topic: &Topic,
     focus: Option<&str>,
@@ -855,6 +891,8 @@ fn generate_free(
     learner: Option<&LearnerContext>,
     call: &mut dyn LlmCaller,
     progress: &mut Option<&mut dyn FnMut(GenerateStage)>,
+    max_rounds: u32,
+    preset_fail: &str,
 ) -> Result<Outcome> {
     let DraftResult { draft, module_name, hints, attempts } = llm_draft_loop(
         &topic.prompt_text(),
@@ -866,6 +904,8 @@ fn generate_free(
         call,
         progress,
         "自由生成",
+        max_rounds,
+        preset_fail,
     )?;
     finish_draft(paths, draft, Tier::Free, module_name, hints, attempts)
 }
@@ -926,6 +966,10 @@ pub const DRAFT_TIME_BUDGET: Duration = Duration::from_secs(420);
 
 /// The repair loop: prompt → parse → normalize → gate; failures (with
 /// the real rustc diagnostics) are fed back for the next round.
+/// `max_rounds` bounds the loop (3 for adapted; 1 for free — more free
+/// rounds are the user's explicit choice, 0907 反馈 P4). `preset_fail`
+/// seeds `last_fail` so a preset (cross-call) reason reaches even the
+/// first prompt.
 #[allow(clippy::too_many_arguments)]
 fn llm_draft_loop(
     request: &str,
@@ -937,12 +981,14 @@ fn llm_draft_loop(
     call: &mut dyn LlmCaller,
     progress: &mut Option<&mut dyn FnMut(GenerateStage)>,
     stage_label: &'static str,
+    max_rounds: u32,
+    preset_fail: &str,
 ) -> Result<DraftResult> {
     let concept_ids: Vec<String> = graph.ids().cloned().collect();
     let started = Instant::now();
-    let mut last_fail = String::new();
+    let mut last_fail = preset_fail.to_string();
     let mut prev_fail = String::new();
-    for attempt in 1..=LLM_ATTEMPTS {
+    for attempt in 1..=max_rounds {
         if crate::agent::is_interrupted() {
             crate::agent::reset_interrupt();
             bail!("已打断");
@@ -969,9 +1015,9 @@ fn llm_draft_loop(
         }
         prev_fail = last_fail.clone();
         if let Some(cb) = progress.as_mut() {
-            let note = (attempt > 1 && !last_fail.is_empty())
+            let note = (!last_fail.is_empty())
                 .then(|| last_fail.chars().take(110).collect::<String>());
-            cb(GenerateStage { attempt, total_attempts: LLM_ATTEMPTS, stage: stage_label, note });
+            cb(GenerateStage { attempt, total_attempts: max_rounds, stage: stage_label, note });
         }
 
         let prompt = draft_prompt(request, focus, base, &concept_ids, attempt, &last_fail, learner);
@@ -1036,7 +1082,7 @@ fn llm_draft_loop(
         }
     }
     bail!(
-        "连续 {LLM_ATTEMPTS} 轮未产出合格题目（最后原因：{last_fail}）。\
+        "连续 {max_rounds} 轮未产出合格题目（最后原因：{last_fail}）。\
          建议换一个更具体的主题或错误码（如 E0382，走模板直配），或 /model 切换更快的模型后重试。"
     )
 }
@@ -1156,10 +1202,14 @@ fn draft_prompt(
             b.title, b.body, b.tests, b.reference
         ),
         None => "## Reference exercise: none — free-form. Write the smallest exercise that \
-                 teaches the topic.\n"
+                 teaches the topic.\n\
+                 Discrimination is the whole point (0907 实测): the unfinished body must fail \
+                 to COMPILE with exactly the declared beginner mistake — a body that compiles, \
+                 or whose first error is unrelated to the topic/concepts, trains nothing and \
+                 is auto-rejected by the gate.\n"
             .into(),
     };
-    let retry = if attempt > 1 {
+    let retry = if attempt > 1 || !last_fail.is_empty() {
         format!(
             "\n## Your previous attempt FAILED the quality gate. Fix ALL of it:\n{last_fail}\n\
              Change your approach where needed; do not repeat it.\n"
@@ -2219,8 +2269,9 @@ fn add(a: i32, b: i32) -> i32 {
 
     /// M4.7: the draft loop must (a) request a token cap on the wire
     /// and (b) feed "length" truncations back as a compress-demand.
+    /// Runs on the ADAPTED tier: free is single-round since 0907 反馈 P4.
     #[test]
-    fn tier3_bounds_tokens_and_handles_truncation() {
+    fn draft_loop_bounds_tokens_and_handles_truncation() {
         let fx = Fixture::new();
         let paths = fx.paths();
         let caps = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -2251,9 +2302,9 @@ fn add(a: i32, b: i32) -> i32 {
         }
         let mut call = BoundedRecorder { rec, round: std::cell::Cell::new(0) };
         let out = generate_with_mode(
-            &Topic::FreeText("取余".into()),
+            &Topic::FreeText("加法".into()),
             None,
-            GenerateMode::Free,
+            GenerateMode::Adapted,
             &paths,
             &GenHistory::default(),
         None, // learner
@@ -2261,18 +2312,19 @@ fn add(a: i32, b: i32) -> i32 {
             None,
         )
         .unwrap();
-        assert_eq!(out.tier, Tier::Free);
+        assert_eq!(out.tier, Tier::Adapted { base: "mini-add".into() });
         let caps = caps.borrow();
         assert!(caps.iter().all(|&c| c == DRAFT_MAX_TOKENS), "cap must be {DRAFT_MAX_TOKENS}, got {caps:?}");
         assert_eq!(caps.len(), 2, "truncation triggered exactly one retry");
     }
 
     #[test]
-    fn tier3_repair_loop_feeds_gate_failures_back() {
+    fn repair_loop_feeds_gate_failures_back() {
         let fx = Fixture::new();
         let paths = fx.paths();
         // First round: a draft whose body compiles (gate rejects: no
         // compile failure → rule/gate failure). Second round: valid.
+        // Runs on the ADAPTED tier: free is single-round since 0907 反馈 P4.
         let bad = VALID_DRAFT_JSON.replace(r"let q: String = a;\n    q", "a % b");
         let calls = std::rc::Rc::new(std::cell::RefCell::new(0u32));
         let counter = calls.clone();
@@ -2288,9 +2340,9 @@ fn add(a: i32, b: i32) -> i32 {
             }
         };
         let out = generate_with_mode(
-            &Topic::FreeText("取余".into()),
+            &Topic::FreeText("加法".into()),
             None,
-            GenerateMode::Free,
+            GenerateMode::Adapted,
             &paths,
             &GenHistory::default(),
         None, // learner
@@ -2300,7 +2352,44 @@ fn add(a: i32, b: i32) -> i32 {
         .unwrap();
         assert_eq!(*calls.borrow(), 2, "repair loop retried once");
         assert_eq!(out.attempts, 2);
-        assert_eq!(out.tier, Tier::Free);
+        assert_eq!(out.tier, Tier::Adapted { base: "mini-add".into() });
+    }
+
+    /// 0907 反馈 P4: free generation is ONE round per call — a rejected
+    /// draft must not silently burn more rounds; the preset failure
+    /// (previous call's rejection) reaches the round-1 prompt.
+    #[test]
+    fn free_generation_is_single_round_with_preset_feedback() {
+        let fx = Fixture::new();
+        let paths = fx.paths();
+        // A draft whose body compiles → the gate rejects it every time.
+        let bad = VALID_DRAFT_JSON.replace(r"let q: String = a;\n    q", "a % b");
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let rec = calls.clone();
+        let mut call = move |prompt: &str| -> Result<LlmReply> {
+            rec.borrow_mut().push(prompt.to_string());
+            Ok(reply(&bad))
+        };
+        let err = generate_full(
+            &Topic::FreeText("取余".into()),
+            None,
+            GenerateMode::Free,
+            &paths,
+            &GenHistory::default(),
+            None, // learner
+            Some(&mut call),
+            None,
+            "上一轮：题目没有区分度（unfinished body 能编译）",
+        )
+        .unwrap_err();
+        let prompts = calls.borrow();
+        assert_eq!(prompts.len(), 1, "free tier must run exactly ONE round, got {}", prompts.len());
+        assert!(
+            prompts[0].contains("previous attempt FAILED"),
+            "preset failure must reach the round-1 prompt"
+        );
+        assert!(prompts[0].contains("题目没有区分度"), "preset reason text must be carried");
+        assert!(err.to_string().contains("1 轮"), "{err}");
     }
 
     #[test]

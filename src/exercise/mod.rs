@@ -1,11 +1,12 @@
 //! Exercise domain: discovery of `exercises/**/*.rs`, title parsing, and
 //! running a single exercise through `rustc --test`.
 //!
-//! M4.5a: seed exercises live under `exercises/fixtures/` and are
-//! excluded from the default discovery (they are development fixtures,
-//! not learner content); `discover_all` includes them. Every discovered
-//! exercise carries `rel_path` — its location relative to the exercises
-//! directory — which doubles as the exercise index key.
+//! Exercises under `exercises/fixtures/` are excluded from the default
+//! discovery (development fixtures, not learner content); the shipped
+//! seeds were removed (0907 反馈 P1) but the exclusion stays, so a
+//! user-local fixtures directory still never pollutes learner views.
+//! Every discovered exercise carries `rel_path` — its location relative
+//! to the exercises directory — which doubles as the exercise index key.
 
 pub mod index;
 

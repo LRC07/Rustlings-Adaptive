@@ -79,7 +79,9 @@ pub fn tool_schemas() -> Vec<Tool> {
                         "type": "string",
                         "enum": ["auto", "free"],
                         "description": "auto（默认）=分层出题：模板直配→改编→自由生成逐级回退；\
-                                        free=跳过模板直接自由生成。仅当用户明确要求『不用模板/自由生成』时才用 free"
+                                        free=跳过模板直接自由生成（每轮独立调用，被质量门拒绝即暂停并\
+                                        询问用户是否继续——按用户指示重试或退回 auto）。\
+                                        仅当用户明确要求『不用模板/自由生成』时才用 free"
                     }
                 },
                 "required": ["topic"]
@@ -164,6 +166,29 @@ impl ToolOutcome {
     }
 }
 
+/// Write the tool's internal generation usage into the tracker under
+/// the "generate" phase (0907 反馈 [记账]): it used to feed only the
+/// per-turn footer, so /usage's phase breakdown lacked a generate row
+/// AND the budget never saw tool-internal generation spend. Cost is
+/// what the CallerBridge computed under the gen phase's own prices;
+/// the model name is the gen phase's own.
+fn record_generate_usage(env: &AgentEnv, acc: &UsageAcc) {
+    if acc.calls == 0 {
+        return;
+    }
+    env.tracker
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .record(
+            &env.gen_cfg.model,
+            acc.input_tokens,
+            acc.output_tokens,
+            acc.reasoning_tokens,
+            acc.cost_usd,
+            "generate",
+        );
+}
+
 /// Dispatch a model-requested tool call. Unknown tools are an error
 /// (the agent loop converts it into an error JSON for the model).
 pub fn execute(name: &str, arguments: &str, env: &AgentEnv, progress: &dyn Fn(&str)) -> Result<ToolOutcome> {
@@ -186,11 +211,23 @@ fn list_concepts(env: &AgentEnv) -> Result<ToolOutcome> {
     let graph = ConceptGraph::load(&taxonomy_path(env))?;
     let nodes: Vec<Value> = graph
         .ids()
-        .filter_map(|id| graph.get(id).map(|n| json!({ "id": n.id, "name": n.name })))
+        .filter_map(|id| {
+            graph.get(id).map(|n| {
+                // error_codes included (0907 反馈 P3): the coach must
+                // anchor code explanations to THIS table instead of
+                // improvising a definition (E0384 was explained wrong
+                // three times when only ids/names were visible).
+                json!({ "id": n.id, "name": n.name, "error_codes": n.error_codes })
+            })
+        })
         .collect();
     let count = nodes.len();
     let mut value = json!({ "concepts": nodes });
-    value["note"] = json!("generate_exercise 的 topic 接受这些 id、其中文名、错误码（如 E0382）或自由文本");
+    value["note"] = json!(
+        "generate_exercise 的 topic 接受这些 id、其中文名、错误码（如 E0382）或自由文本。\
+         error_codes 是错误码→概念的权威映射：向用户解释某个 E0xxx 的含义时，先在此表中\
+         找到对应概念，按概念名（结合 check_code 的真实诊断）讲解，不要凭记忆定义错误码"
+    );
     Ok(ToolOutcome {
         note: Some(format!("概念图谱共 {count} 个节点")),
         ..ToolOutcome::plain(value)
@@ -285,11 +322,15 @@ fn learner_profile(env: &AgentEnv) -> Result<ToolOutcome> {
 // ---------------------------------------------------------------------------
 
 /// Bridge from the generator's one-shot `LlmCaller` to the shared
-/// `ChatTurnCaller`, accounting usage (R6) while it goes.
+/// `ChatTurnCaller`, accounting usage (R6) while it goes. Each call
+/// passes the budget gate first (0907 反馈 [记账]): tool-internal
+/// generation spend used to bypass the budget entirely.
 struct CallerBridge {
     caller: std::sync::Arc<dyn super::ChatTurnCaller>,
     input_price: f64,
     output_price: f64,
+    tracker: std::sync::Arc<std::sync::Mutex<usage::UsageTracker>>,
+    budget: Option<f64>,
     acc: UsageAcc,
 }
 
@@ -299,6 +340,8 @@ impl generator::LlmCaller for CallerBridge {
     }
 
     fn call_bounded(&mut self, prompt: &str, max_tokens: u32) -> Result<LlmReply> {
+        let total = self.tracker.lock().unwrap_or_else(|p| p.into_inner()).all_totals().cost_usd;
+        crate::usage::check_budget(total, self.budget)?;
         let cap = (max_tokens < u32::MAX).then_some(max_tokens);
         let out: TurnOutput =
             self.caller.chat_turn_bounded(&[ChatMessage::user(prompt.to_string())], &[], cap)?;
@@ -358,12 +401,26 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
     };
     // M9h (level 信号): learner profile steers L2/L3 drafts.
     let learner = generator::LearnerContext::from_local(&env.root.join("exercises"));
+    // 0907 反馈 P4 (跨调用记忆): a free-mode retry carries the previous
+    // round's rejection reason into its prompt, so the per-round
+    // checkpoint loop does not lose the repair feedback.
+    let free_preset = if matches!(mode, generator::GenerateMode::Free) {
+        env.free_fail_note
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     // M9l routing: generation bills under the generate phase's own
     // model/prices (falls back to the chat caller when unrouted).
     let mut bridge = CallerBridge {
         caller: env.gen_caller.clone(),
         input_price: env.gen_cfg.prices.input,
         output_price: env.gen_cfg.prices.output,
+        tracker: env.tracker.clone(),
+        budget: env.gen_cfg.budget_usd(),
         acc: UsageAcc::default(),
     };
     let outcome = match generator::generate_full(
@@ -394,9 +451,42 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
                 None => progress(&base),
             }
         }),
+        &free_preset,
     ) {
-        Ok(o) => o,
+        Ok(o) => {
+            env.free_fail_note
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .take();
+            o
+        }
         Err(e) => {
+            // 0907 反馈 P4: free generation costs one round per call;
+            // on rejection STOP and let the user decide (retry / fall
+            // back to templates / give up) instead of burning more
+            // expensive rounds inside the tool.
+            if matches!(mode, generator::GenerateMode::Free) {
+                let full = format!("{e:#}");
+                let reason = full.chars().take(800).collect::<String>();
+                *env.free_fail_note.lock().unwrap_or_else(|p| p.into_inner()) = Some(reason.clone());
+                record_generate_usage(env, &bridge.acc);
+                return Ok(ToolOutcome {
+                    value: json!({
+                        "ok": false,
+                        "checkpoint": "free_rejected",
+                        "reason": reason,
+                        "fallback": "自由生成第 1 轮被质量门拒绝。请把拒绝原因转述给用户，并让用户三选一：\
+                                     A) 再试一轮自由生成——用户同意后再次调用本工具（topic/focus 不变、mode=free），\
+                                     上一轮失败原因已记住并会作为修复反馈注入；\
+                                     B) 退回模板出题——再次调用本工具（mode=auto），更快更稳；\
+                                     C) 放弃本次出题。**不要自行在回复里编写练习题**\
+                                     ——未经本地三重校验的题目不可靠，这不是合格的替代品。",
+                    }),
+                    note: Some(format!("自由生成被质量门拒绝（暂停等待用户决定）：{reason}")),
+                    practice: None,
+                    usage: bridge.acc,
+                });
+            }
             // M4.7 fallback gate: a failed generation must NEVER turn
             // into a hand-written exercise by the model (no local
             // triple-verification, no rustc evidence, no archiving).
@@ -413,6 +503,7 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
                 .unwrap_or(&full)
                 .to_string();
             let reason = ellipsize(&full, 400);
+            record_generate_usage(env, &bridge.acc);
             return Ok(ToolOutcome {
                 value: json!({
                     "ok": false,
@@ -482,6 +573,7 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
              请在回复里向用户说明这一点。"
         );
     }
+    record_generate_usage(env, &bridge.acc);
     Ok(ToolOutcome {
         note: Some(format!(
             "生成成功：《{}》（{}，{}，第 {} 轮{}）",
@@ -723,6 +815,7 @@ mod tests {
             session_id: Some("session_test".to_string()),
             practice_note: None,
             open_loop_note: None,
+            free_fail_note: std::sync::Mutex::new(None),
         }
     }
 
@@ -801,11 +894,24 @@ mod tests {
 
     #[test]
     fn generate_exercise_offline_via_fixture() {
+        let root = fixture_root("offline");
+        let env = test_env(&root);
+        let out = execute(TOOL_GENERATE_EXERCISE, r#"{"topic": "t.c"}"#, &env, &|_| {}).unwrap();
+        assert_eq!(out.value["ok"], true);
+        assert_eq!(out.value["title"], "迷你");
+        let offer = out.practice.expect("practice offer set");
+        assert_eq!(offer.title, "迷你");
+        assert!(offer.path.exists(), "{}", offer.path.display());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Minimal generate-fixture root (templates/taxonomy/exercises).
+    fn fixture_root(tag: &str) -> std::path::PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("rs_tools_fx_{nanos}"));
+        let root = std::env::temp_dir().join(format!("rs_tools_fx_{tag}_{nanos}"));
         std::fs::create_dir_all(root.join("templates")).unwrap();
         std::fs::create_dir_all(root.join("taxonomy")).unwrap();
         std::fs::create_dir_all(root.join("exercises")).unwrap();
@@ -820,14 +926,100 @@ mod tests {
         )
         .unwrap();
         std::fs::write(root.join("exercises/lib.rs"), "//! fixture\n").unwrap();
+        root
+    }
 
-        let env = test_env(&root);
-        let out = execute(TOOL_GENERATE_EXERCISE, r#"{"topic": "t.c"}"#, &env, &|_| {}).unwrap();
-        assert_eq!(out.value["ok"], true);
-        assert_eq!(out.value["title"], "迷你");
-        let offer = out.practice.expect("practice offer set");
-        assert_eq!(offer.title, "迷你");
-        assert!(offer.path.exists(), "{}", offer.path.display());
+    /// Caller whose every turn returns non-JSON content: the draft loop
+    /// rejects it ("没有 JSON 对象") round after round. Records the
+    /// prompts it saw (cross-call preset assertions).
+    struct GarbageCaller {
+        prompts: std::sync::Mutex<Vec<String>>,
+    }
+    impl super::super::ChatTurnCaller for GarbageCaller {
+        fn chat_turn(&self, m: &[ChatMessage], _t: &[Tool]) -> Result<TurnOutput> {
+            if let Some(last) = m.iter().rev().find(|x| x.role == "user") {
+                self.prompts.lock().unwrap().push(last.content.clone().unwrap_or_default());
+            }
+            Ok(TurnOutput {
+                content: Some("这不是 JSON".into()),
+                tool_calls: vec![],
+                usage: crate::llm::Usage {
+                    prompt_tokens: 100,
+                    completion_tokens: 10,
+                    reasoning_tokens: 0,
+                },
+                finish_reason: Some("stop".into()),
+                interrupted: false,
+                usage_estimated: false,
+            })
+        }
+    }
+
+    /// 0907 反馈 P4: a rejected free generation returns the user-decision
+    /// checkpoint (not the plain fallback), remembers the reason for the
+    /// retry call's prompt, and its LLM usage lands in the tracker under
+    /// the generate phase (0907 [记账]).
+    #[test]
+    fn free_generate_rejection_checkpoints_and_remember() {
+        let root = fixture_root("free_ck");
+        let mut env = test_env(&root);
+        let gcaller = Arc::new(GarbageCaller { prompts: std::sync::Mutex::new(Vec::new()) });
+        env.gen_caller = gcaller.clone();
+        // 1st call: rejected → checkpoint + memory.
+        let out = execute(
+            TOOL_GENERATE_EXERCISE,
+            r#"{"topic": "t.c", "mode": "free"}"#,
+            &env,
+            &|_| {},
+        )
+        .unwrap();
+        assert_eq!(out.value["checkpoint"], "free_rejected", "{out:?}");
+        assert_eq!(out.value["ok"], false);
+        assert!(out.note.as_deref().unwrap().contains("自由生成"));
+        assert!(env.free_fail_note.lock().unwrap().is_some(), "reason remembered");
+        // Usage recorded under generate (phase breakdown / budget).
+        let phases = env.tracker.lock().unwrap().session_by_phase();
+        assert!(
+            phases.iter().any(|(p, t)| p == "generate" && t.calls >= 1),
+            "generate phase missing from {phases:?}"
+        );
+        // 2nd call: the remembered reason rides the round-1 prompt.
+        let _ = execute(TOOL_GENERATE_EXERCISE, r#"{"topic": "t.c", "mode": "free"}"#, &env, &|_| {})
+            .unwrap();
+        let prompts = gcaller.prompts.lock().unwrap().clone();
+        assert!(prompts.len() >= 2, "{prompts:?}");
+        assert!(
+            !prompts[0].contains("previous attempt FAILED"),
+            "first call must be a fresh ask"
+        );
+        assert!(
+            prompts[1].contains("previous attempt FAILED") && prompts[1].contains("没有 JSON"),
+            "retry prompt must carry the previous rejection, got: {}",
+            prompts[1]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 0907 反馈 [记账]: the tool's internal generation calls pass the
+    /// budget gate like every other LLM path.
+    #[test]
+    fn free_generate_respects_budget() {
+        let root = fixture_root("free_budget");
+        let mut env = test_env(&root);
+        env.gen_cfg.budget = Some(crate::config::Budget { usd: 0.0 });
+        let out = execute(
+            TOOL_GENERATE_EXERCISE,
+            r#"{"topic": "t.c", "mode": "free"}"#,
+            &env,
+            &|_| {},
+        )
+        .unwrap();
+        assert_eq!(out.value["checkpoint"], "free_rejected", "{out:?}");
+        assert!(
+            out.value["reason"].as_str().unwrap().contains("预算"),
+            "budget block must surface as the reason: {out:?}"
+        );
+        assert!(env.free_fail_note.lock().unwrap().is_some());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

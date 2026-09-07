@@ -803,7 +803,8 @@ fn step4_follow_up(
     for row in render::panel(&format!("复盘剧场 · 《{}》", meta.title), &summary, &sections) {
         println!("{row}");
     }
-    println!("  [Enter] 回到对话让教练安排下一题   [n] 留在做题页   [q] 返回做题页");
+    println!("  [Enter] 回到对话（自动替你发一条消息，请教练安排下一题）");
+    println!("          [n] 留在做题页   [q] 返回做题页");
 
     let ans = match read_line("复盘> ") {
         Line::Text(s) => s.trim().to_ascii_lowercase(),

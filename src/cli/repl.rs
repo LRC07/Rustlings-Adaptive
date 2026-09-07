@@ -723,8 +723,8 @@ fn print_help() {
     println!("    /clear      清屏（/clear all 连同回滚缓冲区一起清）");
     println!("    /ui         界面模式：/ui view 视口重绘（默认）｜ /ui scroll 滚动");
     println!("    /topics     查看概念图谱（出题主题的权威列表）");
-    println!("    /practice   做题模式（本会话/按主题/全库分区，/practice all 含种子题；");
-    println!("                题目页可 [a] 问教练、[f] 反馈难度）");
+    println!("    /practice   做题模式（本会话/按主题/全库分区；题目页可 [a] 问教练、");
+    println!("                [f] 反馈难度）");
     println!("    /generate   直接生成练习（可带主题：/g E0382；离线也可用）");
     println!("    /model      模型档案：/model 列表，/model <名> 切换；new 新建、rm <名> 删除");
     println!("    /usage      用量与花费（本次会话 / 累计 / 预算余量）");
@@ -947,6 +947,7 @@ fn agent_turn(
         session_id: Some(session.id.clone()),
         practice_note,
         open_loop_note,
+        free_fail_note: Mutex::new(None),
     };
     let history = session.messages.clone();
     let input = input.to_string();

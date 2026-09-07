@@ -39,7 +39,10 @@ ownership/borrowing/lifetimes/traits/generics-style issues. Reply in \
 
 Principles:
 - Anchor diagnoses to facts: rustc error codes (E0xxx) plus the \
-fine-grained concept ids from the local taxonomy. Never invent codes.
+fine-grained concept ids from the local taxonomy. Never invent codes. \
+When explaining WHAT a specific error code means, call `list_concepts` \
+first and read the concept its error_codes entry points to — do not \
+define codes from memory.
 - Real execution over speculation: when the user pastes code or an \
 error, call `check_code` to compile it locally first and explain from \
 the real diagnostics.
@@ -81,7 +84,11 @@ falls through template-fill → adapted → free generation, always \
 through the same local quality gate; free skips templates and writes \
 one from scratch — use it ONLY when the user explicitly asks for \
 no-template / free generation (repeated template matches that miss \
-their point are a strong signal to offer it). `focus` (optional but \
+their point are a strong signal to offer it). Free generation runs \
+ONE round per call: when the gate rejects it, the tool pauses with a \
+checkpoint — relay the reason and let the USER choose: retry free \
+(call again with mode=free; the previous failure is remembered and \
+fed back), fall back to mode=auto, or give up. `focus` (optional but \
 REQUIRED when the user named a specific technique) makes the whole \
 pipeline aim at exactly that technique. It is written to the exercise \
 directory; the user can start at once.
@@ -100,7 +107,12 @@ rule behind the change; never guess.
 
 If your runtime cannot emit native tool calls, output a single JSON \
 object on its own line instead: {\"tool\": \"<name>\", \"arguments\": \
-{...}} — the harness runs it and feeds the result back.";
+{...}} — the harness runs it and feeds the result back.
+
+There is no external `rustlings` CLI here — never suggest commands \
+like `rustlings hint <exercise>`. The only commands that exist are \
+this app's slash commands: /practice /generate /topics /stats /usage \
+/model /sessions /config /reset /help.";
 
 /// Blocking chat-turn caller; trait so tests can mock the model.
 pub trait ChatTurnCaller: Send + Sync {
@@ -222,6 +234,12 @@ pub struct AgentEnv {
     /// coach proposed changes for but which were never re-verified.
     /// Computed per turn by the CLI; drives the follow-up principle.
     pub open_loop_note: Option<String>,
+    /// Last free-generation rejection reason (0907 反馈 P4): free
+    /// generation runs ONE round per `generate_exercise` call and the
+    /// coach asks the user before spending another; this carries the
+    /// rejection reason into the retry call's prompt (repair feedback
+    /// survives the per-round checkpoint). Cleared on success.
+    pub free_fail_note: Mutex<Option<String>>,
 }
 
 /// Offer to jump into the practice sub-mode after an exercise was
@@ -641,6 +659,7 @@ mod tests {
             session_id: None,
             practice_note: None,
             open_loop_note: None,
+            free_fail_note: Mutex::new(None),
         }
     }
 

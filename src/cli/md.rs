@@ -318,6 +318,13 @@ fn styled_line(
             cells.push((c, *style));
         }
     }
+    // Trim the LINE's trailing spaces only (0907 反馈 [渲染]: the old
+    // per-run trim_end ate the space at span boundaries — "使用 `x` 来"
+    // rendered as "使用x来"). Interior spaces, including between a code
+    // span and CJK text, are content.
+    while cells.last().is_some_and(|(c, _)| *c == ' ') {
+        cells.pop();
+    }
     let pad = " ".repeat(indent);
     let mut out = String::new();
     let mut i = 0;
@@ -354,10 +361,6 @@ fn styled_line(
 
 fn emit_run(p: &Painter, cells: &[(char, Style)], style: Style, heading: bool, out: &mut String) {
     let text: String = cells.iter().map(|(c, _)| c).collect();
-    let text = text.trim_end().to_string();
-    if text.is_empty() {
-        return;
-    }
     let painted = match style {
         Style::Bold if heading => p.cyan(&text),
         Style::Bold => p.bold(&text),
@@ -588,6 +591,25 @@ mod tests {
         assert!(out.contains("\x1B[1m重点\x1B[0m"), "{out}");
         assert!(out.contains("\x1B[36mE0382\x1B[0m"), "{out}");
         assert!(!out.contains("**"), "{out}");
+    }
+
+    /// 0907 反馈 [渲染]: the old per-run trim_end ate the space at
+    /// style-span boundaries — CJK text next to a code/bold span lost
+    /// its separating space on screen (the exported raw text was fine).
+    #[test]
+    fn inline_span_boundary_spaces_survive() {
+        let out = render("使用 `Vec<i32>` 来存储元素", 200, true);
+        assert!(out.contains("使用 \x1B[36mVec<i32>\x1B[0m 来存储元素"), "{out}");
+        let out = render("先说 **所有权** 再说别的", 200, true);
+        assert!(out.contains("先说 \x1B[1m所有权\x1B[0m 再说别的"), "{out}");
+    }
+
+    /// Trailing spaces at the very END of a line are still not shown.
+    #[test]
+    fn styled_line_trims_only_line_end_spaces() {
+        let p = Painter { ansi: false };
+        let out = styled_line(&p, "hello `x`  ", 80, 0, Style::Plain, false);
+        assert_eq!(out, "hello x");
     }
 
     #[test]

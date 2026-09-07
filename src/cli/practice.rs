@@ -5,8 +5,9 @@
 //! M4.5a layout (docs/出题规划_M4.5.md §3.2):
 //! - Three views: **home** (this session's exercises first, then a
 //!   per-topic overview), **topic** (one topic's exercises), **all**
-//!   (every learner exercise, grouped by topic). Seed fixtures live in
-//!   their own topic and only appear under `/practice all`.
+//!   (every learner exercise, grouped by topic). Exercises under
+//!   `exercises/fixtures/` never appear (development fixtures only;
+//!   the shipped seeds were removed — 0907 反馈 P1).
 //! - Every exercise is backed by the exercise index (`ExerciseIndex`):
 //!   status marks, attempts, last error code, quality feedback (`f`).
 //! - The exercise page is a card (concepts / difficulty / source /
@@ -47,7 +48,8 @@ impl PracticeCtx {
 /// Entry options for the practice board.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct EnterOpts<'s> {
-    /// `/practice all`: include the seed fixtures topic.
+    /// `/practice all`: also include fixtures-group exercises
+    /// (user-local development fixtures; none ship with the repo).
     pub include_fixtures: bool,
     /// This session's produced exercises (index keys, in order).
     pub session_paths: &'s [String],
