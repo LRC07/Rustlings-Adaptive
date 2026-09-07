@@ -567,11 +567,15 @@ fn run_exercise(
                     item.ex.name
                 );
                 // M5.2: review gate on the first pass (seed fixtures and
-                // gateless entries keep the plain flow).
+                // gateless entries keep the plain flow). The debrief tail
+                // returns one of THREE exits (0909 反馈): hand the
+                // next-exercise request to the coach, return to chat with
+                // nothing sent, or stay in the exercise menu.
                 if !was_passed_before
                     && let (Some(deps), Some(m)) = (debrief, meta.as_ref())
                     && !matches!(m.source, crate::exercise::index::Source::Seed)
-                    && let Some(msg) = debrief::after_pass(
+                {
+                    match debrief::after_pass(
                         deps,
                         index,
                         &key,
@@ -580,9 +584,11 @@ fn run_exercise(
                         &ctx.repo_root,
                         last_fail.as_deref(),
                         hint_idx > 0,
-                    )
-                {
-                    return ExerciseExit::Handback(msg);
+                    ) {
+                        debrief::DebriefExit::AskNext(msg) => return ExerciseExit::Handback(msg),
+                        debrief::DebriefExit::Chat => return ExerciseExit::Chat,
+                        debrief::DebriefExit::Stay => {}
+                    }
                 }
             }
             println!();

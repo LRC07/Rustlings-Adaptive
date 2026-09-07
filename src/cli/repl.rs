@@ -170,7 +170,11 @@ pub(crate) fn run() {
                 match practice::enter(&practice_ctx, opts, Some(&deps)) {
                     Some(msg) => {
                         repaint_chat(&session, &cfg, &tracker);
-                        println!("{} [问教练] 把练习代码带回对话", super::render::bold("你>"));
+                        println!(
+                            "{} {}",
+                            super::render::bold("你>"),
+                            handback_label(&msg)
+                        );
                         agent_turn(&mut session, &msg, &cfg, &tracker, &client, &practice_ctx, &mut open_loop_seen);
                     }
                     None => repaint_chat(&session, &cfg, &tracker),
@@ -280,6 +284,18 @@ fn repaint_chat(session: &Session, cfg: &ModelConfig, tracker: &Arc<Mutex<UsageT
 
 fn current_spent(tracker: &Arc<Mutex<UsageTracker>>) -> f64 {
     tracker.lock().unwrap_or_else(|p| p.into_inner()).all_totals().cost_usd
+}
+
+/// Echo label for a practice→chat handback. Two producers share the
+/// channel with different semantics (0909 反馈): `[a]` 问教练 brings the
+/// exercise code back, the debrief tail's `[g]` auto-sends the
+/// next-exercise request — the echo must say which.
+fn handback_label(msg: &str) -> &'static str {
+    if msg.starts_with("我刚完成练习") {
+        "（复盘 · 自动）请教练安排下一题"
+    } else {
+        "[问教练] 把练习代码带回对话"
+    }
 }
 
 /// `/model` — list, switch, create (`new`) or remove (`rm <名>`) named
@@ -1130,7 +1146,7 @@ fn agent_turn(
                             let deps = debrief_deps(&rev_cfg, tracker, &rev_client);
                             if let Some(msg) = practice::enter_at(practice_ctx, &offer.path, opts, Some(&deps)) {
                                 repaint_chat(session, cfg, tracker);
-                                println!("{} [问教练] 把练习代码带回对话", super::render::bold("你>"));
+                                println!("{} {}", super::render::bold("你>"), handback_label(&msg));
                                 agent_turn(session, &msg, cfg, tracker, client, practice_ctx, open_loop_seen);
                                 return;
                             }

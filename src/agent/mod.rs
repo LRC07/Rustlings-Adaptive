@@ -91,7 +91,9 @@ their point are a strong signal to offer it). Free generation runs \
 ONE round per call: when the gate rejects it, the tool pauses with a \
 checkpoint — relay the reason and let the USER choose: retry free \
 (call again with mode=free; the previous failure is remembered and \
-fed back), fall back to mode=auto, or give up. `focus` (optional but \
+fed back), fall back to mode=auto, or give up. Do NOT call the tool \
+again before the user picked — an unbidden retry burns money and \
+litters the transcript. `focus` (optional but \
 REQUIRED when the user named a specific technique) makes the whole \
 pipeline aim at exactly that technique. It is written to the exercise \
 directory; the user can start at once.

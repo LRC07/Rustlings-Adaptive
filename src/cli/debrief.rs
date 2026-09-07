@@ -215,8 +215,6 @@ fn make_caller(deps: &DebriefDeps) -> Option<Box<dyn ReviewCaller + Send>> {
 
 /// Run the review gate after a first-time pass, render the verdict and
 /// persist it on the index entry, then walk the debrief steps (§4.3).
-/// Returns a follow-up coach message when the debrief decided to hand
-/// back to the conversation (M5.4).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn after_pass(
     deps: &DebriefDeps,
@@ -227,10 +225,10 @@ pub(crate) fn after_pass(
     repo_root: &Path,
     last_fail: Option<&str>,
     used_hints: bool,
-) -> Option<String> {
+) -> DebriefExit {
     let Ok(content) = std::fs::read_to_string(&ex.path) else {
         println!("  （无法读取练习文件，跳过评审门）");
-        return None;
+        return DebriefExit::Stay;
     };
     let attempts_before = meta.attempts.saturating_sub(1);
     let mut input = build_input(repo_root, meta, &content, attempts_before);
@@ -243,9 +241,12 @@ pub(crate) fn after_pass(
     // 9.5 实测：the gate's LLM call can run for minutes on slow
     // endpoints — set the expectation up front.
     println!("  （评审门需要模型评审解答，端点慢时可能需要 1–2 分钟）");
-    let outcome = run_with_spinner("评审：模型评审解答…", |progress| {
+    let outcome = match run_with_spinner("评审：模型评审解答…", |progress| {
         review::run_gate(caller, input2, progress)
-    })?;
+    }) {
+        Some(o) => o,
+        None => return DebriefExit::Stay,
+    };
     render_gate(&outcome);
     index.set_review_verdict(key, outcome.verdict.key());
 
@@ -302,6 +303,21 @@ pub(crate) fn after_pass(
         attempts_before,
         used_hints,
     )
+}
+
+/// The debrief tail's three exits (0909 反馈): the learner here has
+/// exactly THREE decisions — go back to the chat WITHOUT any injected
+/// message, stay in the practice pages, or hand the next-exercise
+/// request to the coach in one keypress. The old [Enter]/[n]/[q] row
+/// mapped onto these badly: [Enter] FORCED an injected message and
+/// [n]/[q] were the same action with two labels.
+pub(crate) enum DebriefExit {
+    /// Back to the exercise menu.
+    Stay,
+    /// Back to the chat, nothing sent.
+    Chat,
+    /// Back to the chat, auto-send the next-exercise request.
+    AskNext(String),
 }
 
 /// Render the gate outcome (静态逐项 → LLM 评审 → probe → 最终判定).
@@ -574,7 +590,7 @@ fn step2_challenge(
 
     loop {
         println!();
-        println!("  [r] 改好了，重跑并重新评审   [e] 编辑   [s] 看参考解   [Enter] 结束复盘");
+        println!("  [r] 改好了，重跑并重新评审   [e] 编辑   [s] 看参考解   [Enter] 跳过挑战，继续复盘");
         let ans = ask("挑战> ")?;
         match ans.trim() {
             "" | "b" | "q" => return None,
@@ -592,7 +608,7 @@ fn step2_challenge(
                 None => println!("  （本题没有持久化的参考解）"),
             },
             other if other.starts_with('/') => {
-                println!("  复盘页内不处理斜杠命令——按 Enter 结束复盘，回对话后再使用（/exit 同）。")
+                println!("  复盘页内不处理斜杠命令——按 Enter 跳过挑战，复盘结束后回对话再使用（/exit 同）。")
             }
             "r" => {
                 let res = crate::exercise::compile_and_run(ex);
@@ -739,9 +755,10 @@ fn dim_cn(dim: &str) -> &str {
 // Debrief Step 4: follow-up decision + handback (§4.3)
 // ---------------------------------------------------------------------------
 
-/// Step 4: deterministic follow-up decision, then offer to hand the
-/// result back to the conversation (the coach then arranges the next
-/// exercise through the history-aware generator). Some(msg) = handback.
+/// Step 4: deterministic follow-up decision, then the tail menu. The
+/// three exits map one-to-one onto the learner's decisions (0909 反馈):
+/// [Enter]/[q] back to chat with nothing sent, [n] stays in practice,
+/// [g] auto-sends the next-exercise request.
 #[allow(clippy::too_many_arguments)]
 fn step4_follow_up(
     deps: &DebriefDeps,
@@ -753,7 +770,7 @@ fn step4_follow_up(
     cmp: Option<(review::MachineComparison, Option<review::LlmComparison>, bool)>,
     attempts_before: u32,
     used_hints: bool,
-) -> Option<String> {
+) -> DebriefExit {
     println!();
     // ── M9b: the debrief theatre — verdict, comparison and the next
     // step in ONE framed panel (fixed content, single screen).
@@ -803,56 +820,69 @@ fn step4_follow_up(
     for row in render::panel(&format!("复盘剧场 · 《{}》", meta.title), &summary, &sections) {
         println!("{row}");
     }
-    println!("  [Enter] 回到对话（自动替你发一条消息，请教练安排下一题）");
-    println!("          [n] 结束复盘，留在做题页（[q] 等效）");
+    println!("  [Enter] 回到对话（不附加消息）   [n] 留在做题页");
+    println!("          [g] 让教练推荐下一题（自动发一条消息）   [q] 同 [Enter]");
 
     let ans = match read_line("复盘> ") {
         Line::Text(s) => s.trim().to_ascii_lowercase(),
         Line::Interrupted | Line::Eof => "n".to_string(),
     };
     match ans.as_str() {
-        "" | "y" | "yes" => {
-            let verdict_cn = outcome.verdict.label_cn();
-            let check = match explanation_hit {
-                Some(true) => "解释校核：命中",
-                Some(false) => "解释校核：未命中（已给出正确理解）",
-                None => "解释校核：跳过",
-            };
-            let hint_note = if deps.client.is_some() {
-                String::new()
-            } else {
-                "（离线复盘：无 LLM 评审）".to_string()
-            };
-            let fail_note = last_fail
-                .map(|c| format!("\n我之前失败时的报错：{c}"))
-                .unwrap_or_default();
-            let ask = match &follow_up {
-                review::FollowUp::NextConcept => {
-                    "请结合我的错误画像，推荐并生成下一个概念的新练习（调用 generate_exercise）。".to_string()
-                }
-                review::FollowUp::Variant { extra_constraint: true } => format!(
-                    "请为概念「{}」生成一道变式练习，并附加一个更严的约束（调用 generate_exercise，\
-                     这是系统根据评审判定给出的建议）。",
-                    meta.concepts.join("、")
-                ),
-                review::FollowUp::Variant { extra_constraint: false } => format!(
-                    "请为概念「{}」生成一道变式练习（同概念换场景/换值，调用 generate_exercise）。",
-                    meta.concepts.join("、")
-                ),
-                review::FollowUp::EasierVariant => format!(
-                    "请为概念「{}」生成一道更简单的变式练习（调用 generate_exercise），\
-                     并帮我回看之前的报错理解薄弱点。",
-                    meta.concepts.join("、")
-                ),
-            };
-            Some(format!(
-                "我刚完成练习《{}》的复盘。\n· 评审判定：{verdict_cn}\n· {check}{hint_note}{fail_note}\n· 系统判断：{}\n\n{ask}\n（如果你不想继续做题，直接告诉我即可。）",
-                meta.title,
-                follow_up.label_cn(),
-            ))
+        "" | "q" => DebriefExit::Chat,
+        "g" | "y" | "yes" => {
+            DebriefExit::AskNext(build_ask_next(deps, meta, outcome, explanation_hit, last_fail, &follow_up))
         }
-        _ => None,
+        _ => DebriefExit::Stay,
     }
+}
+
+/// The auto-sent coach request for the debrief tail's [g] (the old
+/// [Enter] behavior).
+fn build_ask_next(
+    deps: &DebriefDeps,
+    meta: &ExerciseMeta,
+    outcome: &review::GateOutcome,
+    explanation_hit: Option<bool>,
+    last_fail: Option<&str>,
+    follow_up: &review::FollowUp,
+) -> String {
+    let verdict_cn = outcome.verdict.label_cn();
+    let check = match explanation_hit {
+        Some(true) => "解释校核：命中",
+        Some(false) => "解释校核：未命中（已给出正确理解）",
+        None => "解释校核：跳过",
+    };
+    let hint_note = if deps.client.is_some() {
+        String::new()
+    } else {
+        "（离线复盘：无 LLM 评审）".to_string()
+    };
+    let fail_note =
+        last_fail.map(|c| format!("\n我之前失败时的报错：{c}")).unwrap_or_default();
+    let ask = match follow_up {
+        review::FollowUp::NextConcept => {
+            "请结合我的错误画像，推荐并生成下一个概念的新练习（调用 generate_exercise）。".to_string()
+        }
+        review::FollowUp::Variant { extra_constraint: true } => format!(
+            "请为概念「{}」生成一道变式练习，并附加一个更严的约束（调用 generate_exercise，\
+             这是系统根据评审判定给出的建议）。",
+            meta.concepts.join("、")
+        ),
+        review::FollowUp::Variant { extra_constraint: false } => format!(
+            "请为概念「{}」生成一道变式练习（同概念换场景/换值，调用 generate_exercise）。",
+            meta.concepts.join("、")
+        ),
+        review::FollowUp::EasierVariant => format!(
+            "请为概念「{}」生成一道更简单的变式练习（调用 generate_exercise），\
+             并帮我回看之前的报错理解薄弱点。",
+            meta.concepts.join("、")
+        ),
+    };
+    format!(
+        "我刚完成练习《{}》的复盘。\n· 评审判定：{verdict_cn}\n· {check}{hint_note}{fail_note}\n· 系统判断：{}\n\n{ask}\n（如果你不想继续做题，直接告诉我即可。）",
+        meta.title,
+        follow_up.label_cn(),
+    )
 }
 
 // ---------------------------------------------------------------------------

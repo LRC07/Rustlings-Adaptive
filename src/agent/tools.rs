@@ -470,19 +470,27 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
                 let reason = full.chars().take(800).collect::<String>();
                 *env.free_fail_note.lock().unwrap_or_else(|p| p.into_inner()) = Some(reason.clone());
                 record_generate_usage(env, &bridge.acc);
+                let head = if free_preset.is_empty() {
+                    "自由生成被质量门拒绝，已暂停等待用户选择（再试一轮/退回模板/放弃）"
+                } else {
+                    "自由生成重试仍被拒，已再次暂停等待用户选择（再试一轮/退回模板/放弃）"
+                };
                 return Ok(ToolOutcome {
                     value: json!({
                         "ok": false,
                         "checkpoint": "free_rejected",
                         "reason": reason,
-                        "fallback": "自由生成第 1 轮被质量门拒绝。请把拒绝原因转述给用户，并让用户三选一：\
-                                     A) 再试一轮自由生成——用户同意后再次调用本工具（topic/focus 不变、mode=free），\
-                                     上一轮失败原因已记住并会作为修复反馈注入；\
-                                     B) 退回模板出题——再次调用本工具（mode=auto），更快更稳；\
-                                     C) 放弃本次出题。**不要自行在回复里编写练习题**\
-                                     ——未经本地三重校验的题目不可靠，这不是合格的替代品。",
+                        "fallback": "自由生成被质量门拒绝。**立即停止调用工具**：先把拒绝原因转述给用户，\
+                                     然后让用户三选一——\
+                                     A) 再试一轮自由生成（用户同意后再次调用本工具，topic/focus 不变、mode=free，\
+                                     上一轮失败原因已记住并会作为修复反馈注入）；\
+                                     B) 退回模板出题（再次调用本工具，mode=auto，更快更稳）；\
+                                     C) 放弃本次出题。\
+                                     **在用户明确选择之前，绝不要自行再次调用本工具**——\
+                                     那会烧掉用户的钱并让输出混乱；\
+                                     **也不要自行在回复里编写练习题**——未经本地三重校验的题目不可靠。",
                     }),
-                    note: Some(format!("自由生成被质量门拒绝（暂停等待用户决定）：{reason}")),
+                    note: Some(format!("{head}｜原因：{reason}")),
                     practice: None,
                     usage: bridge.acc,
                 });
@@ -574,9 +582,10 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
         );
     }
     record_generate_usage(env, &bridge.acc);
+    let head = if free_preset.is_empty() { "生成成功" } else { "自由生成重试成功" };
     Ok(ToolOutcome {
         note: Some(format!(
-            "生成成功：《{}》（{}，{}，第 {} 轮{}）",
+            "{head}：《{}》（{}，{}，第 {} 轮{}）",
             outcome.title,
             outcome.difficulty.name_cn(),
             outcome.tier.label_cn(),
@@ -975,7 +984,15 @@ mod tests {
         .unwrap();
         assert_eq!(out.value["checkpoint"], "free_rejected", "{out:?}");
         assert_eq!(out.value["ok"], false);
-        assert!(out.note.as_deref().unwrap().contains("自由生成"));
+        // 0909 反馈: the checkpoint must DEMAND a user decision (the
+        // coach used to retry unbidden) and the trace note must label
+        // the pause, so failure/success notes from separate calls stay
+        // distinguishable.
+        assert!(out.note.as_deref().unwrap().contains("等待用户选择"), "{out:?}");
+        assert!(
+            out.value["fallback"].as_str().unwrap().contains("绝不要自行再次调用本工具"),
+            "{out:?}"
+        );
         assert!(env.free_fail_note.lock().unwrap().is_some(), "reason remembered");
         // Usage recorded under generate (phase breakdown / budget).
         let phases = env.tracker.lock().unwrap().session_by_phase();
