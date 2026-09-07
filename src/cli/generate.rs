@@ -117,7 +117,7 @@ pub(crate) fn cmd_generate(
     }
 
     let client = crate::cli::make_client(cfg);
-    let llm: Option<&mut dyn generator::LlmCaller> = match client.as_ref() {
+    let llm: Option<&mut dyn generator::TieredLlmCaller> = match client.as_ref() {
         Some(cl) => Some(&mut CliCaller {
             client: cl,
             model: &cfg.model,

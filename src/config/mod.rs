@@ -243,8 +243,13 @@ pub struct ModelProfile {
 pub enum Phase {
     /// Coach conversation, tool loop, borrowlab interpretation.
     Chat,
-    /// Exercise generation (`/generate` + the agent tool's repair loop).
+    /// Exercise generation, template path (tier-1 pick + slot fill,
+    /// tier-2 adaptation) — small structured calls.
     Generate,
+    /// Exercise generation, free-form tier-3 draft — long-output
+    /// creation with an opposite capability profile (0909_2 反馈:
+    /// 职能分开，各自配模型/超时).
+    GenerateFree,
     /// Review gate + debrief (four-dimension comparison, explanation
     /// check, challenge hints).
     Review,
@@ -253,7 +258,9 @@ pub enum Phase {
 /// Per-scenario model routing (M9l): each phase may point at a
 /// different `[[models]]` profile; unset phases fall back to `active`.
 /// Optional entirely — with no `[routing]` table every phase uses the
-/// active profile exactly as before.
+/// active profile exactly as before. `generate_free` additionally falls
+/// back to `generate` when unset (M9u 职能分开): one slot for the whole
+/// generate path stays a valid configuration.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Routing {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -261,18 +268,28 @@ pub struct Routing {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generate: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generate_free: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<String>,
 }
 
 impl Routing {
     pub fn is_empty(&self) -> bool {
-        self.chat.is_none() && self.generate.is_none() && self.review.is_none()
+        self.chat.is_none()
+            && self.generate.is_none()
+            && self.generate_free.is_none()
+            && self.review.is_none()
     }
 
     fn name_for(&self, phase: Phase) -> Option<&str> {
         match phase {
             Phase::Chat => self.chat.as_deref(),
             Phase::Generate => self.generate.as_deref(),
+            // Unset free slot → the generate slot (single-slot setups
+            // keep working unchanged).
+            Phase::GenerateFree => {
+                self.generate_free.as_deref().or(self.generate.as_deref())
+            }
             Phase::Review => self.review.as_deref(),
         }
     }
@@ -397,6 +414,7 @@ impl ModelConfig {
         for (phase, field) in [
             ("chat", &mut self.routing.chat),
             ("generate", &mut self.routing.generate),
+            ("generate_free", &mut self.routing.generate_free),
             ("review", &mut self.routing.review),
         ] {
             if let Some(n) = field
@@ -417,6 +435,7 @@ impl ModelConfig {
         for (phase, name) in [
             ("chat", &self.routing.chat),
             ("generate", &self.routing.generate),
+            ("generate_free", &self.routing.generate_free),
             ("review", &self.routing.review),
         ] {
             if let Some(n) = name
@@ -831,10 +850,18 @@ reasoning_effort = "low"
         assert_eq!(rev.model, "m-b");
         assert_eq!(rev.prices.input, 2.0);
         assert_eq!(rev.think_mode, ThinkMode::On);
+        // 0909_2 职能分开: generate_free unset → rides the generate
+        // slot; set → its own profile.
+        let free_snap = cfg.snapshot_for_phase(Phase::GenerateFree);
+        assert_eq!(free_snap.model, "m-a", "unset free slot rides generate");
+        cfg.routing.generate_free = Some("b".into());
+        let free_snap = cfg.snapshot_for_phase(Phase::GenerateFree);
+        assert_eq!(free_snap.model, "m-b");
         // Routing must survive a save round-trip.
         let out = toml::to_string_pretty(&cfg).unwrap();
         assert!(out.contains("[routing]"), "{out}");
         assert!(out.contains("review = \"b\""));
+        assert!(out.contains("generate_free = \"b\""));
     }
 
     #[test]

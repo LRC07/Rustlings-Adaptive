@@ -367,6 +367,29 @@ impl<F: FnMut(&str) -> Result<LlmReply>> LlmCaller for F {
     }
 }
 
+/// Per-tier caller routing (0909_2 反馈 职能分开): the template path
+/// (tier-1 pick + slot fill, tier-2 adaptation) and the free-form
+/// tier-3 draft have OPPOSITE capability profiles — a cheap fast model
+/// excels at the former (micro-classification, small JSON), a strong
+/// patient one at the latter (long-output creation). Callers that do
+/// not split just return themselves for both (blanket impl below), so
+/// every existing single-caller site keeps working unchanged.
+pub trait TieredLlmCaller {
+    /// Tier-1 pick/fill and tier-2 adaptation.
+    fn template_path(&mut self) -> &mut dyn LlmCaller;
+    /// Tier-3 free-form draft.
+    fn free_path(&mut self) -> &mut dyn LlmCaller;
+}
+
+impl<T: LlmCaller> TieredLlmCaller for T {
+    fn template_path(&mut self) -> &mut dyn LlmCaller {
+        self
+    }
+    fn free_path(&mut self) -> &mut dyn LlmCaller {
+        self
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The single quality gate (all three tiers converge here)
 // ---------------------------------------------------------------------------
@@ -485,7 +508,7 @@ fn adopt_real_first_error(d: &mut template::ExerciseDraft, report: &verifier::Ve
 pub fn generate(
     topic: &Topic,
     paths: &Paths,
-    llm: Option<&mut dyn LlmCaller>,
+    llm: Option<&mut dyn TieredLlmCaller>,
     progress: Option<&mut dyn FnMut(GenerateStage)>,
 ) -> Result<Outcome> {
     generate_with_history(topic, paths, &GenHistory::default(), None, llm, progress)
@@ -501,7 +524,7 @@ pub fn generate_with_history(
     paths: &Paths,
     history: &GenHistory,
     learner: Option<&LearnerContext>,
-    llm: Option<&mut dyn LlmCaller>,
+    llm: Option<&mut dyn TieredLlmCaller>,
     progress: Option<&mut dyn FnMut(GenerateStage)>,
 ) -> Result<Outcome> {
     generate_with_focus(topic, None, paths, history, learner, llm, progress)
@@ -520,7 +543,7 @@ pub fn generate_with_focus(
     paths: &Paths,
     history: &GenHistory,
     learner: Option<&LearnerContext>,
-    llm: Option<&mut dyn LlmCaller>,
+    llm: Option<&mut dyn TieredLlmCaller>,
     progress: Option<&mut dyn FnMut(GenerateStage)>,
 ) -> Result<Outcome> {
     generate_with_mode(topic, focus, GenerateMode::Auto, paths, history, learner, llm, progress)
@@ -541,7 +564,7 @@ pub(crate) fn generate_full(
     paths: &Paths,
     history: &GenHistory,
     learner: Option<&LearnerContext>,
-    llm: Option<&mut dyn LlmCaller>,
+    llm: Option<&mut dyn TieredLlmCaller>,
     progress: Option<&mut dyn FnMut(GenerateStage)>,
     free_preset_fail: &str,
 ) -> Result<Outcome> {
@@ -553,7 +576,7 @@ pub(crate) fn generate_full(
         if let Some(cb) = prog.as_mut() {
             cb(GenerateStage { attempt: 1, total_attempts: 1, stage: "自由生成", note: None });
         }
-        return generate_free(topic, focus, &load_linked_graph(paths)?, paths, learner, call, &mut prog, 1, free_preset_fail);
+        return generate_free(topic, focus, &load_linked_graph(paths)?, paths, learner, call.free_path(), &mut prog, 1, free_preset_fail);
     }
     generate_with_mode(topic, focus, mode, paths, history, learner, llm, progress)
 }
@@ -569,7 +592,7 @@ pub(crate) fn generate_with_mode(
     paths: &Paths,
     history: &GenHistory,
     learner: Option<&LearnerContext>,
-    mut llm: Option<&mut dyn LlmCaller>,
+    mut llm: Option<&mut dyn TieredLlmCaller>,
     mut progress: Option<&mut dyn FnMut(GenerateStage)>,
 ) -> Result<Outcome> {
     macro_rules! stage {
@@ -594,7 +617,7 @@ pub(crate) fn generate_with_mode(
     // Tier 1 always runs first (cheap; the other tiers need an LLM).
     if matches!(mode, GenerateMode::Auto | GenerateMode::Matched) {
         let sel_call: Option<&mut dyn LlmCaller> = match llm.as_mut() {
-            Some(c) => Some(&mut **c),
+            Some(c) => Some(c.template_path()),
             None => None,
         };
         stage!("选模板", 1, MAX_ATTEMPTS);
@@ -624,7 +647,7 @@ pub(crate) fn generate_with_mode(
                     );
                 };
                 stage!("模板改编", 1, LLM_ATTEMPTS);
-                match generate_adapted(topic, focus, &templates, &graph, paths, learner, call, &mut progress) {
+                match generate_adapted(topic, focus, &templates, &graph, paths, learner, call.template_path(), &mut progress) {
                     Ok(o) => Ok(o),
                     Err(tier2_err) => {
                         // Free tier: ONE round (0907 反馈 P4) — burning
@@ -632,7 +655,7 @@ pub(crate) fn generate_with_mode(
                         // "重试风暴" cost sink; further rounds are the
                         // user's explicit choice (checkpoint in the tool).
                         stage!("自由生成", 1, 1);
-                        generate_free(topic, focus, &graph, paths, learner, call, &mut progress, 1, "")
+                        generate_free(topic, focus, &graph, paths, learner, call.free_path(), &mut progress, 1, "")
                             .map_err(|tier3_err| {
                                 anyhow!(
                                     "三层出题均失败。\n· 模板直配：{tier1_err:#}\n· 模板改编：{tier2_err:#}\n· 自由生成：{tier3_err:#}"
@@ -650,10 +673,10 @@ pub(crate) fn generate_with_mode(
         };
         if matches!(mode, GenerateMode::Adapted) {
             stage!("模板改编", 1, LLM_ATTEMPTS);
-            generate_adapted(topic, focus, &templates, &graph, paths, learner, call, &mut progress)
+            generate_adapted(topic, focus, &templates, &graph, paths, learner, call.template_path(), &mut progress)
         } else {
             stage!("自由生成", 1, 1);
-            generate_free(topic, focus, &graph, paths, learner, call, &mut progress, 1, "")
+            generate_free(topic, focus, &graph, paths, learner, call.free_path(), &mut progress, 1, "")
         }
     }
 }

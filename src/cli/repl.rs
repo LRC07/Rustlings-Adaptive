@@ -376,10 +376,17 @@ fn model_panel(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
             let pick = |n: &Option<String>| {
                 n.as_deref().map(|s| s.to_string()).unwrap_or_else(|| format!("（默认 {}）", cfg.active.clone().unwrap_or_default()))
             };
+            let free = cfg
+                .routing
+                .generate_free
+                .as_deref()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("（同 {}）", pick(&cfg.routing.generate)));
             println!(
-                "  分场景路由：对话 {} ｜ 出题 {} ｜ 评审 {}",
+                "  分场景路由：对话 {} ｜ 出题 {} ｜ 自由生成 {} ｜ 评审 {}",
                 pick(&cfg.routing.chat),
                 pick(&cfg.routing.generate),
+                free,
                 pick(&cfg.routing.review)
             );
         }
@@ -438,11 +445,17 @@ fn model_routing(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
         let label = |n: &Option<String>| {
             n.clone().unwrap_or_else(|| format!("（默认 {default_name}）"))
         };
+        let fallback = |n: &Option<String>| {
+            n.clone()
+                .or_else(|| cfg.routing.generate.clone())
+                .unwrap_or_else(|| format!("（默认 {default_name}）"))
+        };
         println!("  1. 对话 / 工具环 / 假设实验室：{}", label(&cfg.routing.chat));
-        println!("  2. 出题                    ：{}", label(&cfg.routing.generate));
-        println!("  3. 评审门 + 复盘            ：{}", label(&cfg.routing.review));
+        println!("  2. 出题·模板路径（选题/填槽/改编）：{}", label(&cfg.routing.generate));
+        println!("  3. 出题·自由生成（缺省沿用第 2 项）：{}", fallback(&cfg.routing.generate_free));
+        println!("  4. 评审门 + 复盘            ：{}", label(&cfg.routing.review));
         println!();
-        println!("  [1-3] 选择环节后指定档案（0 = 清除） ｜ [q/回车] 返回");
+        println!("  [1-4] 选择环节后指定档案（0 = 清除） ｜ [q/回车] 返回");
         let Some(line) = read_line_or_leave("路由> ") else { return };
         if line.trim().starts_with('/') {
             println!("  面板内不处理斜杠命令——按 q 返回对话后再使用。");
@@ -450,7 +463,7 @@ fn model_routing(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
         }
         match line.trim() {
             "" | "q" | "b" | "back" => return,
-            p @ ("1" | "2" | "3") => {
+            p @ ("1" | "2" | "3" | "4") => {
                 println!("  选择该环节使用的档案（0 = 清除，沿用当前档案）：");
                 for (i, m) in cfg.models.iter().enumerate() {
                     println!("    {}. {}（{}）", i + 1, m.name, m.model);
@@ -460,6 +473,7 @@ fn model_routing(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
                 let field = match p {
                     "1" => &mut cfg.routing.chat,
                     "2" => &mut cfg.routing.generate,
+                    "3" => &mut cfg.routing.generate_free,
                     _ => &mut cfg.routing.review,
                 };
                 if pick == "0" {
@@ -481,7 +495,7 @@ fn model_routing(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
                 }
                 save_and_rebuild(cfg, client);
             }
-            _other => println!("  未知输入：1 / 2 / 3 / q"),
+            _other => println!("  未知输入：1 / 2 / 3 / 4 / q"),
         }
     }
 }
@@ -947,15 +961,23 @@ fn agent_turn(
     let remind_in_footer = detected_note.is_some() && *open_loop_seen <= 2;
     drop(detected_note);
     // M9l routing: the chat caller rides the chat snapshot; the
-    // generate tool rides the generate snapshot (falls back to active).
+    // generate tool rides the generate snapshot (falls back to active);
+    // the free-form tier rides generate_free (falls back to generate).
     let gen_snapshot = cfg.snapshot_for_phase(crate::config::Phase::Generate);
     let gen_caller = match make_client(&gen_snapshot) {
+        Some(c) => Arc::new(c),
+        None => Arc::new(cl.clone()) as Arc<dyn crate::agent::ChatTurnCaller>,
+    };
+    let gen_free_snapshot = cfg.snapshot_for_phase(crate::config::Phase::GenerateFree);
+    let gen_free_caller = match make_client(&gen_free_snapshot) {
         Some(c) => Arc::new(c),
         None => Arc::new(cl.clone()) as Arc<dyn crate::agent::ChatTurnCaller>,
     };
     let env = AgentEnv {
         gen_caller,
         gen_cfg: gen_snapshot,
+        gen_free_caller,
+        gen_free_cfg: gen_free_snapshot,
         caller: Arc::new(cl.clone()),
         tracker: tracker.clone(),
         cfg: cfg.snapshot_for_phase(crate::config::Phase::Chat),
@@ -1210,8 +1232,19 @@ fn print_usage(cfg: &ModelConfig, tracker: &Arc<Mutex<UsageTracker>>) {
         .session_by_phase()
         .into_iter()
         .map(|(phase, pt)| {
+            // 0909_2 职能分开: generate_free gets its own ledger phase —
+            // show it in Chinese so the split reads at a glance.
+            let label = match phase.as_str() {
+                "chat" => "对话",
+                "generate" => "出题·模板",
+                "generate_free" => "出题·自由",
+                "review" => "评审",
+                "debrief" => "复盘",
+                "probe" => "存疑探针",
+                other => other,
+            };
             format!(
-                "{phase:<10} {} 次 ｜ 输入 {} tok ｜ 输出 {} tok{} ｜ ${:.6}",
+                "{label:<8} {} 次 ｜ 输入 {} tok ｜ 输出 {} tok{} ｜ ${:.6}",
                 pt.calls,
                 pt.input_tokens,
                 pt.output_tokens,

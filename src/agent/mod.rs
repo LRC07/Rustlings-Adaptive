@@ -225,6 +225,11 @@ pub struct AgentEnv {
     /// the CLI always fills it (chat caller when generate is unrouted).
     pub gen_caller: Arc<dyn ChatTurnCaller>,
     pub gen_cfg: ModelConfig,
+    /// Free-form tier-3 caller (0909_2 职能分开): rides the
+    /// `generate_free` routing slot (falls back to the generate slot).
+    /// The template path keeps `gen_caller`.
+    pub gen_free_caller: Arc<dyn ChatTurnCaller>,
+    pub gen_free_cfg: ModelConfig,
     pub tracker: Arc<Mutex<UsageTracker>>,
     pub cfg: ModelConfig,
     /// Repo root (templates/, taxonomy/, exercises/ live under it).
@@ -655,6 +660,8 @@ mod tests {
         AgentEnv {
             gen_caller: caller.clone(),
             gen_cfg: ModelConfig::default(),
+            gen_free_caller: caller.clone(),
+            gen_free_cfg: ModelConfig::default(),
             caller,
             tracker: Arc::new(Mutex::new(usage::UsageTracker::from_path(
                 std::env::temp_dir().join(format!("rs_agent_usage_{}.json", std::process::id())),

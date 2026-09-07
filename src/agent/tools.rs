@@ -166,29 +166,6 @@ impl ToolOutcome {
     }
 }
 
-/// Write the tool's internal generation usage into the tracker under
-/// the "generate" phase (0907 反馈 [记账]): it used to feed only the
-/// per-turn footer, so /usage's phase breakdown lacked a generate row
-/// AND the budget never saw tool-internal generation spend. Cost is
-/// what the CallerBridge computed under the gen phase's own prices;
-/// the model name is the gen phase's own.
-fn record_generate_usage(env: &AgentEnv, acc: &UsageAcc) {
-    if acc.calls == 0 {
-        return;
-    }
-    env.tracker
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .record(
-            &env.gen_cfg.model,
-            acc.input_tokens,
-            acc.output_tokens,
-            acc.reasoning_tokens,
-            acc.cost_usd,
-            "generate",
-        );
-}
-
 /// Dispatch a model-requested tool call. Unknown tools are an error
 /// (the agent loop converts it into an error JSON for the model).
 pub fn execute(name: &str, arguments: &str, env: &AgentEnv, progress: &dyn Fn(&str)) -> Result<ToolOutcome> {
@@ -360,6 +337,61 @@ impl generator::LlmCaller for CallerBridge {
     }
 }
 
+/// Split caller for the generation tool (0909_2 反馈 职能分开): the
+/// template path (tier-1 pick/fill, tier-2 adaptation) rides the
+/// `generate` routing slot, the free-form tier-3 draft rides
+/// `generate_free` — opposite capability profiles (micro-classification
+/// vs long-output creation). Each side keeps its own prices/acc so the
+/// usage ledger can bill the two phases separately.
+struct DualBridge {
+    template: CallerBridge,
+    free: CallerBridge,
+    /// Set on first free_path() use — drives the per-phase ledger.
+    used_free: bool,
+}
+
+impl generator::TieredLlmCaller for DualBridge {
+    fn template_path(&mut self) -> &mut dyn generator::LlmCaller {
+        &mut self.template
+    }
+    fn free_path(&mut self) -> &mut dyn generator::LlmCaller {
+        self.used_free = true;
+        &mut self.free
+    }
+}
+
+impl DualBridge {
+    /// Whole-tool usage for the per-turn footer (both paths summed).
+    fn total_usage(&self) -> UsageAcc {
+        let (t, f) = (&self.template.acc, &self.free.acc);
+        UsageAcc {
+            calls: t.calls + f.calls,
+            input_tokens: t.input_tokens + f.input_tokens,
+            output_tokens: t.output_tokens + f.output_tokens,
+            reasoning_tokens: t.reasoning_tokens + f.reasoning_tokens,
+            cost_usd: t.cost_usd + f.cost_usd,
+        }
+    }
+}
+
+/// Write the tool's internal generation usage into the tracker — split
+/// by path (0909_2 职能分开): template-path calls bill under
+/// "generate", free-form calls under "generate_free", each with its own
+/// routed model and prices. Previously a single phase hid the split.
+fn record_generate_usage(env: &AgentEnv, d: &DualBridge) {
+    let record = |acc: &UsageAcc, model: &str, phase: &str| {
+        if acc.calls == 0 {
+            return;
+        }
+        env.tracker
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .record(model, acc.input_tokens, acc.output_tokens, acc.reasoning_tokens, acc.cost_usd, phase);
+    };
+    record(&d.template.acc, &env.gen_cfg.model, "generate");
+    record(&d.free.acc, &env.gen_free_cfg.model, "generate_free");
+}
+
 fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> Result<ToolOutcome> {
     let topic_text = args
         .get("topic")
@@ -413,15 +445,28 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
     } else {
         String::new()
     };
-    // M9l routing: generation bills under the generate phase's own
-    // model/prices (falls back to the chat caller when unrouted).
-    let mut bridge = CallerBridge {
-        caller: env.gen_caller.clone(),
-        input_price: env.gen_cfg.prices.input,
-        output_price: env.gen_cfg.prices.output,
-        tracker: env.tracker.clone(),
-        budget: env.gen_cfg.budget_usd(),
-        acc: UsageAcc::default(),
+    // M9l routing + 0909_2 职能分开: the template path bills under the
+    // `generate` phase's model/prices, the free-form tier under
+    // `generate_free` (falls back to the generate snapshot when
+    // unrouted; both fall back to the chat caller).
+    let mut bridge = DualBridge {
+        template: CallerBridge {
+            caller: env.gen_caller.clone(),
+            input_price: env.gen_cfg.prices.input,
+            output_price: env.gen_cfg.prices.output,
+            tracker: env.tracker.clone(),
+            budget: env.gen_cfg.budget_usd(),
+            acc: UsageAcc::default(),
+        },
+        free: CallerBridge {
+            caller: env.gen_free_caller.clone(),
+            input_price: env.gen_free_cfg.prices.input,
+            output_price: env.gen_free_cfg.prices.output,
+            tracker: env.tracker.clone(),
+            budget: env.gen_free_cfg.budget_usd(),
+            acc: UsageAcc::default(),
+        },
+        used_free: false,
     };
     let outcome = match generator::generate_full(
         &topic,
@@ -469,7 +514,7 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
                 let full = format!("{e:#}");
                 let reason = full.chars().take(800).collect::<String>();
                 *env.free_fail_note.lock().unwrap_or_else(|p| p.into_inner()) = Some(reason.clone());
-                record_generate_usage(env, &bridge.acc);
+                record_generate_usage(env, &bridge);
                 let head = if free_preset.is_empty() {
                     "自由生成被质量门拒绝，已暂停等待用户选择（再试一轮/退回模板/放弃）"
                 } else {
@@ -492,7 +537,7 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
                     }),
                     note: Some(format!("{head}｜原因：{reason}")),
                     practice: None,
-                    usage: bridge.acc,
+                    usage: bridge.total_usage(),
                 });
             }
             // M4.7 fallback gate: a failed generation must NEVER turn
@@ -511,7 +556,7 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
                 .unwrap_or(&full)
                 .to_string();
             let reason = ellipsize(&full, 400);
-            record_generate_usage(env, &bridge.acc);
+            record_generate_usage(env, &bridge);
             return Ok(ToolOutcome {
                 value: json!({
                     "ok": false,
@@ -522,7 +567,7 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
                 }),
                 note: Some(format!("出题失败：{reason_note}")),
                 practice: None,
-                usage: bridge.acc,
+                usage: bridge.total_usage(),
             });
         }
     };
@@ -581,7 +626,7 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
              请在回复里向用户说明这一点。"
         );
     }
-    record_generate_usage(env, &bridge.acc);
+    record_generate_usage(env, &bridge);
     let head = if free_preset.is_empty() { "生成成功" } else { "自由生成重试成功" };
     Ok(ToolOutcome {
         note: Some(format!(
@@ -599,7 +644,7 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
             concepts: outcome.concepts,
             trigger: Some(trigger),
         }),
-        usage: bridge.acc,
+        usage: bridge.total_usage(),
         value,
     })
 }
@@ -817,6 +862,8 @@ mod tests {
         AgentEnv {
             gen_caller: Arc::new(FailingCaller),
             gen_cfg: crate::config::ModelConfig::default(),
+            gen_free_caller: Arc::new(FailingCaller),
+            gen_free_cfg: crate::config::ModelConfig::default(),
             caller: Arc::new(FailingCaller),
             tracker: Arc::new(std::sync::Mutex::new(tracker)),
             cfg: crate::config::ModelConfig::default(),
@@ -967,13 +1014,13 @@ mod tests {
     /// 0907 反馈 P4: a rejected free generation returns the user-decision
     /// checkpoint (not the plain fallback), remembers the reason for the
     /// retry call's prompt, and its LLM usage lands in the tracker under
-    /// the generate phase (0907 [记账]).
+    /// the generate_free phase (0909_2 职能分开: free rides its own slot).
     #[test]
     fn free_generate_rejection_checkpoints_and_remember() {
         let root = fixture_root("free_ck");
         let mut env = test_env(&root);
         let gcaller = Arc::new(GarbageCaller { prompts: std::sync::Mutex::new(Vec::new()) });
-        env.gen_caller = gcaller.clone();
+        env.gen_free_caller = gcaller.clone();
         // 1st call: rejected → checkpoint + memory.
         let out = execute(
             TOOL_GENERATE_EXERCISE,
@@ -994,11 +1041,12 @@ mod tests {
             "{out:?}"
         );
         assert!(env.free_fail_note.lock().unwrap().is_some(), "reason remembered");
-        // Usage recorded under generate (phase breakdown / budget).
+        // Usage recorded under generate_free (phase breakdown / budget;
+        // 0909_2 职能分开: the free tier bills under its own phase).
         let phases = env.tracker.lock().unwrap().session_by_phase();
         assert!(
-            phases.iter().any(|(p, t)| p == "generate" && t.calls >= 1),
-            "generate phase missing from {phases:?}"
+            phases.iter().any(|(p, t)| p == "generate_free" && t.calls >= 1),
+            "generate_free phase missing from {phases:?}"
         );
         // 2nd call: the remembered reason rides the round-1 prompt.
         let _ = execute(TOOL_GENERATE_EXERCISE, r#"{"topic": "t.c", "mode": "free"}"#, &env, &|_| {})
@@ -1018,12 +1066,13 @@ mod tests {
     }
 
     /// 0907 反馈 [记账]: the tool's internal generation calls pass the
-    /// budget gate like every other LLM path.
+    /// budget gate like every other LLM path. The FREE tier's gate lives
+    /// on the generate_free snapshot (0909_2 职能分开).
     #[test]
     fn free_generate_respects_budget() {
         let root = fixture_root("free_budget");
         let mut env = test_env(&root);
-        env.gen_cfg.budget = Some(crate::config::Budget { usd: 0.0 });
+        env.gen_free_cfg.budget = Some(crate::config::Budget { usd: 0.0 });
         let out = execute(
             TOOL_GENERATE_EXERCISE,
             r#"{"topic": "t.c", "mode": "free"}"#,
@@ -1037,6 +1086,58 @@ mod tests {
             "budget block must surface as the reason: {out:?}"
         );
         assert!(env.free_fail_note.lock().unwrap().is_some());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 0909_2 职能分开: the template path (tier-1 pick, tier-2 draft)
+    /// and the free tier ride DIFFERENT callers. Auto mode with a
+    /// focused request walks pick (template) → adapted (template) →
+    /// free (free slot); explicit free mode touches ONLY the free slot.
+    #[test]
+    fn tiered_callers_split_template_and_free_paths() {
+        let root = fixture_root("tier_split");
+        let mut env = test_env(&root);
+        let t = Arc::new(GarbageCaller { prompts: std::sync::Mutex::new(Vec::new()) });
+        let f = Arc::new(GarbageCaller { prompts: std::sync::Mutex::new(Vec::new()) });
+        env.gen_caller = t.clone();
+        env.gen_free_caller = f.clone();
+
+        // Auto + focus: pick (template) → adapted ×3 (template) → free
+        // ×1 (free slot). FreeText topic so the adapted skeleton also
+        // resolves through the keyword pool.
+        let _ = execute(
+            TOOL_GENERATE_EXERCISE,
+            r#"{"topic": "迷你", "focus": "题库没有的手法"}"#,
+            &env,
+            &|_| {},
+        )
+        .unwrap();
+        let tp = t.prompts.lock().unwrap();
+        let fp = f.prompts.lock().unwrap();
+        // 3 = pick + 2 adapted rounds (the same-reason fuse fires before
+        // round 3 — identical garbage keeps failing identically).
+        assert_eq!(tp.len(), 3, "template path: 1 pick + adapted rounds → {tp:?}");
+        assert_eq!(fp.len(), 1, "free tier: exactly ONE round → {fp:?}");
+        assert!(tp[0].contains("choosing a Rust practice"), "pick rides the template path");
+        assert!(fp[0].contains("ONE small Rust practice exercise"), "draft rides the free path");
+        drop(tp);
+        drop(fp);
+
+        // Explicit free mode: ONLY the free slot is touched.
+        let before = t.prompts.lock().unwrap().len();
+        let _ = execute(
+            TOOL_GENERATE_EXERCISE,
+            r#"{"topic": "t.c", "mode": "free"}"#,
+            &env,
+            &|_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            t.prompts.lock().unwrap().len(),
+            before,
+            "template path must stay idle in free mode"
+        );
+        assert_eq!(f.prompts.lock().unwrap().len(), 2, "free slot served the request");
         let _ = std::fs::remove_dir_all(&root);
     }
 }
