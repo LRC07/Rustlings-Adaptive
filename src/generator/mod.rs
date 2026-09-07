@@ -896,6 +896,7 @@ fn generate_adapted(
         "模板改编",
         LLM_ATTEMPTS,
         "",
+        DRAFT_MAX_TOKENS,
     )?;
     finish_draft(paths, draft, Tier::Adapted { base: base.id.clone() }, module_name, hints, attempts)
 }
@@ -929,6 +930,7 @@ fn generate_free(
         "自由生成",
         max_rounds,
         preset_fail,
+        FREE_DRAFT_MAX_TOKENS,
     )?;
     finish_draft(paths, draft, Tier::Free, module_name, hints, attempts)
 }
@@ -988,8 +990,15 @@ fn nearest_template<'a>(
 
 /// Hard cap on one draft round's completion tokens (M4.7): the whole
 /// exercise JSON must fit; "length" truncations are fed back to the
-/// model with a demand to compress.
+/// model with a demand to compress. Template path (tier-2 adaptation)
+/// only — it has a skeleton, 3000 has been comfortable.
 pub const DRAFT_MAX_TOKENS: u32 = 3000;
+/// Free-form tier-3 cap (0909_2 round4): loose from DRAFT_MAX_TOKENS —
+/// glm-52-low truncated at exactly 3000 twice and failed, and some
+/// endpoints count THINKING tokens against this budget (M9r: reasoning
+/// 699/700). A ceiling, not a target: it costs nothing unless the model
+/// rambles, while a truncation-retry round costs a full call.
+pub const FREE_DRAFT_MAX_TOKENS: u32 = 5000;
 /// Wall-clock budget for the whole draft repair loop (M4.7): on slow
 /// endpoints, stop with a clear report instead of burning rounds.
 pub const DRAFT_TIME_BUDGET: Duration = Duration::from_secs(420);
@@ -999,7 +1008,9 @@ pub const DRAFT_TIME_BUDGET: Duration = Duration::from_secs(420);
 /// `max_rounds` bounds the loop (3 for adapted; 1 for free — more free
 /// rounds are the user's explicit choice, 0907 反馈 P4). `preset_fail`
 /// seeds `last_fail` so a preset (cross-call) reason reaches even the
-/// first prompt.
+/// first prompt. `max_tokens` is the per-round completion cap —
+/// DRAFT_MAX_TOKENS for the template path, FREE_DRAFT_MAX_TOKENS for
+/// the free tier (0909_2 round4).
 #[allow(clippy::too_many_arguments)]
 fn llm_draft_loop(
     request: &str,
@@ -1013,6 +1024,7 @@ fn llm_draft_loop(
     stage_label: &'static str,
     max_rounds: u32,
     preset_fail: &str,
+    max_tokens: u32,
 ) -> Result<DraftResult> {
     let concept_ids: Vec<String> = graph.ids().cloned().collect();
     let started = Instant::now();
@@ -1051,10 +1063,10 @@ fn llm_draft_loop(
         }
 
         let prompt = draft_prompt(request, focus, base, &concept_ids, attempt, &last_fail, learner);
-        let reply = call.call_bounded(&prompt, DRAFT_MAX_TOKENS).map_err(|e| anyhow!("LLM 调用失败：{e:#}"))?;
+        let reply = call.call_bounded(&prompt, max_tokens).map_err(|e| anyhow!("LLM 调用失败：{e:#}"))?;
         if reply.finish_reason.as_deref() == Some("length") {
             last_fail = format!(
-                "上一轮输出在 {DRAFT_MAX_TOKENS} tokens 处被截断：整题 JSON 必须更精简\
+                "上一轮输出在 {max_tokens} tokens 处被截断：整题 JSON 必须更精简\
                  （测试只留 2 个、注释删减、字段紧凑），重新输出完整 JSON"
             );
             continue;
@@ -2610,6 +2622,44 @@ fn add(a: i32, b: i32) -> i32 {
         assert!(entry < closure, "ranked catalog: entry (score 2) before closure (score 1)");
     }
 
+    /// 0909_2 round4: the FREE tier rides the looser token cap —
+    /// glm-52-low truncated at exactly 3000 twice and failed there.
+    #[test]
+    fn free_tier_gets_the_looser_token_cap() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let fx = Fixture::new();
+        let paths = fx.paths();
+        struct CapRecorder {
+            cap: Rc<Cell<u32>>,
+        }
+        impl LlmCaller for CapRecorder {
+            fn call(&mut self, _p: &str) -> Result<LlmReply> {
+                unreachable!("the free draft loop must use call_bounded")
+            }
+            fn call_bounded(&mut self, _p: &str, max_tokens: u32) -> Result<LlmReply> {
+                self.cap.set(max_tokens);
+                Ok(reply(VALID_DRAFT_JSON))
+            }
+        }
+        let cap = Rc::new(Cell::new(0));
+        let mut call = CapRecorder { cap: cap.clone() };
+        let out = generate_full(
+            &Topic::FreeText("取余".into()),
+            None,
+            GenerateMode::Free,
+            &paths,
+            &GenHistory::default(),
+            None, // learner
+            Some(&mut call),
+            None,
+            "",
+        )
+        .unwrap();
+        assert_eq!(out.tier, Tier::Free);
+        assert_eq!(cap.get(), FREE_DRAFT_MAX_TOKENS, "free tier must ride the looser cap");
+    }
+
     /// 0907 反馈 P4: free generation is ONE round per call — a rejected
     /// draft must not silently burn more rounds; the preset failure
     /// (previous call's rejection) reaches the round-1 prompt.
@@ -2927,7 +2977,7 @@ fn add(a: i32, b: i32) -> i32 {
                     let out = client2.chat_turn_bounded(
                         &[crate::llm::ChatMessage::user(prompt.to_string())],
                         &[],
-                        Some(DRAFT_MAX_TOKENS),
+                        Some(FREE_DRAFT_MAX_TOKENS),
                     )?;
                     log2.borrow_mut().push((
                         out.usage.prompt_tokens,
