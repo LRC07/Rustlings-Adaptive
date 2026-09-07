@@ -19,7 +19,7 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{bail, Result};
 use serde_json::Value;
 
 use crate::constraints::{self, Constraint};
@@ -367,7 +367,7 @@ pub struct ReviewInput {
     pub attempts: u32,
 }
 
-const REVIEW_MAX_TOKENS: u32 = 1200;
+const REVIEW_MAX_TOKENS: u32 = 2400;
 
 const REVIEW_SYSTEM: &str = "\
 你是 Rust 教练的解答评审器。学习者刚通过了一道 rustlings 式填空小题的全部测试，\
@@ -413,15 +413,59 @@ fn review_user_prompt(input: &ReviewInput) -> String {
     p
 }
 
-/// Ask the model for a solution review. Fails (Err) on transport /
-/// truncation / unparseable JSON — the caller then falls back to the
-/// static-only verdict and says so honestly.
-pub fn llm_review(call: &mut dyn ReviewCaller, input: &ReviewInput) -> Result<LlmReview> {
-    let reply = call.call("review", REVIEW_SYSTEM, &review_user_prompt(input), REVIEW_MAX_TOKENS)?;
-    if reply.finish_reason.as_deref() == Some("length") {
-        bail!("评审输出在 max_tokens 处被截断");
+/// Bounded repair loop for the review/debrief LLM steps (0909 实测):
+/// these used to be ONE-shot — when the routed thinking model burns its
+/// token budget on reasoning (usage ledger: reasoning 699/700 and
+/// 1199/1200), the JSON body truncates and the whole step visibly
+/// fails. The generator pipeline has had a repair loop since M4.7;
+/// these steps now get the same treatment: on a `length` truncation or
+/// a parse rejection the reason is fed back and one more round runs.
+const STEP_ATTEMPTS: u32 = 3;
+
+fn step_with_retries<T>(
+    call: &mut dyn ReviewCaller,
+    phase: &'static str,
+    system: &str,
+    user: &str,
+    max_tokens: u32,
+    what: &str,
+    mut parse: impl FnMut(&str) -> Option<T>,
+) -> Result<T> {
+    let mut prompt = user.to_string();
+    let mut last_err = String::new();
+    for _ in 0..STEP_ATTEMPTS {
+        let reply = call.call(phase, system, &prompt, max_tokens)?;
+        if reply.finish_reason.as_deref() == Some("length") {
+            last_err = format!(
+                "输出在 {max_tokens} tokens 处被截断——大幅压缩内容（每条短评一句话），\
+                 让完整 JSON 进预算；思考过程不要写进回复"
+            );
+        } else if let Some(v) = parse(&reply.content) {
+            return Ok(v);
+        } else {
+            last_err = "无法从回复中解析出合格的 JSON 对象".to_string();
+        }
+        prompt = format!(
+            "{user}\n\n（系统）你上一轮的输出不合格：{last_err}。重新输出：\
+             严格只输出一个 JSON 对象——不要多余文字、不要代码围栏、不要把思考过程写出来。"
+        );
     }
-    parse_llm_review(&reply.content).ok_or_else(|| anyhow!("评审 JSON 无法解析"))
+    bail!("{what}连续 {STEP_ATTEMPTS} 轮输出不合格（最后原因：{last_err}）")
+}
+
+/// Ask the model for a solution review. Fails (Err) on transport /
+/// repeated truncation / unparseable JSON — the caller then falls back
+/// to the static-only verdict and says so honestly.
+pub fn llm_review(call: &mut dyn ReviewCaller, input: &ReviewInput) -> Result<LlmReview> {
+    step_with_retries(
+        call,
+        "review",
+        REVIEW_SYSTEM,
+        &review_user_prompt(input),
+        REVIEW_MAX_TOKENS,
+        "评审",
+        parse_llm_review,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -569,7 +613,7 @@ pub fn parse_quiz(text: &str) -> Option<Quiz> {
     Some(Quiz { question, options })
 }
 
-const QUIZ_MAX_TOKENS: u32 = 700;
+const QUIZ_MAX_TOKENS: u32 = 2000;
 
 const QUIZ_SYSTEM: &str = "\
 你是 Rust 教练的复盘出题器。学习者刚通过一道填空题的全部测试，现在用一道单选题校核他是否\
@@ -616,11 +660,15 @@ fn quiz_user_prompt(input: &ReviewInput, last_fail: Option<&str>) -> String {
 
 /// Generate the Step-1 quiz.
 pub fn llm_quiz(call: &mut dyn ReviewCaller, input: &ReviewInput, last_fail: Option<&str>) -> Result<Quiz> {
-    let reply = call.call("debrief", QUIZ_SYSTEM, &quiz_user_prompt(input, last_fail), QUIZ_MAX_TOKENS)?;
-    if reply.finish_reason.as_deref() == Some("length") {
-        bail!("复盘题输出被截断");
-    }
-    parse_quiz(&reply.content).filter(|q| q.is_usable()).ok_or_else(|| anyhow!("复盘题 JSON 不合格"))
+    step_with_retries(
+        call,
+        "debrief",
+        QUIZ_SYSTEM,
+        &quiz_user_prompt(input, last_fail),
+        QUIZ_MAX_TOKENS,
+        "复盘题",
+        |text| parse_quiz(text).filter(|q| q.is_usable()),
+    )
 }
 
 /// Result of judging a free-text answer (design §4.3: LLM 对照真实
@@ -631,7 +679,7 @@ pub struct FreeJudgement {
     pub why: String,
 }
 
-const JUDGE_MAX_TOKENS: u32 = 400;
+const JUDGE_MAX_TOKENS: u32 = 1200;
 
 /// Judge a free-text answer against the quiz's correct explanation.
 pub fn judge_free_input(
@@ -653,19 +701,24 @@ pub fn judge_free_input(
         "【问题】{}\n【正确答案】{correct}\n【学习者的回答】{answer}\n\n请输出判定 JSON。",
         quiz.question
     );
-    let reply = call.call("debrief", system, &user, JUDGE_MAX_TOKENS)?;
-    if reply.finish_reason.as_deref() == Some("length") {
-        bail!("判定输出被截断");
-    }
-    let json = crate::llm::extract_json(&reply.content)
-        .ok_or_else(|| anyhow!("判定 JSON 缺失"))?;
-    let v: Value = serde_json::from_str(json)?;
-    Ok(FreeJudgement {
-        hit: v.get("hit").and_then(Value::as_bool).ok_or_else(|| anyhow!("判定 JSON 缺 hit"))?,
-        why: v.get("why").and_then(Value::as_str).unwrap_or_default().to_string(),
-    })
+    let judgement = step_with_retries(
+        call,
+        "debrief",
+        system,
+        &user,
+        JUDGE_MAX_TOKENS,
+        "判定",
+        |text| {
+            let json = crate::llm::extract_json(text)?;
+            let v: Value = serde_json::from_str(json).ok()?;
+            Some(FreeJudgement {
+                hit: v.get("hit").and_then(Value::as_bool)?,
+                why: v.get("why").and_then(Value::as_str).unwrap_or_default().to_string(),
+            })
+        },
+    )?;
+    Ok(judgement)
 }
-
 // ---------------------------------------------------------------------------
 // Debrief Step 3: two-dimensional comparison (machine + LLM, §4.3)
 // ---------------------------------------------------------------------------
@@ -787,7 +840,7 @@ pub fn parse_comparison(text: &str) -> Option<LlmComparison> {
     Some(LlmComparison { rows, takeaway })
 }
 
-const CMP_MAX_TOKENS: u32 = 1200;
+const CMP_MAX_TOKENS: u32 = 3000;
 
 const CMP_SYSTEM: &str = "\
 你是 Rust 教练的对比评审器。学习者刚通过练习，现在把学习者的解与参考解放在一起评四个维度：\
@@ -849,11 +902,15 @@ pub fn llm_comparison(
     input: &ReviewInput,
     machine: &MachineComparison,
 ) -> Result<LlmComparison> {
-    let reply = call.call("debrief", CMP_SYSTEM, &cmp_user_prompt(input, machine), CMP_MAX_TOKENS)?;
-    if reply.finish_reason.as_deref() == Some("length") {
-        bail!("对比评审输出被截断");
-    }
-    parse_comparison(&reply.content).ok_or_else(|| anyhow!("对比 JSON 无法解析"))
+    step_with_retries(
+        call,
+        "debrief",
+        CMP_SYSTEM,
+        &cmp_user_prompt(input, machine),
+        CMP_MAX_TOKENS,
+        "对比评审",
+        parse_comparison,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -934,7 +991,7 @@ pub struct ProbeOutcome {
     pub failure: Option<String>,
 }
 
-const PROBE_MAX_TOKENS: u32 = 800;
+const PROBE_MAX_TOKENS: u32 = 1600;
 
 const PROBE_SYSTEM: &str = "\
 你为 Rust 练习生成一道附加验证测试（probe test）。学习者的解答通过了原测试，但被评审判定为\
@@ -979,17 +1036,15 @@ pub fn run_probe(
     input: &ReviewInput,
     suspicious_reason: &str,
 ) -> Result<ProbeOutcome> {
-    let reply = call.call(
+    let test_code = step_with_retries(
+        call,
         "probe",
         PROBE_SYSTEM,
         &probe_user_prompt(input, suspicious_reason),
         PROBE_MAX_TOKENS,
+        "probe test",
+        |text| parse_probe(text).map(|(_, test)| test),
     )?;
-    if reply.finish_reason.as_deref() == Some("length") {
-        bail!("probe 输出被截断");
-    }
-    let (_reasoning, test_code) =
-        parse_probe(&reply.content).ok_or_else(|| anyhow!("probe JSON 无法解析"))?;
 
     // Compile + run exactly like a practice attempt: user file + probe.
     let mut source = input.user_code.trim_end().to_string();
@@ -1118,6 +1173,94 @@ mod tests {
         })), Verdict::Suspicious);
     }
 
+    /// Scripted caller for the retry-loop tests: pops replies in order,
+    /// records every user prompt it saw.
+    struct ScriptedCaller {
+        replies: Vec<LlmReply>,
+        prompts: std::cell::RefCell<Vec<String>>,
+        calls: std::cell::Cell<u32>,
+    }
+    impl ReviewCaller for ScriptedCaller {
+        fn call(
+            &mut self,
+            _phase: &'static str,
+            _system: &str,
+            user: &str,
+            _max_tokens: u32,
+        ) -> Result<LlmReply> {
+            self.calls.set(self.calls.get() + 1);
+            self.prompts.borrow_mut().push(user.to_string());
+            if self.replies.is_empty() {
+                anyhow::bail!("脚本耗尽")
+            }
+            Ok(self.replies.remove(0))
+        }
+    }
+
+    fn reply(content: &str, finish: Option<&str>) -> LlmReply {
+        LlmReply {
+            content: content.into(),
+            usage: Default::default(),
+            finish_reason: finish.map(str::to_string),
+        }
+    }
+
+    const GOOD_REVIEW_JSON: &str = r#"{"verdict":"clean","summary":"地道","findings":[]}"#;
+    const GOOD_QUIZ_JSON: &str = r#"{"question":"这题在考什么机制？","options":[
+        {"text":"移动发生的时机","correct":true,"explain":"赋值转移所有权"},
+        {"text":"借用的时机","correct":false,"explain":"不转移"},
+        {"text":"克隆的时机","correct":false,"explain":"深拷贝"}]}"#;
+
+    /// 0909 实测: review/debrief steps were one-shot — a thinking model
+    /// burning its token budget on reasoning truncated the JSON and the
+    /// step visibly failed. Every step now rides the bounded repair
+    /// loop and must recover on a later round.
+    #[test]
+    fn review_steps_retry_and_recover() {
+        // Unparseable prose first, then valid JSON → recovered.
+        let mut call = ScriptedCaller {
+            replies: vec![reply("评审意见：这个解法相当不错。", Some("stop")), reply(GOOD_REVIEW_JSON, Some("stop"))],
+            prompts: Default::default(),
+            calls: Default::default(),
+        };
+        let r = llm_review(&mut call, &review_input_for_tests()).unwrap();
+        assert_eq!(r.verdict, Verdict::Clean);
+        assert_eq!(call.calls.get(), 2);
+        let prompts = call.prompts.borrow();
+        assert!(prompts[1].contains("上一轮的输出不合格"), "{}", prompts[1]);
+
+        // Truncation first → the compress-demand rides the retry prompt.
+        let mut call = ScriptedCaller {
+            replies: vec![reply("{\"verdict\":\"cle", Some("length")), reply(GOOD_REVIEW_JSON, Some("stop"))],
+            prompts: Default::default(),
+            calls: Default::default(),
+        };
+        let r = llm_review(&mut call, &review_input_for_tests()).unwrap();
+        assert_eq!(r.verdict, Verdict::Clean);
+        assert!(call.prompts.borrow()[1].contains("被截断"));
+
+        // Quiz whose JSON parses but carries TWO correct options is
+        // unusable → retry, then recover.
+        let two_correct = GOOD_QUIZ_JSON.replace("\"explain\":\"不转移\"}", "\"explain\":\"不转移\",\"correct\":true}");
+        let mut call = ScriptedCaller {
+            replies: vec![reply(&two_correct, Some("stop")), reply(GOOD_QUIZ_JSON, Some("stop"))],
+            prompts: Default::default(),
+            calls: Default::default(),
+        };
+        let q = llm_quiz(&mut call, &review_input_for_tests(), None).unwrap();
+        assert_eq!(q.options.iter().filter(|o| o.correct).count(), 1);
+
+        // Everything rejected → honest exhaustion report after 3 rounds.
+        let mut call = ScriptedCaller {
+            replies: vec![reply("还是不是 JSON", Some("stop")); 3],
+            prompts: Default::default(),
+            calls: Default::default(),
+        };
+        let err = llm_review(&mut call, &review_input_for_tests()).unwrap_err();
+        assert!(err.to_string().contains("连续 3 轮"), "{err}");
+        assert_eq!(call.calls.get(), 3);
+    }
+
     #[test]
     fn static_checks_finds_residue_violations_and_lines() {
         let code = "// todo! in comment does not count\nfn f() -> u32 {\n    let s = \"x\".to_owned();\n    todo!()\n}\n";
@@ -1157,12 +1300,8 @@ mod tests {
         assert!(view.contains("fn add"), "implementation kept: {view}");
     }
 
-    /// 0907 反馈 P2: no LLM prompt may see the progress marker — the
-    /// reviewer used to nit "应删除该行" and the challenge listed
-    /// "删标记" as an improvement direction.
-    #[test]
-    fn prompts_never_see_the_progress_marker() {
-        let input = ReviewInput {
+    fn review_input_for_tests() -> ReviewInput {
+        ReviewInput {
             title: "标记".into(),
             concepts: vec![],
             body: "// 题\n".into(),
@@ -1173,7 +1312,15 @@ mod tests {
             user_code: "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n// I AM NOT DONE\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() { assert_eq!(add(1, 1), 2); }\n}\n".into(),
             constraint_specs: vec![],
             attempts: 0,
-        };
+        }
+    }
+
+    /// 0907 反馈 P2: no LLM prompt may see the progress marker — the
+    /// reviewer used to nit "应删除该行" and the challenge listed
+    /// "删标记" as an improvement direction.
+    #[test]
+    fn prompts_never_see_the_progress_marker() {
+        let input = review_input_for_tests();
         for (name, prompt) in [
             ("review", review_user_prompt(&input)),
             ("cmp", cmp_user_prompt(&input, &MachineComparison::default())),
