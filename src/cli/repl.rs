@@ -1717,6 +1717,7 @@ fn sessions_clear(
                     Ok(dir) => {
                         match move_session_files(&dir.join("sessions"), &|id| id == target.id) {
                             Ok(1) => println!("  已归档会话 {}。", target.id),
+                            Ok(0) => println!("  没有找到可归档的文件（列表可能已过期；重新打开 /sessions 再试）。"),
                             Ok(n) => println!("  已归档 {n} 个文件。"),
                             Err(e) => println!("  归档失败：{e:#}"),
                         }
@@ -1854,9 +1855,18 @@ fn sessions_list(
         return;
     }
     const PAGE: usize = 10;
-    let total_pages = infos.len().div_ceil(PAGE);
-    let mut page = total_pages.saturating_sub(1);
+    let mut page = usize::MAX; // newest page; clamped per iteration
     loop {
+        // Re-list on EVERY iteration (0909 反馈): after `c <n>` archived
+        // a session the panel redrew the STALE snapshot, so the archived
+        // session still appeared and the archive looked like a no-op.
+        let infos = Session::list();
+        if infos.is_empty() {
+            println!("  （会话列表已空）");
+            break;
+        }
+        let total_pages = infos.len().div_ceil(PAGE);
+        page = page.min(total_pages - 1);
         if render::ansi_enabled() {
             clear_viewport();
         }
