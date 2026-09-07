@@ -342,7 +342,7 @@ fn render_board(board: &Board, mode: &Mode) -> Vec<usize> {
             if visible.is_empty() {
                 println!("  数字选题（本会话暂无题目；a 看全库后用数字选题）");
             } else {
-                println!("  数字选题（本会话） ｜ a 全库 ｜ t <主题> ｜ n 下一题 ｜ v 验证 ｜ b 回对话");
+                println!("  数字选题（本会话） ｜ a 全库 ｜ t <主题> ｜ n 下一题 ｜ v 验证 ｜ b/q 回对话");
             }
             visible
         }
@@ -357,7 +357,7 @@ fn render_board(board: &Board, mode: &Mode) -> Vec<usize> {
                 print_row(board, i, n + 1);
             }
             println!();
-            println!("  数字选题 ｜ h 首页 ｜ a 全库 ｜ t <主题> ｜ b 回对话");
+            println!("  数字选题 ｜ h 首页 ｜ a 全库 ｜ t <主题> ｜ b/q 回对话");
             ids
         }
         Mode::All => {
@@ -377,7 +377,7 @@ fn render_board(board: &Board, mode: &Mode) -> Vec<usize> {
                 }
             }
             println!();
-            println!("  数字选题 ｜ h 首页 ｜ t <主题> ｜ v 验证 ｜ b 回对话");
+            println!("  数字选题 ｜ h 首页 ｜ t <主题> ｜ v 验证 ｜ b/q 回对话");
             visible
         }
     }
@@ -593,7 +593,7 @@ fn run_exercise(
             }
             println!();
             println!(
-                "  [r] 重跑   [e] 编辑   [h] 提示   [a] 问教练   [f] 反馈   [n] 下一题   [b] 列表   [q] 回对话"
+                "  [r/回车] 重跑   [e] 编辑   [h] 提示   [a] 问教练   [f] 反馈   [n] 下一题   [b] 列表   [q] 回对话"
             );
             let mut sel = match read_prompt("> ") {
                 Some(s) => s,

@@ -384,7 +384,7 @@ fn model_panel(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
             );
         }
         println!();
-        println!("  [数字] 切换 ｜ [n] 新建 ｜ [d <名>] 删除 ｜ [r] 分场景路由 ｜ [q] 返回对话");
+        println!("  [数字] 切换 ｜ [n] 新建 ｜ [d <名>] 删除 ｜ [r] 分场景路由 ｜ [q/回车] 返回对话");
         let Some(line) = read_line_or_leave("模型> ") else { return };
         let t = line.trim();
         if t.starts_with('/') {
@@ -442,7 +442,7 @@ fn model_routing(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
         println!("  2. 出题                    ：{}", label(&cfg.routing.generate));
         println!("  3. 评审门 + 复盘            ：{}", label(&cfg.routing.review));
         println!();
-        println!("  [1-3] 选择环节后指定档案（0 = 清除） ｜ [q] 返回");
+        println!("  [1-3] 选择环节后指定档案（0 = 清除） ｜ [q/回车] 返回");
         let Some(line) = read_line_or_leave("路由> ") else { return };
         if line.trim().starts_with('/') {
             println!("  面板内不处理斜杠命令——按 q 返回对话后再使用。");
@@ -750,7 +750,7 @@ fn print_help() {
     println!("    /config     模型配置页（endpoint / model / api_key / 预算 / 编辑器）");
     println!("    /sessions   会话列表；/sessions <序号> 查看轨迹；clear <序号>|all 归档清理");
     println!("    /retry      重发上一条消息（打断或答非所问后免重新输入）");
-    println!("    /exit       退出");
+    println!("    /exit       退出（对话页直接输 q 或 quit 也可以）");
     println!("  模型调用的累计花费达到预算上限时会被自动拦截。");
     println!();
 }
@@ -1899,7 +1899,7 @@ fn sessions_list(
         println!(
             "  [n] 更晚 ｜ [p] 更早 ｜ [数字] 回看 ｜ [load n] 切换 ｜ [export n] 导出"
         );
-        println!("  [c <n>|all] 归档清理 ｜ [q] 返回");
+        println!("  [c <n>|all] 归档清理 ｜ [q/回车] 返回");
         match read_line("会话> ") {
             Line::Text(s) => {
                 let t = s.trim();
@@ -2026,7 +2026,7 @@ fn switch_ui(cfg: &mut ModelConfig, arg: Option<&str>) {
                 );
                 println!("  [1] 视口重绘（默认：每回合刷新视口，回滚缓冲区保留）");
                 println!("  [2] 滚动（纯聊天流，不做视口重绘）");
-                println!("  [q] 返回对话");
+                println!("  [q/回车] 返回对话");
                 let Some(line) = read_line_or_leave("界面> ") else { return };
                 if line.trim().starts_with('/') {
                     println!("  面板内不处理斜杠命令——按 q 返回对话后再使用（/exit 同）。");
