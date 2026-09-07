@@ -10,9 +10,19 @@
 #         （一处覆盖全部档案，切换模型后依然生效）
 #      b) 或逐档案填 api_key = ""
 #   4. cp config.example.toml config.toml，cargo run 即可
-# 其他来源：任意 OpenAI 兼容端点皆可（DeepSeek / Kimi 官方 /
-# Ollama / vLLM…），把 endpoint 与模型 id 换成你自己的即可。
+# 其他来源：任意 OpenAI 兼容端点皆可（OpenAI / DeepSeek / Kimi 官方 /
+# Ollama / vLLM…），照下面的通用示例加一个档案即可。
 # ─────────────────────────────────────────────────────────────────
+#
+# 通用档案示例（OpenAI 官方；取消注释并填入你自己的 Key 即可用）：
+# [[models]]
+# name = "OpenAI"
+# endpoint = "https://api.openai.com"
+# api_key = ""                               # 建议走 .env（见顶部说明）
+# model = "gpt-4o-mini"
+# context_len = 128000                       # 上下文窗口（tokens）
+# prices = { input = 0.15, output = 0.60 }   # 每 1M token 价格（USD），请按平台价格页核对
+# think_mode = "off"
 #
 # 配置概念只有一个：档案（[[models]]）。
 #   - 程序使用 active 指向的档案；/model <名> 切换 = 移动指针
@@ -33,8 +43,9 @@
 
 active = "Qwen3.8-Flash"
 
-# 分场景路由（可选）：把某个环节交给哪个档案；三个字段都可省略，
-# 省略 = 沿用 active。
+# 分场景路由（可选）：把某个环节交给哪个档案；各字段都可省略——
+# chat/generate/review 省略 = 沿用 active，generate_free 省略 =
+# 沿用 generate。
 [routing]
 chat = "Qwen3.8-Flash"      # 对话 / 工具环 / 假设实验室
 generate = "Qwen3.8-Flash"  # 出题·模板路径（选题/填槽/改编，小而快）
@@ -93,13 +104,3 @@ usd = 10.0
 
 # 练习编辑器（缺省自动：$EDITOR → $VISUAL → code --wait → vi）
 # editor = "code --wait"
-
-# 本地端点示例（免费但较慢，无需真实 Key，填占位即可）：
-# [[models]]
-# name = "Ollama 本地"
-# endpoint = "http://localhost:11434/v1"
-# api_key = "ollama"
-# model = "qwen2.5:7b"
-# context_len = 32000
-# prices = { input = 0.0, output = 0.0 }
-# think_mode = "off"
