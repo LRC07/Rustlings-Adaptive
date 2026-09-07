@@ -84,10 +84,9 @@ review = "Kimi-K3"          # 评审门 + 复盘
 
 | 环节 | 需要什么样的模型 | 示例中的推荐 |
 |---|---|---|
-| 对话 | 响应快、成本低、日常够用 | Qwen3.8-Flash |
+| 对话 | 响应快、成本低、日常够用 | Qwen3.8-Flash（想讲解更厚可换 MiniMax-M3）|
 | 出题 | 能力强：自由生成无模板兜底，题目质量直接决定练习体验（低频环节，贵一点值得）| Kimi-K3（思考 low）|
 | 评审门、复盘 | 能力强：评判细致、讲解透彻，可以慢一点 | Kimi-K3（开启思考）|
-| 对话的另一种选择 | 表达详细、爱举例子，教学更厚重 | MiniMax-M3 |
 
 **校内同学（清华）零成本上手**：
 1. 登录 [easycompute.cs.tsinghua.edu.cn](https://easycompute.cs.tsinghua.edu.cn/login)
