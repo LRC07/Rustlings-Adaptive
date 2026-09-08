@@ -101,6 +101,8 @@ pub(crate) fn run() {
     }
 
     let mut last_chat: Option<String> = None; // M9h: /retry resends this
+    // M9a6: cross-turn free-generation failure memory — see agent_turn.
+    let free_fail_note: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     loop {
         if agent::is_interrupted() {
             agent::reset_interrupt();
@@ -189,7 +191,7 @@ pub(crate) fn run() {
                             super::render::bold("你>"),
                             handback_label(&msg)
                         );
-                        agent_turn(&mut session, &msg, &cfg, &tracker, &client, &practice_ctx);
+                        agent_turn(&mut session, &msg, &cfg, &tracker, &client, &practice_ctx, &free_fail_note);
                     }
                     None => repaint_chat(&session, &cfg, &tracker),
                 }
@@ -214,7 +216,7 @@ pub(crate) fn run() {
                 // Cmd::Practice — it used to be dropped on this path.
                 if let Some(msg) = handback {
                     println!("{} {}", super::render::bold("你>"), handback_label(&msg));
-                    agent_turn(&mut session, &msg, &cfg, &tracker, &client, &practice_ctx);
+                    agent_turn(&mut session, &msg, &cfg, &tracker, &client, &practice_ctx, &free_fail_note);
                 }
             }
             Cmd::Usage => print_usage(&cfg, &tracker),
@@ -243,7 +245,7 @@ pub(crate) fn run() {
                             msg,
                             super::render::dim("（重发）")
                         );
-                        agent_turn(&mut session, &msg, &cfg, &tracker, &client, &practice_ctx);
+                        agent_turn(&mut session, &msg, &cfg, &tracker, &client, &practice_ctx, &free_fail_note);
                     }
                     None => println!("  还没有可重发的消息——先发一条再说。"),
                 }
@@ -260,7 +262,7 @@ pub(crate) fn run() {
                 last_chat = Some(line.clone());
                 repaint_chat(&session, &cfg, &tracker);
                 println!("{} {}", super::render::bold("你>"), line);
-                agent_turn(&mut session, &line, &cfg, &tracker, &client, &practice_ctx);
+                agent_turn(&mut session, &line, &cfg, &tracker, &client, &practice_ctx, &free_fail_note);
             }
         }
     }
@@ -921,6 +923,10 @@ fn agent_turn(
     tracker: &Arc<Mutex<UsageTracker>>,
     client: &Option<LlmClient>,
     practice_ctx: &practice::PracticeCtx,
+    // M9a6: cross-turn free-generation failure memory (0907 反馈 P4):
+    // the user's checkpoint choice always lands in a NEW turn — a
+    // fresh per-turn note forgot the reason before the retry saw it.
+    free_fail_note: &Arc<Mutex<Option<String>>>,
 ) {
     let Some(cl) = client else {
         println!();
@@ -970,7 +976,7 @@ fn agent_turn(
         root: PathBuf::from("."),
         session_id: Some(session.id.clone()),
         practice_note,
-        free_fail_note: Mutex::new(None),
+        free_fail_note: free_fail_note.clone(),
     };
     let history = session.messages.clone();
     let input = input.to_string();
@@ -1140,7 +1146,7 @@ fn agent_turn(
                             if let Some(msg) = practice::enter_at(practice_ctx, &offer.path, opts, Some(&deps)) {
                                 repaint_chat(session, cfg, tracker);
                                 println!("{} {}", super::render::bold("你>"), handback_label(&msg));
-                                agent_turn(session, &msg, cfg, tracker, client, practice_ctx);
+                                agent_turn(session, &msg, cfg, tracker, client, practice_ctx, free_fail_note);
                                 return;
                             }
                             repaint_chat(session, cfg, tracker);

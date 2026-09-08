@@ -305,7 +305,9 @@ pub(crate) fn after_pass(
         && let Some((updated, code)) = step2_challenge(deps, index, key, ex, &mut input, &outcome)
     {
         outcome = updated;
-        input.user_code = code.clone();
+        // M9a6: normalize to the review_view form (matches build_input
+        // and the prefetch) — step2 returns the raw file content.
+        input.user_code = review::review_view(&code);
         // The prefetch ran against the ORIGINAL code; an actual edit
         // invalidates it — re-run the comparison on the new code (the
         // "r" path already re-reviewed it above).
@@ -690,7 +692,11 @@ fn step2_challenge(
                     println!("  （无法读取练习文件）");
                     continue;
                 };
-                input.user_code = content.clone();
+                // M9a6: keep the SAME review_view form build_input
+                // stored — raw file content (tests module + marker)
+                // here skewed the re-review and the re-run comparison
+                // against the prefetched (impl-only) one.
+                input.user_code = review::review_view(&content);
                 let caller = make_caller(deps);
                 let input2 = input.clone();
                 let outcome2 = run_with_spinner("评审：重新评审…", move |progress| {

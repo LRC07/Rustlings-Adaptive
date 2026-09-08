@@ -140,7 +140,7 @@ object on its own line instead: {\"tool\": \"<name>\", \"arguments\": \
 There is no external `rustlings` CLI here — never suggest commands \
 like `rustlings hint <exercise>`. The only commands that exist are \
 this app's slash commands: /practice /generate /topics /stats /usage \
-/model /sessions /config /reset /help.";
+/model /sessions /config /reset /retry /help.";
 
 /// Blocking chat-turn caller; trait so tests can mock the model.
 pub trait ChatTurnCaller: Send + Sync {
@@ -268,7 +268,10 @@ pub struct AgentEnv {
     /// coach asks the user before spending another; this carries the
     /// rejection reason into the retry call's prompt (repair feedback
     /// survives the per-round checkpoint). Cleared on success.
-    pub free_fail_note: Mutex<Option<String>>,
+    /// M9a6: Arc-shared across turns — the checkpoint flow means the
+    /// user's choice (A: retry) always arrives in a NEW turn, and a
+    /// per-turn field forgot the reason before the retry could see it.
+    pub free_fail_note: std::sync::Arc<Mutex<Option<String>>>,
 }
 
 /// Offer to jump into the practice sub-mode after an exercise was
@@ -694,7 +697,7 @@ mod tests {
             root: PathBuf::from("."),
             session_id: None,
             practice_note: None,
-            free_fail_note: Mutex::new(None),
+            free_fail_note: std::sync::Arc::new(Mutex::new(None)),
         }
     }
 

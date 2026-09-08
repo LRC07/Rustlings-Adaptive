@@ -155,14 +155,22 @@ fn read_line_raw(prompt: &str, mask: bool) -> Line {
             match ed.feed(b) {
                 Feed::Keep => {}
                 Feed::Submit => {
+                    // M9a6: raw mode runs ECHO-off — when the Enter
+                    // arrives in the SAME read chunk as the typed bytes
+                    // (SSH burst coalescing), the chunk loop's tail
+                    // render never ran and the submitted line vanished
+                    // from the screen. Render once, then newline.
+                    ed.render();
                     println!();
                     return Line::Text(ed.line.trim().to_string());
                 }
                 Feed::Interrupted => {
+                    ed.render();
                     println!();
                     return Line::Interrupted;
                 }
                 Feed::Eof => {
+                    ed.render();
                     println!();
                     return Line::Eof;
                 }

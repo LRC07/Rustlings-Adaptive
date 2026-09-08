@@ -18,6 +18,7 @@ use std::path::Path;
 
 use crate::exercise::{self, index::ExerciseIndex, Exercise};
 use crate::taxonomy::ConceptGraph;
+use unicode_width::UnicodeWidthStr;
 
 use super::debrief::{self, DebriefDeps};
 use super::render;
@@ -449,11 +450,23 @@ fn first_pending(items: &[Item], index: &ExerciseIndex, include_fixtures: bool) 
 
 fn list_topics(board: &Board) {
     println!("  可用主题：");
-    for (label, top, ids) in &board.topics {
-        println!("    {label:<10} t {top:<14} {} 题", ids.len());
-    }
+    // M9a6: CJK labels pad by display width (char-count padding left
+    // the `t <id>` column ragged); include the fixture row in the width
+    // computation so all rows share one ruler.
+    let mut rows: Vec<(String, String, usize)> =
+        board.topics.iter().map(|(l, t, ids)| (l.clone(), t.clone(), ids.len())).collect();
     if board.include_fixtures && !board.fixtures.is_empty() {
-        println!("    {FIXTURE_TOPIC:<10} t {FIXTURE_TOPIC:<14} {} 题", board.fixtures.len());
+        rows.push((FIXTURE_TOPIC.to_string(), FIXTURE_TOPIC.to_string(), board.fixtures.len()));
+    }
+    let lw = rows.iter().map(|(l, _, _)| l.width()).max().unwrap_or(0);
+    let tw = rows.iter().map(|(_, t, _)| t.width()).max().unwrap_or(0);
+    for (label, top, n) in &rows {
+        println!(
+            "    {}  t {}  {} 题",
+            render::pad_display(label, lw),
+            render::pad_display(top, tw),
+            n
+        );
     }
 }
 

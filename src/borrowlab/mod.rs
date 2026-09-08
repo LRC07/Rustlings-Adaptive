@@ -20,6 +20,10 @@ pub struct LabSide {
     pub codes: Vec<String>,
     /// First error-level rendered message (for quick reading).
     pub first_error: Option<String>,
+    /// The compile was killed by the 30s timeout (M9a6): the empty
+    /// `codes` list must NOT be diffed as ground truth — a timed-out
+    /// side used to make every baseline error count as "resolved".
+    pub timed_out: bool,
 }
 
 /// Result of one hypothesis run.
@@ -74,6 +78,7 @@ pub fn compile_side(code: &str, tag: &str) -> Result<LabSide> {
                 compiles: false,
                 codes: vec![],
                 first_error: Some("编译超时（30s），已中止".to_string()),
+                timed_out: true,
             });
         }
     };
@@ -99,7 +104,7 @@ pub fn compile_side(code: &str, tag: &str) -> Result<LabSide> {
     let first_error = first_error.or_else(|| {
         diags.iter().find(|d| d.level == "error").and_then(|d| d.rendered.clone())
     });
-    Ok(LabSide { compiles: out.status.success(), codes, first_error })
+    Ok(LabSide { compiles: out.status.success(), codes, first_error, timed_out: false })
 }
 
 /// Count occurrences of each code.
@@ -141,14 +146,49 @@ pub fn diff_codes(baseline: &[String], hypothesis: &[String]) -> (CodeDelta, Cod
 pub fn apply_and_check(code: &str, hypothesis: &str) -> Result<LabReport> {
     let baseline = compile_side(code, "baseline")?;
     let hypothesis_side = compile_side(hypothesis, "hyp")?;
-    let (new_errors, resolved_errors) =
-        diff_codes(&baseline.codes, &hypothesis_side.codes);
+    let (new_errors, resolved_errors) = safe_diff(&baseline, &hypothesis_side);
     Ok(LabReport { baseline, hypothesis: hypothesis_side, new_errors, resolved_errors })
+}
+
+/// M9a6: a timed-out side carries an empty code list that means
+/// "unknown", not "no errors" — diffing it as truth reported every
+/// baseline error as resolved (the coach then taught a false
+/// conclusion from "deterministic evidence"). A timeout makes the
+/// run inconclusive.
+fn safe_diff(b: &LabSide, h: &LabSide) -> (CodeDelta, CodeDelta) {
+    if b.timed_out || h.timed_out {
+        (vec![], vec![])
+    } else {
+        diff_codes(&b.codes, &h.codes)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M9a6: a timed-out side must not be diffed as "no errors" — the
+    /// report becomes inconclusive instead of asserting every baseline
+    /// error resolved.
+    #[test]
+    fn timed_out_side_makes_diff_inconclusive() {
+        let baseline = LabSide {
+            compiles: false,
+            codes: vec!["E0382".into()],
+            first_error: Some("error[E0382]".into()),
+            timed_out: false,
+        };
+        let timed_out = LabSide {
+            compiles: false,
+            codes: vec![],
+            first_error: Some("编译超时（30s），已中止".into()),
+            timed_out: true,
+        };
+        let (new, resolved) = safe_diff(&baseline, &timed_out);
+        assert!(new.is_empty() && resolved.is_empty(), "timeout must not fabricate resolutions");
+        let (new, resolved) = safe_diff(&timed_out, &baseline);
+        assert!(new.is_empty() && resolved.is_empty(), "timeout must not fabricate additions");
+    }
 
     #[test]
     fn diff_codes_tracks_multiplicity() {

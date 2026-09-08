@@ -140,23 +140,29 @@ pub fn compile_and_run(ex: &Exercise) -> RunResult {
     let _ = fs::remove_file(&depinfo);
 
     println!("  正在编译 {} ...", ex.path.file_name().unwrap().to_string_lossy());
-    let compile = Command::new("rustc")
-        .arg("--edition")
-        .arg("2024")
-        .arg("--test")
-        .arg("-A")
-        .arg("warnings")
+    // M9a6: the interactive path used bare `Command::output()` with no
+    // timeout — an exercise whose tests contain `loop {}` hung the REPL
+    // (only Ctrl-C saved it). The verifier side has been hardened since
+    // M4; ride the same harness here.
+    let mut cmd = Command::new("rustc");
+    cmd.args(["--edition", "2024", "--test", "-A", "warnings"])
         .arg(&ex.path)
         .arg("-o")
-        .arg(&tmp)
-        .output();
+        .arg(&tmp);
+    let compile = crate::verifier::run_with_timeout(cmd, crate::verifier::RUSTC_TIMEOUT)
+        .map_err(|e| {
+            eprintln!("  调用 rustc 失败: {e}");
+        });
 
     match compile {
-        Err(e) => {
-            eprintln!("  调用 rustc 失败: {e}");
+        Err(()) => {
             return RunResult { passed: false, first_error: None };
         }
-        Ok(out) if !out.status.success() => {
+        Ok(crate::verifier::RunOutcome::TimedOut) => {
+            println!("  编译超时（{}s）——练习代码疑似死循环，已中止。", crate::verifier::RUSTC_TIMEOUT.as_secs());
+            return RunResult { passed: false, first_error: None };
+        }
+        Ok(crate::verifier::RunOutcome::Done(out)) if !out.status.success() => {
             let stderr = String::from_utf8_lossy(&out.stderr);
             let first_error = first_error_code(&stderr);
             // Trim the noisy "error: aborting due to ..." tail slightly.
@@ -165,18 +171,25 @@ pub fn compile_and_run(ex: &Exercise) -> RunResult {
             println!("  编译失败。请修正上方错误后重试。");
             return RunResult { passed: false, first_error };
         }
-        Ok(_) => {}
-    }
+        Ok(crate::verifier::RunOutcome::Done(_)) => {}
+    };
 
-    let run = Command::new(&tmp).output();
+    let run = crate::verifier::run_with_timeout(Command::new(&tmp), crate::verifier::TEST_TIMEOUT)
+        .map_err(|e| {
+            eprintln!("  运行测试二进制失败: {e}");
+        });
     let _ = fs::remove_file(&tmp);
     let _ = fs::remove_file(&depinfo);
     match run {
-        Err(e) => {
-            eprintln!("  运行测试二进制失败: {e}");
+        Err(()) => RunResult { passed: false, first_error: None },
+        Ok(crate::verifier::RunOutcome::TimedOut) => {
+            println!(
+                "  测试运行超时（{}s）——测试疑似死循环（loop{{}}/无限递归），已中止并按失败计。",
+                crate::verifier::TEST_TIMEOUT.as_secs()
+            );
             RunResult { passed: false, first_error: None }
         }
-        Ok(out) => {
+        Ok(crate::verifier::RunOutcome::Done(out)) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let stderr = String::from_utf8_lossy(&out.stderr);
             if !stdout.is_empty() {

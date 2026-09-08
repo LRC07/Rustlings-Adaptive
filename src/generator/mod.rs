@@ -523,7 +523,7 @@ pub fn gate_draft_with_policy(
         } else {
             ("[未完成模板的 rustc 诊断]", report.template.as_ref())
         };
-        let diags = run
+        let mut diags = run
             .map(|t| {
                 t.diagnostics
                     .iter()
@@ -532,6 +532,33 @@ pub fn gate_draft_with_policy(
                     .join("\n")
             })
             .unwrap_or_default();
+        // M9a6: compile diagnostics alone are EMPTY when the side
+        // compiled but its tests failed (assert mismatch — the most
+        // common LLM failure shape). The panic message and
+        // left/right values are exactly the evidence the repair loop
+        // needs; attach them instead of an empty block.
+        if diags.trim().is_empty()
+            && let Some(t) = run
+            && let Some(test) = &t.test
+            && !test.failures.is_empty()
+        {
+            let lines: Vec<String> = test
+                .failures
+                .iter()
+                .take(3)
+                .flat_map(|f| {
+                    let mut v = vec![format!("测试 {} 失败：", f.test)];
+                    if let (Some(l), Some(r)) = (&f.left, &f.right) {
+                        v.push(format!("  left:  {}", l.chars().take(120).collect::<String>()));
+                        v.push(format!("  right: {}", r.chars().take(120).collect::<String>()));
+                    } else if !f.output.trim().is_empty() {
+                        v.push(format!("  {}", f.output.trim().chars().take(240).collect::<String>()));
+                    }
+                    v
+                })
+                .collect();
+            diags = lines.join("\n");
+        }
         let diags: String = diags.chars().take(1200).collect();
         bail!("{}\n{header}\n{diags}", failure_reason(&report));
     }
@@ -786,8 +813,18 @@ fn load_linked_graph(paths: &Paths) -> Result<ConceptGraph> {
 /// `template_exhausted` (all candidates served, no slot variation left).
 fn log_generate_miss(paths: &Paths, topic: &Topic, focus: Option<&str>, err: &anyhow::Error) {
     let Some(path) = paths.miss_log.as_ref() else { return };
-    let kind = if format!("{err:#}").contains("都已出过") {
+    let text = format!("{err:#}");
+    // M9a6: telemetry hygiene — the log feeds template-batch planning,
+    // so polluting it with non-library-gap failures misdirects the
+    // planning: an interrupt is not a miss, and a gate failure means
+    // the template EXISTS but the fill didn't validate.
+    if text.contains("已打断") {
+        return;
+    }
+    let kind = if text.contains("都已出过") {
         "template_exhausted"
+    } else if text.contains("均未通过校验") || text.contains("质量门") {
+        "template_gate_failed"
     } else {
         "template_no_match"
     };
@@ -844,8 +881,11 @@ fn generate_matched(
     let mut last_fail = String::from("尚未尝试");
     let mut used_llm = pick.used_llm;
     for attempt in 0..MAX_ATTEMPTS {
+        // M9a6: do NOT reset the flag here — the REPL polls it to abort
+        // the turn and run_turn checks it between rounds. Resetting it
+        // inside the generator swallowed the interrupt (the turn kept
+        // running and billing in the background).
         if crate::agent::is_interrupted() {
-            crate::agent::reset_interrupt();
             bail!("已打断");
         }
         stage!("填槽+校验", attempt + 1);
@@ -1124,8 +1164,8 @@ fn llm_draft_loop(
     let mut last_fail = preset_fail.to_string();
     let mut prev_fail = String::new();
     for attempt in 1..=max_rounds {
+        // M9a6: bail WITHOUT resetting — see generate_matched's note.
         if crate::agent::is_interrupted() {
-            crate::agent::reset_interrupt();
             bail!("已打断");
         }
         if started.elapsed() > DRAFT_TIME_BUDGET {
@@ -2640,6 +2680,35 @@ fn add(a: i32, b: i32) -> i32 {
         let src = fs::read_to_string(&out.path).unwrap();
         assert!(src.starts_with("// 迷你取余"), "{src}");
         assert!(src.contains("I AM NOT DONE"));
+    }
+
+    /// M9a6: when the reference COMPILES but its tests FAIL (the most
+    /// common LLM failure shape — assert mismatch), the gate used to
+    /// attach an empty diagnostics block; the panic message and
+    /// left/right values must ride along as repair evidence.
+    #[test]
+    fn gate_test_failure_attaches_assert_evidence() {
+        let wire: DraftWire = serde_json::from_str(VALID_DRAFT_JSON).unwrap();
+        let mut draft = template::ExerciseDraft {
+            title: wire.title,
+            concepts: wire.concepts,
+            error_codes: wire.error_codes,
+            difficulty: wire.difficulty,
+            constraints: wire.constraints,
+            body: wire.body,
+            tests: wire.tests,
+            // Reference compiles fine but returns the WRONG value —
+            // the tests fail with assert_eq! left/right.
+            reference: "fn rem(a: i32, b: i32) -> i32 {\n    a + b\n}\n".into(),
+        };
+        ensure_ban_constraints(&mut draft);
+        let workdir = fresh_workdir("gate_test_fail").unwrap();
+        let err = gate_draft_with_policy(&mut draft, &workdir, true).unwrap_err();
+        let _ = fs::remove_dir_all(&workdir);
+        let msg = format!("{err:#}");
+        assert!(msg.contains("参考解未通过全部测试"), "{msg}");
+        assert!(msg.contains("[参考解的 rustc 诊断]"), "{msg}");
+        assert!(msg.contains("left:") && msg.contains("right:"), "assert evidence attached: {msg}");
     }
 
     /// M9a3（真实事故）: a draft whose REFERENCE fails to compile must

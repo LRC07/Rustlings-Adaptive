@@ -78,10 +78,25 @@ impl UsageTracker {
     }
 
     pub fn from_path(path: PathBuf) -> Self {
-        let records: Vec<UsageRecord> = fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        // M9a6: a torn write (crash mid-save) used to silently load an
+        // EMPTY ledger — the cumulative budget baseline reset to zero
+        // with no warning. Keep the corrupt file aside and say so.
+        let records: Vec<UsageRecord> = match fs::read_to_string(&path) {
+            Ok(s) => match serde_json::from_str(&s) {
+                Ok(r) => r,
+                Err(e) => {
+                    let backup = path.with_extension("corrupt");
+                    let _ = fs::rename(&path, &backup);
+                    eprintln!(
+                        "  （警告：{} 解析失败（{e}），已移至 {}，账本从零开始）",
+                        path.display(),
+                        backup.display()
+                    );
+                    Vec::new()
+                }
+            },
+            Err(_) => Vec::new(),
+        };
         let session_start = records.len();
         Self {
             path,
@@ -115,7 +130,12 @@ impl UsageTracker {
             let _ = fs::create_dir_all(parent);
         }
         if let Ok(json) = serde_json::to_string_pretty(&self.records) {
-            let _ = fs::write(&self.path, json);
+            // M9a6: temp+rename — a crash mid-`fs::write` left a torn
+            // file that the loader (see from_path) then quarantined.
+            let tmp = self.path.with_extension("tmp");
+            if fs::write(&tmp, &json).is_ok() {
+                let _ = fs::rename(&tmp, &self.path);
+            }
         }
     }
 

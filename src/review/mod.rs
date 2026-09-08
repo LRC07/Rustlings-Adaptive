@@ -281,18 +281,28 @@ pub fn strip_comments(code: &str) -> String {
         if c == '\'' {
             // Char literal ('a', '\n', '\u{7fff}') vs lifetime ('static):
             // a literal closes with a quote on the SAME line within a
-            // few chars; a lifetime never closes. Scan ahead, don't
-            // guess.
+            // few chars AND contains no whitespace; a lifetime is
+            // followed by `str = "it's"`-style text whose whitespace
+            // disqualifies it. M9a6: without the whitespace guard an
+            // apostrophe inside a string AFTER a lifetime was mistaken
+            // for the closer — the desynced scanner then deleted
+            // string content (`"a//b"` truncated at //).
             let mut j = i + 1;
             let mut closed = None;
+            let mut has_ws = false;
             while j < chars.len() && chars[j] != '\n' && j - i <= 12 {
                 if chars[j] == '\'' {
-                    closed = Some(j);
+                    if !has_ws {
+                        closed = Some(j);
+                    }
                     break;
                 }
                 if chars[j] == '\\' {
                     j += 2;
                     continue;
+                }
+                if chars[j].is_whitespace() {
+                    has_ws = true;
                 }
                 j += 1;
             }
@@ -1425,6 +1435,20 @@ mod tests {
         assert!(out.contains("'\"'"), "char literal intact: {out}");
         // Lifetimes don't break the scanner.
         assert!(out.contains("&'static str"), "lifetime intact: {out}");
+    }
+
+    /// M9a6 回归（幻影字符字面量）: a lifetime followed by a string with
+    /// an apostrophe must not desync the scanner — the old lookahead
+    /// took the in-string apostrophe as the closer and subsequently
+    /// DELETED string content ("a//b" truncated at //).
+    #[test]
+    fn strip_comments_lifetime_then_apostrophe_string() {
+        let code = "let x: &'a str = \"it's\";\nlet u = \"a//b\".to_string(); // 尾注\n";
+        let out = strip_comments(code);
+        assert!(out.contains("\"a//b\""), "string content must survive: {out}");
+        assert!(out.contains("\"it's\""), "apostrophe string intact: {out}");
+        assert!(!out.contains("尾注"), "comment still stripped: {out}");
+        assert_eq!(out.matches('\n').count(), code.matches('\n').count(), "lines kept");
     }
 
     fn review_input_for_tests() -> ReviewInput {

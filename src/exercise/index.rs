@@ -268,7 +268,11 @@ impl ExerciseIndex {
         }
         match serde_json::to_string_pretty(&self.entries) {
             Ok(json) => {
-                if let Err(e) = fs::write(&self.path, json) {
+                // M9a6: temp+rename — a crash mid-write used to leave a
+                // torn index that silently loaded as EMPTY on the next
+                // start (all statuses/reference/body lost).
+                let tmp = self.path.with_extension("tmp");
+                if let Err(e) = fs::write(&tmp, json).and_then(|_| fs::rename(&tmp, &self.path)) {
                     eprintln!("  （index 写入失败：{e}）");
                 }
             }

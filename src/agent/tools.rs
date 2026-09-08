@@ -530,6 +530,21 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
             // on rejection STOP and let the user decide (retry / fall
             // back to templates / give up) instead of burning more
             // expensive rounds inside the tool.
+            // M9a6: a user interrupt is NOT a quality rejection — do
+            // not poison the retry memory with it and do not tell the
+            // model this is a checkpoint decision.
+            if super::is_interrupted() || format!("{e:#}").contains("已打断") {
+                return Ok(ToolOutcome {
+                    value: json!({
+                        "ok": false,
+                        "interrupted": true,
+                        "fallback": "出题已被用户打断。停止调用工具，不要自行重试或编写练习，等用户下一步指示。",
+                    }),
+                    note: Some("出题已被用户打断".into()),
+                    practice: None,
+                    usage: bridge.total_usage(),
+                });
+            }
             if matches!(mode, generator::GenerateMode::Free) {
                 let full = format!("{e:#}");
                 let reason = full.chars().take(800).collect::<String>();
@@ -790,13 +805,16 @@ fn borrowlab(args: &Value, progress: &dyn Fn(&str)) -> Result<ToolOutcome> {
             "compiles": s.compiles,
             "error_codes": s.codes,
             "first_error": s.first_error,
+            "timed_out": s.timed_out,
         })
     };
     let fmt = |list: &[(String, u32)]| -> Vec<Value> {
         list.iter().map(|(c, n)| json!({"code": c, "count": n})).collect()
     };
 
-    let note = if report.hypothesis.compiles && !report.baseline.compiles {
+    let note = if report.baseline.timed_out || report.hypothesis.timed_out {
+        "一侧编译超时（30s）——本次实验不可判定，请如实告知用户，不要给出消除/引入结论".to_string()
+    } else if report.hypothesis.compiles && !report.baseline.compiles {
         "假设改动后编译通过（基线失败）".to_string()
     } else if report.no_change() {
         "假设改动没有改变诊断结果".to_string()
@@ -1057,7 +1075,7 @@ mod tests {
             root: root.to_path_buf(),
             session_id: Some("session_test".to_string()),
             practice_note: None,
-            free_fail_note: std::sync::Mutex::new(None),
+            free_fail_note: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 

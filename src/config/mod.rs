@@ -660,6 +660,12 @@ impl ModelConfig {
         p.reasoning_effort = self.reasoning_effort.clone();
         p.prices = self.prices.clone();
         p.llm_timeout_secs = self.llm_timeout_secs;
+        // M9a6: the streaming toggle never persisted — `stream` was the
+        // one field sync missed, so broken-SSE users who disabled
+        // streaming got it silently re-enabled on restart (or at once
+        // when a routed profile re-derived it). Profile semantics: None
+        // = default (streaming), Some(false) = off.
+        p.stream = if self.streaming { None } else { Some(false) };
         if self.key_source != KeySource::Env {
             p.api_key = self.api_key.clone();
         }

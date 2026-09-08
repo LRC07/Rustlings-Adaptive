@@ -300,8 +300,8 @@ impl VerifyReport {
 /// Hardening (M4.5c 前置): a pathological reference/template (e.g. a
 /// `loop {}` test) must never hang the CLI. Compile and test runs are
 /// polled and killed on timeout; a timed-out test counts as failed.
-const RUSTC_TIMEOUT: Duration = Duration::from_secs(60);
-const TEST_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const RUSTC_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const TEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Outcome of a polled subprocess run.
 pub(crate) enum RunOutcome {
