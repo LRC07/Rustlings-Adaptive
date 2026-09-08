@@ -123,9 +123,24 @@ pub(crate) fn run() {
             continue;
         }
         // Muscle-memory exits from the practice page / other REPLs:
-        // a bare q/quit/exit is never worth a model round-trip.
+        // a bare q/quit/exit is never worth a model round-trip — but it
+        // must not ACCIDENTALLY kill the program either (0909_2 反馈
+        // P4: 7 misfires in one session, opposite semantics from the
+        // practice page's q=回对话). Two-step confirm.
         if matches!(line, "q" | "quit" | "exit" | "退出") {
-            break;
+            println!("  即将退出程序（会话已实时保存）。回车或 y 确认退出，其他输入取消。");
+            match read_line("确认退出> ") {
+                Line::Text(s)
+                    if s.trim().is_empty() || s.trim().eq_ignore_ascii_case("y") =>
+                {
+                    break;
+                }
+                Line::Eof => break,
+                _ => {
+                    println!("  已取消——继续对话（确认退出用 /exit）。");
+                    continue;
+                }
+            }
         }
         // ```-fence paste mode: lines between two ``` lines become ONE
         // message. Only a SINGLE-line ``` opens the interactive fence
@@ -1423,7 +1438,10 @@ fn due_cn(due: &str) -> String {
             } else {
                 let days = (secs + 86_399) / 86_400;
                 match days {
-                    1 => "今天".to_string(),
+                    // "今天稍后" (0909_2 反馈 P3): plain "今天" read as
+                    // "due NOW" while due_concepts() said 0 — this row
+                    // is a scheduled date, not an action demand.
+                    1 => "今天稍后".to_string(),
                     2 => "明天".to_string(),
                     n => format!("{} 天后", n - 1),
                 }
@@ -2286,11 +2304,12 @@ mod tests {
 
     /// 0908 反馈 [口径不一致]: the /stats row formatter must agree with
     /// the coach's exact-instant due_concepts() — a due LATER TODAY is
-    /// "今天", not "已到期" (the old num_days() truncation lied).
+    /// "今天稍后", not "已到期" (the old num_days() truncation lied) and
+    /// not a bare "今天" (read as an action demand, 0909_2 反馈 P3).
     #[test]
     fn due_cn_matches_the_coachs_exact_clock() {
         let later_today = (chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339();
-        assert_eq!(due_cn(&later_today), "今天");
+        assert_eq!(due_cn(&later_today), "今天稍后");
         let tomorrow = (chrono::Utc::now() + chrono::Duration::hours(30)).to_rfc3339();
         assert_eq!(due_cn(&tomorrow), "明天");
         let in_3_days = (chrono::Utc::now() + chrono::Duration::hours(3 * 24)).to_rfc3339();

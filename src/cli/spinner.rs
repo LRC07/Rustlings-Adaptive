@@ -56,6 +56,12 @@ impl Spinner {
     }
 }
 
+/// After this many seconds the spinner suggests interrupting (0909_2
+/// 反馈 P7: 6.5-minute thinking rounds with only a seconds counter —
+/// users did not know Ctrl-C was available).
+const SLOW_HINT_SECS: u64 = 90;
+const SLOW_HINT: &str = "｜ 端点较慢，Ctrl-C 可打断 ";
+
 fn render(stop: Arc<AtomicBool>, status: StatusSlot) {
     let start = Instant::now();
     let mut i = 0;
@@ -70,12 +76,16 @@ fn render(stop: Arc<AtomicBool>, status: StatusSlot) {
         // break the in-place redraw and flood the screen with one
         // stale row per frame (9.4 实测："生成练习第几轮"刷屏).
         let tw = super::render::term_width();
-        let text = super::render::truncate_display(&text, tw.saturating_sub(12));
+        let hint = if secs >= SLOW_HINT_SECS { SLOW_HINT } else { "" };
+        let budget = tw
+            .saturating_sub(12)
+            .saturating_sub(unicode_width::UnicodeWidthStr::width(hint));
+        let text = super::render::truncate_display(&text, budget);
         if first {
             println!();
             first = false;
         }
-        print!("\r  {} {text} {secs:>3}s\x1B[0K", FRAMES[i % FRAMES.len()]);
+        print!("\r  {} {text} {secs:>3}s {hint}\x1B[0K", FRAMES[i % FRAMES.len()]);
         let _ = std::io::stdout().flush();
         i += 1;
         std::thread::sleep(TICK);

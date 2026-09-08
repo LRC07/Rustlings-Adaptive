@@ -282,10 +282,20 @@ pub struct TemplateUse {
 }
 
 /// Generation history view (M4.10): template_id → how it was used.
+/// Also carries the RECENTLY TRAINED concepts across ALL tiers
+/// (0909_2 反馈 P1): same-template variants were detected, but
+/// cross-template and cross-layer same-concept repeats were not —
+/// the pick prompt now sees them.
 #[derive(Debug, Clone, Default)]
 pub struct GenHistory {
     used: std::collections::BTreeMap<String, TemplateUse>,
+    /// Concepts of the learner's most recent exercises (newest first,
+    /// deduped), across every generation tier.
+    recent_concepts: Vec<String>,
 }
+
+/// How many recent exercises feed the concept-recency signal.
+const RECENT_EXERCISE_LIMIT: usize = 5;
 
 impl GenHistory {
     /// Build from the exercise index (tier-1 fills only; tiers 2/3
@@ -304,7 +314,21 @@ impl GenHistory {
                 entry.prev_slot_values.push(meta.slots.clone());
             }
         }
-        Self { used }
+        // Recent concepts (0909_2 P1): newest first by created_at —
+        // only generated entries carry it; index order is by path and
+        // says nothing about recency.
+        let mut dated: Vec<&crate::exercise::index::ExerciseMeta> =
+            index.iter().filter(|m| m.created_at.is_some()).collect();
+        dated.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        let mut recent_concepts: Vec<String> = Vec::new();
+        for meta in dated.into_iter().take(RECENT_EXERCISE_LIMIT) {
+            for c in &meta.concepts {
+                if !recent_concepts.contains(c) {
+                    recent_concepts.push(c.clone());
+                }
+            }
+        }
+        Self { used, recent_concepts }
     }
 
     pub fn times(&self, template_id: &str) -> u32 {
@@ -313,6 +337,22 @@ impl GenHistory {
 
     pub fn get(&self, template_id: &str) -> Option<&TemplateUse> {
         self.used.get(template_id)
+    }
+
+    /// Prompt block listing the recently trained concepts (0909_2 P1),
+    /// or "" when the index has no dated entries yet.
+    fn recent_block(&self) -> String {
+        if self.recent_concepts.is_empty() {
+            return String::new();
+        }
+        format!(
+            "\n\nRecently trained concepts (the learner's LAST exercises, newest first): {}.\n\
+             Do NOT re-serve these same concepts again unless the user EXPLICITLY asks for \
+             that exact topic — cross-template same-concept repeats waste practice time. \
+             Prefer an adjacent-but-different concept, or say no_match (the free tier will \
+             build a fresh scenario).\n",
+            self.recent_concepts.join(", ")
+        )
     }
 }
 
@@ -1109,11 +1149,68 @@ fn llm_draft_loop(
         let mut draft = draft;
         ensure_ban_constraints(&mut draft);
 
+        let pre_codes = draft.error_codes.clone();
         let workdir = fresh_workdir("rustlings_llm")?;
         let gated = gate_draft_with_policy(&mut draft, &workdir, true);
         let _ = fs::remove_dir_all(&workdir);
         match gated {
             Ok(_report) => {
+                // 0909_2 反馈 P2: the gate may have REPLACED the declared
+                // codes with the real first error (adopt_first_error) —
+                // if the body/comments still mention a replaced code the
+                // label would mislead the learner. ONE best-effort sync
+                // round asks the model to align labels; on any failure
+                // the gate-passed original (whose codes are already the
+                // REAL ones) ships anyway.
+                let replaced: Vec<String> =
+                    pre_codes.iter().filter(|c| !draft.error_codes.contains(*c)).cloned().collect();
+                let stale = !replaced.is_empty()
+                    && replaced.iter().any(|c| draft.body.contains(c.as_str()));
+                if stale {
+                    let sync_fail = format!(
+                        "你标注的错误码 {} 与实际诊断 {} 不符——已被按实际改判。更新题面注释与 \
+                         error_codes 保持一致后，重新输出完整 JSON",
+                        replaced.join("、"),
+                        draft.error_codes.join("、")
+                    );
+                    let sync_prompt =
+                        draft_prompt(request, focus, base, &concept_ids, attempt, &sync_fail, learner);
+                    if let Ok(reply) = call.call_bounded(&sync_prompt, max_tokens)
+                        && reply.finish_reason.as_deref() != Some("length")
+                        && let Some(json) = extract_json(&reply.content)
+                        && let Ok(wire) = serde_json::from_str::<DraftWire>(json)
+                    {
+                        let concepts2 = normalize_concepts(&wire.concepts, graph, paths);
+                        if !concepts2.is_empty() {
+                            let mut d2 = template::ExerciseDraft {
+                                title: wire.title,
+                                concepts: concepts2,
+                                error_codes: wire.error_codes,
+                                difficulty: wire.difficulty,
+                                constraints: wire.constraints,
+                                body: wire.body,
+                                tests: wire.tests,
+                                reference: wire.reference,
+                            };
+                            ensure_ban_constraints(&mut d2);
+                            let wd2 = fresh_workdir("rustlings_llm_sync")?;
+                            let ok2 = match gate_draft_with_policy(&mut d2, &wd2, true) {
+                                Ok(_) => true,
+                                Err(e) => { eprintln!("SYNC GATE ERR: {e:#}"); false }
+                            };
+                            let _ = fs::remove_dir_all(&wd2);
+                            if ok2 {
+                                calibrate_difficulty(&mut d2);
+                                return Ok(DraftResult {
+                                    draft: d2,
+                                    module_name,
+                                    hints: draft_hints,
+                                    attempts: attempt,
+                                });
+                            }
+                        }
+                    }
+                }
                 let mut draft = draft;
                 calibrate_difficulty(&mut draft);
                 return Ok(DraftResult { draft, module_name, hints: draft_hints, attempts: attempt });
@@ -1251,6 +1348,19 @@ fn draft_prompt(
                  is auto-rejected by the gate.\n"
             .into(),
     };
+    // 0909_2 反馈（测试者建议）: constructive requests must be SHRUNK to
+    // one error slice — the 44-line todo-manager rejection was the model
+    // drafting the whole app instead of one borrow-error fragment.
+    let shrink = if looks_constructive(request) {
+        "\n\n## Constructive request — shrink it to ONE error slice\n\
+         The user asked to BUILD something (实现/写一个/做一个…). Do NOT draft the whole \
+         application: imagine it, then cut everything that does not carry the error — \
+         keep ONE small slice (a single function or tiny struct, well within the line \
+         cap) with ONE plausible beginner mistake that teaches ONE Rust lesson.\n"
+        .to_string()
+    } else {
+        String::new()
+    };
     let retry = if attempt > 1 || !last_fail.is_empty() {
         format!(
             "\n## Your previous attempt FAILED the quality gate. Fix ALL of it:\n{last_fail}\n\
@@ -1276,13 +1386,16 @@ fn draft_prompt(
          {learner_block}\n\
          Topic / user request: {request}\n\
          {focus_block}\n\
-         {skeleton}{retry}\n\
+         {skeleton}{shrink}{retry}\n\
          ## Hard requirements (a local gate will REJECT the draft otherwise)\n\
          1. Single root cause: the exercise's UNFINISHED body must fail to COMPILE with one \
          plausible beginner mistake, and the first rustc error must be one of the codes you \
          declare in error_codes. Do not use todo!() for the hole — leave real, plausible \
          learner code that triggers the error. Syntax errors, unused-import noise or several \
-         unrelated errors at once all count as a failed draft.\n\
+         unrelated errors at once all count as a failed draft. error_codes must be the code \
+         the unfinished body ACTUALLY fails with — the gate verifies it against real rustc \
+         output and a mislabel is rejected. Comments may only mention codes that appear in \
+         error_codes (0909_2 反馈 P2: 注释里的错误码标签失真，用户按标签排查会扑空).\n\
          2. Real scenario: the body does one small, humanly describable task; the first comment \
          lines say what the code is trying to do and what is wrong (in 简体中文, like the \
          reference exercise).\n\
@@ -1292,16 +1405,19 @@ fn draft_prompt(
          .clone()/.to_owned() anywhere; under `iterator-only` it must contain no for/while \
          loop; declaring a constraint your own reference violates is an automatic rejection.\n\
          4. Tests: a #[cfg(test)] mod tests with 2+ tests asserting observable behavior; \
-         they must FAIL on the unfinished body and PASS on the reference.\n\
+         they must FAIL on the unfinished body and PASS on the reference. Tests must not \
+         contain meta-commentary (about the task, grading, or \"tests may need adjustment\") \
+         and no empty or endless placeholder loops (0909_2 反馈 P9).\n\
          5. std-only, single file: no external crates, no unsafe, no std::process, no std::fs, \
-         no file/network IO. body: 10–40 non-empty lines; include the literal line \
+         no file/network IO. body: 5–50 non-empty lines (instruction comments \
+         count; tests are separate and uncounted); include the literal line \
          `// I AM NOT DONE` at the end of the body.\n\
          6. constraints: choose from [\"no-clone\", \"no-unwrap\", \"iterator-only\"]; \
-         do NOT declare \"max-lines\" (a 40-line cap applies automatically).\n\
+         do NOT declare \"max-lines\" (a 50-line cap applies automatically).\n\
          7. concepts: 1–2 ids from EXACTLY this list: [{ids}]\n\
          8. difficulty: \"easy\" (apply one known fix) | \"medium\" (choose between 2–3 \
          plausible fixes, or non-obvious error) | \"hard\" (restructure).\n\
-         9. Keep it COMPACT: body 15–35 lines (hard cap 40), tests ≤20 lines, \
+         9. Keep it COMPACT: body 8–45 lines (hard cap 50), tests ≤20 lines, \
          reference ≤20 lines. Trim blank lines and repetitive tests.\n\
          10. hints: 1–3 SHORT graded Chinese hints (方向 → 具体 → 接近正确写法), \
          each one sentence, never giving away the answer or the exact line to write.\n\n\
@@ -1646,10 +1762,27 @@ fn llm_pick_template<'a>(
         ),
         None => String::new(),
     };
+    // 0909_2 反馈 P1: concept-recency signal (cross-template AND
+    // cross-layer repeats were not deduped before).
+    let recent = history.recent_block();
+    // 0909_2 反馈 P5: constructive requests ("实现X/写一个Y") want a
+    // SPECIFIC artifact — an eager near-miss template produces a
+    // scenario the user never asked for. Say no_match and let the free
+    // tier build it.
+    let constructive = if looks_constructive(request) {
+        "\n\nThis looks like a CONSTRUCTIVE request (the user wants a specific artifact \
+         built: 实现/写一个/做一个…). A template almost always serves a DIFFERENT scenario — \
+         say no_match unless a template trains EXACTLY this artifact; the pipeline will \
+         then generate one from scratch. Do NOT settle for a merely concept-adjacent \
+         template.\n"
+        .to_string()
+    } else {
+        String::new()
+    };
     let usage_note = if pool.is_some() { " | keyword-score" } else { " | usage" };
     let prompt = format!(
         "You are choosing a Rust practice exercise template for a learner.\n\n\
-         User request: {request}{focus_block}{analysis}\n\n\
+         User request: {request}{focus_block}{analysis}{recent}{constructive}\n\n\
          Available templates (id | title | concepts | error-codes{usage_note}):\n{catalog}\n\n\
          Pick a template ONLY if it trains the SPECIFIC technique or behavior the request \
          asks for. A template that merely lives in the same concept domain while training \
@@ -1682,6 +1815,17 @@ fn llm_pick_template<'a>(
             used_llm: true,
             variant: history.times(&t.id) > 0,
         }))
+}
+
+/// Heuristic intent check (0909_2 反馈 P5): does the request ask to
+/// BUILD something ("实现一个待办管理器" / "写一个 CSV 解析器")? Such
+/// constructive requests are better served by the free tier than by an
+/// eager near-miss template match.
+fn looks_constructive(request: &str) -> bool {
+    const MARKERS: [&str; 9] =
+        ["实现", "写一个", "写个", "做一个", "弄一个", "搭一个", "implement", "create a", "build a"];
+    let lower = request.to_lowercase();
+    MARKERS.iter().any(|m| lower.contains(m))
 }
 
 fn llm_fill_slots(
@@ -2658,6 +2802,160 @@ fn add(a: i32, b: i32) -> i32 {
         .unwrap();
         assert_eq!(out.tier, Tier::Free);
         assert_eq!(cap.get(), FREE_DRAFT_MAX_TOKENS, "free tier must ride the looser cap");
+    }
+
+    /// 0909_2 反馈 P1: recent_concepts collects the LAST exercises'
+    /// concepts across ALL tiers (newest first, deduped) — cross-template
+    /// and cross-layer same-concept repeats were invisible before.
+    #[test]
+    fn gen_history_tracks_recent_concepts_across_tiers() {
+        use crate::exercise::index::{ExerciseIndex, ExerciseMeta, Source, Status};
+        let mut idx = ExerciseIndex::load_from(std::env::temp_dir().join("rs_gen_recent_nonexistent"));
+        let mk = |path: &str, concepts: &[&str], source: Source, created: Option<&str>| ExerciseMeta {
+            path: path.into(),
+            title: path.into(),
+            concepts: concepts.iter().map(|s| s.to_string()).collect(),
+            error_codes: vec![],
+            difficulty: None,
+            source,
+            session_id: None,
+            trigger: None,
+            created_at: created.map(str::to_string),
+            attempts: 0,
+            status: Status::Pending,
+            last_error: None,
+            last_fail_error: None,
+            hints: Vec::new(),
+            feedback: None,
+            slots: Default::default(),
+            reference: None,
+            constraints: Vec::new(),
+            review_verdict: None,
+        };
+        idx.upsert(mk("generated/old.rs", &["ownership.move"], Source::Free, Some("2026-09-09T01:00:00Z")));
+        idx.upsert(mk(
+            "generated/new.rs",
+            &["collections.hashmap", "borrowing.shared-mut"],
+            Source::TemplateFill { template_id: "hashmap-entry-count".into() },
+            Some("2026-09-09T02:00:00Z"),
+        ));
+        idx.upsert(mk("generated/nodate.rs", &["traits.basics"], Source::Free, None));
+        let h = GenHistory::from_index(&idx);
+        // Newest first (new.rs 02:00 before old.rs 01:00), deduped,
+        // undated entries skipped.
+        assert_eq!(
+            h.recent_block(),
+            "\n\nRecently trained concepts (the learner's LAST exercises, newest first): \
+             collections.hashmap, borrowing.shared-mut, ownership.move.\n\
+             Do NOT re-serve these same concepts again unless the user EXPLICITLY asks for \
+             that exact topic — cross-template same-concept repeats waste practice time. \
+             Prefer an adjacent-but-different concept, or say no_match (the free tier will \
+             build a fresh scenario).\n"
+        );
+    }
+
+    /// 0909_2 反馈 P5 + P1: constructive requests and recently trained
+    /// concepts both surface in the pick prompt.
+    #[test]
+    fn pick_prompt_carries_recent_and_constructive_signals() {
+        let fx = Fixture::new();
+        let paths = fx.paths();
+        let mut graph = crate::taxonomy::ConceptGraph::load(&paths.taxonomy_file).unwrap();
+        let templates = template::load_dir(&paths.templates_dir).unwrap();
+        let items: Vec<(&str, &[String])> =
+            templates.iter().map(|t| (t.id.as_str(), t.concepts.as_slice())).collect();
+        graph.link_templates(items).unwrap();
+        // history WITH a recent-concept signal: an index whose latest
+        // entry trained t.c.
+        let mut idx = crate::exercise::index::ExerciseIndex::load_from(std::env::temp_dir().join("rs_gen_recent_fx"));
+        idx.upsert(crate::exercise::index::ExerciseMeta {
+            path: "generated/x.rs".into(),
+            title: "x".into(),
+            concepts: vec!["t.c".into()],
+            error_codes: vec![],
+            difficulty: None,
+            source: crate::exercise::index::Source::Free,
+            session_id: None,
+            trigger: None,
+            created_at: Some("2026-09-09T02:00:00Z".into()),
+            attempts: 0,
+            status: crate::exercise::index::Status::Pending,
+            last_error: None,
+            last_fail_error: None,
+            hints: Vec::new(),
+            feedback: None,
+            slots: Default::default(),
+            reference: None,
+            constraints: Vec::new(),
+            review_verdict: None,
+        });
+        let h = GenHistory::from_index(&idx);
+
+        let prompts = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let rec = prompts.clone();
+        let mut call = move |p: &str| -> Result<LlmReply> {
+            rec.borrow_mut().push(p.to_string());
+            Ok(reply(r#"{"template_id": "mini-add"}"#))
+        };
+        llm_pick_template(
+            &templates,
+            "写一个交通灯状态机",
+            None,
+            &h,
+            &mut call,
+            None,
+            None,
+        )
+        .unwrap();
+        let prompt = prompts.borrow()[0].clone();
+        assert!(prompt.contains("Recently trained concepts"), "{prompt}");
+        assert!(prompt.contains("t.c"), "{prompt}");
+        assert!(prompt.contains("CONSTRUCTIVE request"), "{prompt}");
+    }
+
+    /// 0909_2 反馈 P2: when the gate's first-error adoption REPLACES the
+    /// declared codes and the body/comments still mention the replaced
+    /// code, ONE best-effort sync round aligns the labels; the synced
+    /// draft must re-pass the gate. (Free tier: max_rounds=1, the sync
+    /// is a bonus round.)
+    #[test]
+    fn adopted_label_mismatch_gets_a_sync_round() {
+        let fx = Fixture::new();
+        let paths = fx.paths();
+        // Round 1: declares E0499 while the body actually fails E0308,
+        // and the comment mentions E0499 — gate adopts E0308, comment
+        // goes stale.
+        let wrong = VALID_DRAFT_JSON
+            .replace(r#""error_codes": ["E0308"]"#, r#""error_codes": ["E0499"]"#)
+            .replace("// 计算 a 除以 b 的余数。", "// 这里会报 E0499。\\n// 计算 a 除以 b 的余数。");
+        // Sync round: aligned labels, comment mentions the REAL code.
+        let fixed = VALID_DRAFT_JSON
+            .replace("// 计算 a 除以 b 的余数。", "// 这里会报 E0308。\\n// 计算 a 除以 b 的余数。");
+        let replies = std::cell::RefCell::new(vec![wrong.clone(), fixed.clone()]);
+        let prompts = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let rec = prompts.clone();
+        let mut call = move |prompt: &str| -> Result<LlmReply> {
+            rec.borrow_mut().push(prompt.to_string());
+            Ok(reply(&replies.borrow_mut().remove(0)))
+        };
+        let out = generate_full(
+            &Topic::FreeText("取余".into()),
+            None,
+            GenerateMode::Free,
+            &paths,
+            &GenHistory::default(),
+            None, // learner
+            Some(&mut call),
+            None,
+            "",
+        )
+        .unwrap();
+        let ps = prompts.borrow();
+        assert_eq!(ps.len(), 2, "sync round must fire exactly once: {:?}", ps.len());
+        assert!(ps[1].contains("已被按实际改判"), "sync prompt carries the mismatch: {}", ps[1]);
+        assert_eq!(out.error_codes, vec!["E0308".to_string()]);
+        let src = fs::read_to_string(&out.path).unwrap();
+        assert!(!src.contains("E0499"), "stale label replaced: {src}");
     }
 
     /// 0907 反馈 P4: free generation is ONE round per call — a rejected

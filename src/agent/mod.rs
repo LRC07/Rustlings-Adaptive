@@ -80,7 +80,7 @@ exercise as an alternative, and let them choose.
 Tools:
 - `list_concepts` {} — list the concept ids covered by the taxonomy.
 - `generate_exercise` {\"topic\": string, \"focus\": string, \
-\"reason\": string, \"mode\": \"auto|free\"} — generate a small 10-40 \
+\"reason\": string, \"mode\": \"auto|free\"} — generate a small 5-50 \
 line fill-in exercise, triple-verified locally (compiles / reference \
 solution passes all tests / unfinished template fails). auto (default) \
 falls through template-fill → adapted → free generation, always \

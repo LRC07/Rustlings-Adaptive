@@ -6,7 +6,7 @@
 //!
 //! This module provides:
 //! - loading + validating a directory of templates (rule filter from
-//!   design §7.4-2: ≤2 concepts, 10–40 body lines, ≤2 todo!-macros,
+//!   design §7.4-2: ≤2 concepts, 5–50 body lines, ≤2 todo!-macros,
 //!   tests present, slot declarations consistent with placeholders),
 //! - rendering (slot filling) with per-kind value validation,
 //! - a deterministic default fill so generation also works offline
@@ -387,11 +387,13 @@ pub fn rule_filter_draft(d: &ExerciseDraft) -> Vec<String> {
         }
     }
 
-    // 10–40 non-empty body lines (instruction comments count: they are
+    // 5–50 non-empty body lines (instruction comments count: they are
     // part of the rendered snippet; tests are separate and uncounted).
+    // 0909_2 反馈：40 行上限曾拒掉 44 行的多结构体场景、GLM 系大题
+    // 成批被卡；50 是终端体验红线（题目页整文件渲染，再长就要滚屏）。
     let body_lines = d.body.lines().filter(|l| !l.trim().is_empty()).count();
-    if !(10..=40).contains(&body_lines) {
-        v.push(format!("body 非空行数 {body_lines} 不在 10–40 范围"));
+    if !(5..=50).contains(&body_lines) {
+        v.push(format!("body 非空行数 {body_lines} 不在 5–50 范围"));
     }
 
     let todos = count_todo(&d.body);
@@ -663,7 +665,7 @@ misconceptions = ["以为 String 赋值会深拷贝"]
 
         let mut t = sample();
         t.body = "too short".into();
-        assert!(rule_filter(&t).iter().any(|s| s.contains("10–40")));
+        assert!(rule_filter(&t).iter().any(|s| s.contains("5–50")));
 
         let mut t = sample();
         t.tests = "no tests here".into();

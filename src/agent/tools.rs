@@ -53,7 +53,7 @@ pub fn tool_schemas() -> Vec<Tool> {
         },
         Tool {
             name: TOOL_GENERATE_EXERCISE.into(),
-            description: "生成一道 10-40 行的 Rust 填空练习（本地三重校验：能编译/参考解全绿/未完成模板必失败）\
+            description: "生成一道 5-50 行（题面非空行计）的 Rust 填空练习（本地三重校验：能编译/参考解全绿/未完成模板必失败）\
                           并写回练习目录，随后用户可立即开始做题"
                 .into(),
             parameters: json!({
