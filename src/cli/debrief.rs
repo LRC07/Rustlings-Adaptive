@@ -238,14 +238,36 @@ pub(crate) fn after_pass(
     println!("{}", render::header("解答评审门"));
 
     let caller = make_caller(deps);
+    let quiz_caller = make_caller(deps);
     let input2 = input.clone();
     // 9.5 实测：the gate's LLM call can run for minutes on slow
     // endpoints — set the expectation up front.
-    println!("  （评审门需要模型评审解答，端点慢时可能需要 1–2 分钟）");
-    let outcome = match run_with_spinner("评审：模型评审解答…", |progress| {
-        review::run_gate(caller, input2, progress)
-    }) {
-        Some(o) => o,
+    println!("  （评审门与理解校核并行调用模型，端点慢时可能需要 1–2 分钟）");
+    // M9a4 校核∥评审并行: quiz generation and the review gate are
+    // INDEPENDENT (both eat only ReviewInput), so the quiz runs on its
+    // own thread beside the gate behind ONE spinner. Wall time drops
+    // from review+quiz to max(review, quiz). The quiz thread stays
+    // silent (the spinner line belongs to the gate); a quiz failure or
+    // panic degrades to exactly the old "跳过本步" path. Interrupt
+    // semantics unchanged: the spinner abandons both, in-flight calls
+    // finish in the background and still bill.
+    let input_quiz = input.clone();
+    let lf = last_fail.map(str::to_string);
+    let (outcome, quiz_pre) = match run_with_spinner(
+        "评审+校核（并行）：评审解答 / 生成校核题…",
+        move |progress| {
+            let quiz_thread = quiz_caller.map(|mut c| {
+                std::thread::spawn(move || review::llm_quiz(&mut *c, &input_quiz, lf.as_deref()))
+            });
+            let outcome = review::run_gate(caller, input2, progress);
+            if quiz_thread.is_some() {
+                progress("评审完成，等待校核题收尾…");
+            }
+            let quiz_pre = quiz_thread.and_then(|h| h.join().ok());
+            (outcome, quiz_pre)
+        },
+    ) {
+        Some((o, q)) => (o, q),
         None => return DebriefExit::Stay,
     };
     render_gate(&outcome);
@@ -253,8 +275,10 @@ pub(crate) fn after_pass(
 
     // ── Debrief (§4.3) ──
 
-    // Step 1: explanation check (understanding quiz).
-    let explanation_hit = step1_explanation_check(deps, &input, last_fail);
+    // Step 1: explanation check (understanding quiz) — the quiz was
+    // already fetched beside the gate; only the interactive part and
+    // the optional free-text judging happen here.
+    let explanation_hit = step1_explanation_check(deps, &input, quiz_pre);
 
     // Step 2: better-solution challenge (triggered when not clean).
     let mut outcome = outcome;
@@ -455,12 +479,17 @@ fn ask(prompt: &str) -> Option<String> {
 /// Step 1: understanding quiz (LLM-generated options anchored on the
 /// template's root-cause/misconception seeds; free text judged by the
 /// model). Returns Some(hit/miss); None = skipped.
+///
+/// M9a4: the quiz itself is generated BESIDE the review gate (see
+/// after_pass) and arrives here as `pre` — None = offline, Some(Err) =
+/// generation failed (both degrade to the old skip messages); only the
+/// interactive part and the optional free-text judging remain here.
 fn step1_explanation_check(
     deps: &DebriefDeps,
     input: &review::ReviewInput,
-    last_fail: Option<&str>,
+    pre: Option<Result<review::Quiz, anyhow::Error>>,
 ) -> Option<bool> {
-    let Some(mut caller) = make_caller(deps) else {
+    let Some(quiz) = pre else {
         println!();
         println!("  复盘（离线）：跳过理解校核。");
         return None;
@@ -468,15 +497,9 @@ fn step1_explanation_check(
     println!();
     println!("{}", render::header("复盘 · 理解校核"));
 
-    let input2 = input.clone();
-    let lf = last_fail.map(str::to_string);
-    let quiz = run_with_spinner("复盘：生成理解校核题（LLM，可能较慢）…", move |progress| {
-        progress("生成校核题…");
-        review::llm_quiz(&mut *caller, &input2, lf.as_deref())
-    });
     let quiz = match quiz {
-        Some(Ok(q)) => q,
-        Some(Err(_)) | None => {
+        Ok(q) => q,
+        Err(_) => {
             println!("  （未能生成校核题，跳过本步）");
             return None;
         }
