@@ -623,6 +623,13 @@ const RUST_KEYWORDS: &[&str] = &[
     "type", "unsafe", "use", "where", "while",
 ];
 
+/// Primitive type names — lowercase and NOT keywords in Rust's grammar,
+/// so the keyword branch misses them (`i32` used to render plain).
+const RUST_PRIMITIVES: &[&str] = &[
+    "bool", "char", "str", "f32", "f64", "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16",
+    "u32", "u64", "u128", "usize",
+];
+
 fn is_ident_start(c: char) -> bool {
     c.is_alphabetic() || c == '_'
 }
@@ -788,6 +795,17 @@ fn hl_rust_line(line: &str, st: HlState, ansi: bool) -> (String, HlState) {
                 i = j;
                 continue;
             }
+            // M9a3（"Vec<Shape> 未渲染" 反馈）：类型名上色。基本类型走
+            // 词表；其余凡是首字母大写的标识符（std 类型/枚举变体/用户
+            // 类型/常量）一律 cyan——Rust 命名约定下这几乎总是"类型级
+            // 事物"，与宏、行内代码同色，语义一致。
+            if RUST_PRIMITIVES.contains(&word.as_str())
+                || word.chars().next().is_some_and(|c| c.is_uppercase())
+            {
+                out.push_str(&p.cyan(&word));
+                i = j;
+                continue;
+            }
             out.push_str(&word);
             i = j;
             continue;
@@ -916,8 +934,10 @@ mod tests {
     fn fence_content_verbatim_and_wrapped_lines_align() {
         let src = "```rust\nfn very_long_function(a: u32, b: u32) -> u32 { a + b }\n```\n后记";
         let out = render(src, 12, true);
-        // `fn` is bold-wrapped; the REST of the line stays verbatim.
-        assert!(out.contains("very_long_function(a: u32, b: u32) -> u32 { a + b }"), "{out}");
+        // `fn` is bold-wrapped and (M9a3) types are cyan — compare on
+        // the stripped text; escapes may sit inside the line.
+        let plain = strip_codes(&out);
+        assert!(plain.contains("very_long_function(a: u32, b: u32) -> u32 { a + b }"), "{out}");
         assert!(out.contains("后记"), "{out}");
     }
 
@@ -947,8 +967,7 @@ mod tests {
     }
 
     #[test]
-    fn highlight_state_carries_across_lines_and_langs() {
-        // Block comment spanning lines; macro cyan; non-rust fence plain.
+    fn highlight_state_carries_across_lines_and_langs() {        // Block comment spanning lines; macro cyan; non-rust fence plain.
         let src = "```rust\n/* 开头\n仍在注释 */\nprintln!(\"x\");\n```\n```json\n{ }\n```";
         let out = render(src, 80, true);
         assert!(out.contains("\x1B[2m/* 开头"), "{out}");
@@ -957,6 +976,27 @@ mod tests {
         // json fence: no keyword coloring (fn wouldn't appear anyway;
         // assert the braces stayed raw).
         assert!(out.contains("{ }"), "{out}");
+    }
+
+    /// M9a3（"Vec<Shape> 未渲染" 反馈）: type names get cyan — std
+    /// types, primitives, and user-defined types alike (uppercase
+    /// heuristic); the code text itself stays untouched.
+    #[test]
+    fn rust_types_painted_in_fences() {
+        let src = "```rust\nlet v: Vec<Shape> = Vec::new();\nlet n: i32 = f(3u8);\n```\n后记";
+        let out = render(src, 80, true);
+        assert!(out.contains("\x1B[36mVec\x1B[0m"), "std type cyan: {out}");
+        assert!(out.contains("\x1B[36mShape\x1B[0m"), "user type cyan: {out}");
+        assert!(out.contains("\x1B[36mi32\x1B[0m"), "primitive cyan: {out}");
+        assert!(out.contains("\x1B[36mu8\x1B[0m"), "primitive cyan: {out}");
+        let plain = strip_codes(&out);
+        assert!(plain.contains("let v: Vec<Shape> = Vec::new();"), "text preserved: {plain}");
+        assert!(plain.contains("let n: i32 = f(3u8);"), "text preserved: {plain}");
+        // Streamed must match whole-render (shared path).
+        let mut sm = StreamMd::new(80, true);
+        let mut got = sm.feed(src);
+        got.push_str(&sm.finish());
+        assert_eq!(got, out, "stream == render");
     }
 
     #[test]

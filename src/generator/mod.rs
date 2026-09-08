@@ -1061,9 +1061,12 @@ pub const DRAFT_MAX_TOKENS: u32 = 3000;
 /// Free-form tier-3 cap (0909_2 round4): loose from DRAFT_MAX_TOKENS —
 /// glm-52-low truncated at exactly 3000 twice and failed, and some
 /// endpoints count THINKING tokens against this budget (M9r: reasoning
-/// 699/700). A ceiling, not a target: it costs nothing unless the model
-/// rambles, while a truncation-retry round costs a full call.
-pub const FREE_DRAFT_MAX_TOKENS: u32 = 5000;
+/// 699/700). M9a3: GLM-5.3-Flash(high) 实测 token 消耗大——推理模型的
+/// 思考与正文 JSON 同挤一个预算，5000 下常截断触发"压缩重试"全价一
+/// 轮；提高到 6500 让思考尖峰 + 合格题 JSON（~1200-2500）放得下。
+/// A ceiling, not a target: it costs nothing unless the model rambles,
+/// while a truncation-retry round costs a full call.
+pub const FREE_DRAFT_MAX_TOKENS: u32 = 6500;
 /// Wall-clock budget for the whole draft repair loop (M4.7): on slow
 /// endpoints, stop with a clear report instead of burning rounds.
 pub const DRAFT_TIME_BUDGET: Duration = Duration::from_secs(420);
