@@ -48,6 +48,9 @@ impl Painter {
     fn dim(&self, t: &str) -> String {
         self.paint("2", t)
     }
+    fn green(&self, t: &str) -> String {
+        self.paint("32", t)
+    }
 }
 
 /// Render markdown to a styled, wrapped string.
@@ -66,7 +69,7 @@ pub(crate) fn render(src: &str, width: usize, ansi: bool) -> String {
     // styling the rest of the transcript as code forever.
     if st.in_fence {
         let p = Painter { ansi };
-        out.push_str(&p.dim("```"));
+        out.push_str(&p.dim("───"));
         out.push('\n');
     }
     out
@@ -91,12 +94,27 @@ pub(crate) struct LineRenderer {
     width: usize,
     ansi: bool,
     in_fence: bool,
+    /// Rust syntax-highlight carry-over inside a fence (0909_2 反馈:
+    /// keyword coloring) — block comments / raw strings span lines.
+    hl: HlState,
+    hl_active: bool,
     table: Option<TableState>,
+}
+
+/// Carry-over tokenizer state for fenced Rust highlighting.
+#[derive(Default, Clone, Copy, PartialEq)]
+enum HlState {
+    #[default]
+    Normal,
+    /// Inside a /* … */ block comment.
+    BlockComment,
+    /// Inside a raw string r#"…"# (depth 1..=255 tracked as count).
+    RawString(u8),
 }
 
 impl LineRenderer {
     pub(crate) fn new(width: usize, ansi: bool) -> Self {
-        Self { width, ansi, in_fence: false, table: None }
+        Self { width, ansi, in_fence: false, hl: HlState::Normal, hl_active: false, table: None }
     }
 
     /// Render one complete line (caller consumed its '\n'); output
@@ -107,14 +125,35 @@ impl LineRenderer {
         // pending state first (a fence inside a table ends the table).
         if line.trim_start().starts_with("```") {
             let mut out = self.flush_pending();
-            self.in_fence = !self.in_fence;
+            let opening = !self.in_fence;
+            self.in_fence = opening;
+            self.hl = HlState::Normal;
+            self.hl_active = opening
+                && matches!(lang_of(line).as_deref(), None | Some("rust"));
             let p = Painter { ansi: self.ansi };
-            out.push_str(&p.dim(line));
+            // 0909_2 反馈: the raw ```rust marker line read as noise —
+            // fences now render as thin dim rules (language tagged).
+            let lang = lang_of(line).unwrap_or_default();
+            if opening {
+                if lang.is_empty() {
+                    out.push_str(&p.dim("───"));
+                } else {
+                    out.push_str(&p.dim(&format!("─── {lang}")));
+                }
+            } else {
+                out.push_str(&p.dim("───"));
+            }
             out.push('\n');
             return out;
         }
         if self.in_fence {
-            // Code keeps its shape: no wrap, no inline styling.
+            // Code keeps its shape (no wrap); with a rust fence the
+            // line goes through the syntax highlighter.
+            if self.hl_active {
+                let (painted, next) = hl_rust_line(line, self.hl, self.ansi);
+                self.hl = next;
+                return format!("{painted}\n");
+            }
             return format!("{line}\n");
         }
         match self.table.take() {
@@ -178,11 +217,25 @@ impl LineRenderer {
         let p = Painter { ansi: self.ansi };
         let trimmed = line.trim_start();
         if trimmed.starts_with("```") {
-            self.in_fence = !self.in_fence;
-            return format!("{}\n", p.dim(line));
+            let opening = !self.in_fence;
+            self.in_fence = opening;
+            self.hl = HlState::Normal;
+            self.hl_active = opening && matches!(lang_of(line).as_deref(), None | Some("rust"));
+            let lang = lang_of(line).unwrap_or_default();
+            let marker = if opening && !lang.is_empty() {
+                format!("─── {lang}")
+            } else {
+                "───".to_string()
+            };
+            return format!("{}\n", p.dim(&marker));
         }
         if self.in_fence {
-            // Code keeps its shape: no wrap, no inline styling.
+            // Code keeps its shape (no wrap); rust fences get keywords.
+            if self.hl_active {
+                let (painted, next) = hl_rust_line(line, self.hl, self.ansi);
+                self.hl = next;
+                return format!("{painted}\n");
+            }
             return format!("{line}\n");
         }
         if trimmed.is_empty() {
@@ -553,6 +606,216 @@ fn render_table(rows: &[String], width: usize, ansi: bool) -> String {
     out
 }
 
+/// Fence language tag ("```rust" → Some("rust")); None for a bare ``` fence.
+fn lang_of(line: &str) -> Option<String> {
+    let t = line.trim_start().strip_prefix("```")?.trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_lowercase())
+    }
+}
+
+const RUST_KEYWORDS: &[&str] = &[
+    "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum",
+    "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move",
+    "mut", "pub", "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true",
+    "type", "unsafe", "use", "where", "while",
+];
+
+fn is_ident_start(c: char) -> bool {
+    c.is_alphabetic() || c == '_'
+}
+
+fn is_ident(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Position of the closing `"` + `k` `#`s of a raw string, scanning from
+/// `from`; the returned index is the LAST `#`.
+fn find_raw_close(chars: &[char], from: usize, k: u8) -> Option<usize> {
+    let mut m = from;
+    while m < chars.len() {
+        if chars[m] == '"' {
+            let mut hashes = 0u8;
+            let mut q = m + 1;
+            while q < chars.len() && chars[q] == '#' && hashes < k {
+                hashes += 1;
+                q += 1;
+            }
+            if hashes == k {
+                return Some(q - 1);
+            }
+        }
+        m += 1;
+    }
+    None
+}
+
+/// Highlight ONE line of fenced Rust (0909_2 反馈): keywords bold,
+/// strings/chars green, comments/attributes dim, macros cyan. Pure and
+/// streaming-safe — block comments and raw strings carry over lines via
+/// `st`. Char literals with escapes stay plain (deliberate simplicity).
+fn hl_rust_line(line: &str, st: HlState, ansi: bool) -> (String, HlState) {
+    if !ansi {
+        return (line.to_string(), st);
+    }
+    let p = Painter { ansi: true };
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = String::new();
+    let mut i = 0usize;
+    let mut state = st;
+
+    // Carry-over states first.
+    match state {
+        HlState::BlockComment => {
+            if let Some(pos) = (i..chars.len().saturating_sub(1)).find(|&j| {
+                chars[j] == '*' && chars.get(j + 1) == Some(&'/')
+            }) {
+                out.push_str(&p.dim(&chars[i..pos + 2].iter().collect::<String>()));
+                i = pos + 2;
+                state = HlState::Normal;
+            } else {
+                out.push_str(&p.dim(&chars[i..].iter().collect::<String>()));
+                return (out, state);
+            }
+        }
+        HlState::RawString(k) => {
+            if let Some(close) = find_raw_close(&chars, i, k) {
+                out.push_str(&p.green(&chars[i..=close].iter().collect::<String>()));
+                i = close + 1;
+                state = HlState::Normal;
+            } else {
+                out.push_str(&p.green(&chars[i..].iter().collect::<String>()));
+                return (out, state);
+            }
+        }
+        HlState::Normal => {}
+    }
+
+    while i < chars.len() {
+        let c = chars[i];
+        // Line comment → dim to EOL.
+        if c == '/' && chars.get(i + 1) == Some(&'/') {
+            out.push_str(&p.dim(&chars[i..].iter().collect::<String>()));
+            return (out, state);
+        }
+        // Block comment (nesting-aware; carry to next line when open).
+        if c == '/' && chars.get(i + 1) == Some(&'*') {
+            let mut depth = 1usize;
+            let mut j = i + 2;
+            while j + 1 < chars.len() {
+                if chars[j] == '*' && chars[j + 1] == '/' {
+                    depth -= 1;
+                    j += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else if chars[j] == '/' && chars[j + 1] == '*' {
+                    depth += 1;
+                    j += 2;
+                } else {
+                    j += 1;
+                }
+            }
+            if depth == 0 {
+                let end = j.min(chars.len());
+                out.push_str(&p.dim(&chars[i..end].iter().collect::<String>()));
+                i = end;
+            } else {
+                out.push_str(&p.dim(&chars[i..].iter().collect::<String>()));
+                return (out, HlState::BlockComment);
+            }
+            continue;
+        }
+        // Raw string r#"…"# (k hashes) — may span lines.
+        if c == 'r' && matches!(chars.get(i + 1), Some('#')) {
+            let mut k = 0usize;
+            let mut j = i + 1;
+            while chars.get(j) == Some(&'#') {
+                k += 1;
+                j += 1;
+            }
+            if chars.get(j) == Some(&'"') {
+                if let Some(close) = find_raw_close(&chars, j + 1, k as u8) {
+                    out.push_str(&p.green(&chars[i..=close].iter().collect::<String>()));
+                    i = close + 1;
+                } else {
+                    out.push_str(&p.green(&chars[i..].iter().collect::<String>()));
+                    return (out, HlState::RawString(k as u8));
+                }
+                continue;
+            }
+            // Not a raw string opener: fall through as an identifier.
+        }
+        // String literal with escapes (single line).
+        if c == '"' {
+            let mut j = i + 1;
+            while j < chars.len() {
+                if chars[j] == '\\' {
+                    j += 2;
+                    continue;
+                }
+                if chars[j] == '"' {
+                    break;
+                }
+                j += 1;
+            }
+            if j < chars.len() {
+                out.push_str(&p.green(&chars[i..=j].iter().collect::<String>()));
+                i = j + 1;
+            } else {
+                out.push_str(&p.green(&chars[i..].iter().collect::<String>()));
+                return (out, state);
+            }
+            continue;
+        }
+        // Identifier: keyword / macro / lifetime / plain.
+        if is_ident_start(c) {
+            let start = i;
+            let mut j = i;
+            while j < chars.len() && is_ident(chars[j]) {
+                j += 1;
+            }
+            let word: String = chars[start..j].iter().collect();
+            if chars.get(j) == Some(&'!') {
+                out.push_str(&p.cyan(&format!("{word}!")));
+                i = j + 1;
+                continue;
+            }
+            if RUST_KEYWORDS.contains(&word.as_str()) {
+                out.push_str(&p.bold(&word));
+                i = j;
+                continue;
+            }
+            out.push_str(&word);
+            i = j;
+            continue;
+        }
+        // Lifetime vs char literal: 'ident' (closed quote on this line)
+        // is a char literal (green); otherwise a lifetime (plain).
+        if c == '\'' {
+            let ident: usize = chars[i + 1..].iter().take_while(|ch| is_ident(**ch)).count();
+            if ident > 0 && chars.get(i + 1 + ident) == Some(&'\'') {
+                out.push_str(&p.green(&chars[i..=i + ident + 1].iter().collect::<String>()));
+                i = i + ident + 2;
+                continue;
+            }
+            if ident > 0 {
+                out.push_str(&chars[i..=i + ident].iter().collect::<String>());
+                i = i + ident + 1;
+                continue;
+            }
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    (out, state)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -579,8 +842,8 @@ mod tests {
         let mut sm = StreamMd::new(60, true);
         let mut got = sm.feed("```rust\nfn f() {");
         got.push_str(&sm.finish());
-        assert!(got.contains("fn f() {"), "{got}");
-        assert!(got.contains("```"), "open fence closed: {got}");
+        assert!(got.contains("f() {"), "{got}");
+        assert!(got.contains("───"), "open fence closed with the rule marker: {got}");
     }
 
     #[test]
@@ -653,14 +916,47 @@ mod tests {
     fn fence_content_verbatim_and_wrapped_lines_align() {
         let src = "```rust\nfn very_long_function(a: u32, b: u32) -> u32 { a + b }\n```\n后记";
         let out = render(src, 12, true);
-        assert!(out.contains("fn very_long_function(a: u32, b: u32) -> u32 { a + b }"), "{out}");
+        // `fn` is bold-wrapped; the REST of the line stays verbatim.
+        assert!(out.contains("very_long_function(a: u32, b: u32) -> u32 { a + b }"), "{out}");
         assert!(out.contains("后记"), "{out}");
     }
 
     #[test]
     fn unclosed_fence_gets_closed() {
         let out = render("```rust\nfn x() {}", 40, true);
-        assert_eq!(out.matches("```").count(), 2, "{out}"); // opened + auto-closed
+        assert_eq!(out.matches("───").count(), 2, "{out}"); // opened + auto-closed
+        assert!(!out.contains("```"), "raw fence markers are replaced: {out}");
+    }
+
+    /// 0909_2 反馈: fence markers render as thin rules (language tagged)
+    /// and fenced rust gets keyword/string/comment coloring.
+    #[test]
+    fn fence_marker_and_rust_highlighting() {
+        let src = "```rust\nlet s = \"hi\"; // 注释\n```\n后记";
+        let out = render(src, 80, true);
+        assert!(out.contains("─── rust"), "{out}");
+        assert!(!out.contains("```"), "{out}");
+        assert!(out.contains("\x1B[1mlet"), "keyword bold: {out}");
+        assert!(out.contains("\x1B[32m\"hi\"\x1B[0m"), "string green: {out}");
+        assert!(out.contains("\x1B[2m// 注释"), "comment dim: {out}");
+        // Streamed must match whole-render (shared path).
+        let mut sm = StreamMd::new(80, true);
+        let mut got = sm.feed(src);
+        got.push_str(&sm.finish());
+        assert_eq!(got, out, "stream == render");
+    }
+
+    #[test]
+    fn highlight_state_carries_across_lines_and_langs() {
+        // Block comment spanning lines; macro cyan; non-rust fence plain.
+        let src = "```rust\n/* 开头\n仍在注释 */\nprintln!(\"x\");\n```\n```json\n{ }\n```";
+        let out = render(src, 80, true);
+        assert!(out.contains("\x1B[2m/* 开头"), "{out}");
+        assert!(out.contains("\x1B[2m仍在注释 */"), "{out}");
+        assert!(out.contains("\x1B[36mprintln!"), "macro cyan: {out}");
+        // json fence: no keyword coloring (fn wouldn't appear anyway;
+        // assert the braces stayed raw).
+        assert!(out.contains("{ }"), "{out}");
     }
 
     #[test]
@@ -752,7 +1048,7 @@ mod tests {
     fn fence_lines_are_immune_to_tables() {
         let src = "| 表格前 |\n```rust\nlet v = a | b;\n```\n后文";
         let out = render(src, 80, true);
-        assert!(out.contains("let v = a | b;"), "fence content verbatim: {out}");
+        assert!(out.contains("v = a | b;"), "fence content verbatim: {out}");
         assert!(out.contains("后文"), "{out}");
     }
 

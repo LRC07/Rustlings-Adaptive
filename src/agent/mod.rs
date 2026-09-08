@@ -240,10 +240,6 @@ pub struct AgentEnv {
     /// Practice-state summary (M4.5a state back-flow), appended to the
     /// system prompt for every turn. Computed per turn by the CLI.
     pub practice_note: Option<String>,
-    /// Open code threads (M5, retro §6.3): recently pasted code the
-    /// coach proposed changes for but which were never re-verified.
-    /// Computed per turn by the CLI; drives the follow-up principle.
-    pub open_loop_note: Option<String>,
     /// Last free-generation rejection reason (0907 反馈 P4): free
     /// generation runs ONE round per `generate_exercise` call and the
     /// coach asks the user before spending another; this carries the
@@ -290,18 +286,6 @@ pub struct TurnOutcome {
 
 /// How many model⇄tool round trips per user turn before bailing out.
 pub const MAX_TOOL_ROUNDS: u32 = 5;
-/// Marker of the per-turn open-loop note (M5): messages carrying it are
-/// stripped from the returned history so the note never accumulates.
-const OPEN_LOOP_MARKER: &str = "[Open code threads";
-
-fn strip_open_loop(msgs: Vec<ChatMessage>) -> Vec<ChatMessage> {
-    msgs.into_iter()
-        .filter(|m| {
-            !(m.role == "system"
-                && m.content.as_deref().map(|c| c.starts_with(OPEN_LOOP_MARKER)).unwrap_or(false))
-        })
-        .collect()
-}
 /// Hard cap on sent messages regardless of the token budget (keeps
 /// the request bounded even with a huge configured context).
 pub const WINDOW_MESSAGES: usize = 40;
@@ -334,15 +318,6 @@ pub fn run_turn(
         msgs.insert(0, ChatMessage::system(sys));
     }
     msgs.push(ChatMessage::user(input));
-    // Open code threads (M5, retro §6.3) ride at the END of the message
-    // list — right next to the user's question — because trailing
-    // instructions get far better adherence than system-header rules
-    // (实测 9.4 深夜: header 版两次被模型无视). The message is peeled
-    // off before the history is returned (see strip_open_loop), so it
-    // never accumulates in the persisted session.
-    if let Some(note) = &env.open_loop_note {
-        msgs.push(ChatMessage::system(note.clone()));
-    }
 
     let mut totals = tools::UsageAcc::default();
     let mut estimated = false;
@@ -363,7 +338,7 @@ pub fn run_turn(
             reply = Some(format!("（模型调用被拦截：{e}。可在 /config 调整预算或查看 /usage。）"));
             msgs.push(ChatMessage::assistant(reply.clone().unwrap()));
             return Ok(TurnOutcome {
-                history: strip_open_loop(msgs),
+                history: msgs,
                 reply,
                 tool_notes,
                 practice,
@@ -477,7 +452,7 @@ pub fn run_turn(
     }
 
     Ok(TurnOutcome {
-        history: strip_open_loop(msgs),
+        history: msgs,
         reply,
         tool_notes,
         practice,
@@ -670,7 +645,6 @@ mod tests {
             root: PathBuf::from("."),
             session_id: None,
             practice_note: None,
-            open_loop_note: None,
             free_fail_note: Mutex::new(None),
         }
     }
