@@ -93,7 +93,10 @@ impl Session {
     /// sessions are never written: a start-and-quit cycle must not
     /// litter the list with 0-message files (9.5 实测反馈).
     pub fn save(&mut self) -> Result<()> {
-        if self.messages.is_empty() {
+        // M9a7: exercises alone still count — a fresh session whose
+        // first action is /generate must persist its "本会话" grouping
+        // (0-message files stay out, 9.5 实测反馈).
+        if self.messages.is_empty() && self.exercises.is_empty() {
             return Ok(());
         }
         if self.title.is_none() {

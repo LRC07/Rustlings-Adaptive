@@ -699,7 +699,9 @@ fn model_remove(cfg: &mut ModelConfig, client: &mut Option<LlmClient>, name: &st
 /// `ModelConfig::masked_key` but works without a config around.
 fn cfg_mask_of(key: &str) -> String {
     let chars: Vec<char> = key.chars().collect();
-    if chars.len() <= 8 {
+    // M9a7: threshold matches ModelConfig::masked_key (12) — the two
+    // implementations must not drift apart.
+    if chars.len() <= 12 {
         "****".to_string()
     } else {
         format!(
@@ -1132,7 +1134,7 @@ fn agent_turn(
                     }
                     Some(ans) => {
                         let a = ans.trim().to_ascii_lowercase();
-                        if a == "n" || a == "no" {
+                        if a == "n" || a == "no" || a == "否" {
                             println!("  （题目已进「本会话」列表：/practice 随时可继续）");
                         }
                         if a.is_empty() || a == "y" || a == "yes" || a == "是" {
@@ -1150,6 +1152,10 @@ fn agent_turn(
                                 return;
                             }
                             repaint_chat(session, cfg, tracker);
+                        } else {
+                            // M9a7: garbage input used to fall through
+                            // SILENTLY — the user got no feedback at all.
+                            println!("  （未识别「{a}」；题目已进「本会话」列表，/practice 随时可继续）");
                         }
                     }
                 }

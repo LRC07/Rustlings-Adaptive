@@ -75,6 +75,14 @@ fn render(stop: Arc<AtomicBool>, status: StatusSlot) {
         // is clamped to the terminal width — a wrapped line would
         // break the in-place redraw and flood the screen with one
         // stale row per frame (9.4 实测："生成练习第几轮"刷屏).
+        // M9a7: sanitize control characters as a second line of
+        // defense — a \n inside the status (a multi-line gate failure
+        // note slipping through a future caller) must never wrap:
+        // truncate_display counts it as 0-width and lets it through.
+        let text: String = text
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
         let tw = super::render::term_width();
         let hint = if secs >= SLOW_HINT_SECS { SLOW_HINT } else { "" };
         let budget = tw

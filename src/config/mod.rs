@@ -677,7 +677,9 @@ impl ModelConfig {
             return "未设置".to_string();
         }
         let chars: Vec<char> = self.api_key.chars().collect();
-        if chars.len() <= 8 {
+        // M9a7: a 9-char key used to show 7 of its 9 characters — only
+        // really long keys earn partial display.
+        if chars.len() <= 12 {
             "****".to_string()
         } else {
             format!("{}****{}", chars[..3].iter().collect::<String>(), chars[chars.len() - 4..].iter().collect::<String>())

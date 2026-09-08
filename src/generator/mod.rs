@@ -1190,8 +1190,12 @@ fn llm_draft_loop(
         }
         prev_fail = last_fail.clone();
         if let Some(cb) = progress.as_mut() {
+            // M9a7: FIRST LINE only — the gate failure message is
+            // multi-line (reason + diagnostics header + evidence) and a
+            // raw \n inside the spinner text breaks the in-place
+            // redraw, flooding the screen one stale row per frame.
             let note = (!last_fail.is_empty())
-                .then(|| last_fail.chars().take(110).collect::<String>());
+                .then(|| last_fail.lines().next().unwrap_or_default().chars().take(110).collect::<String>());
             cb(GenerateStage { attempt, total_attempts: max_rounds, stage: stage_label, note });
         }
 
@@ -2680,6 +2684,58 @@ fn add(a: i32, b: i32) -> i32 {
         let src = fs::read_to_string(&out.path).unwrap();
         assert!(src.starts_with("// 迷你取余"), "{src}");
         assert!(src.contains("I AM NOT DONE"));
+    }
+
+    /// M9a7（刷屏回归）: the repair-loop stage note carries the
+    /// previous gate failure — that message is multi-line (reason +
+    /// diagnostics header + evidence). The note must be its FIRST
+    /// LINE only: a raw \n inside the spinner text broke the
+    /// in-place redraw and flooded the screen one stale row per frame.
+    #[test]
+    fn draft_stage_note_is_single_line() {
+        let fx = Fixture::new();
+        let paths = fx.paths();
+        let stages: std::cell::RefCell<Vec<GenerateStage>> = std::cell::RefCell::new(Vec::new());
+        let sink = &stages;
+        let mut prog = move |st: GenerateStage| sink.borrow_mut().push(st);
+        // Round 1: the draft's reference fails to COMPILE (multi-line
+        // gate error) → round 2 note must flatten it to line one.
+        let broken = VALID_DRAFT_JSON.replace(
+            "\"reference\": \"fn rem(a: i32, b: i32) -> i32 {\\n    a % b\\n}\\n\"",
+            "\"reference\": \"fn rem(a: i32, b: i32) -> i32 {\\n    let s: String = a;\\n    a % b\\n}\\n\"",
+        );
+        assert_ne!(broken, VALID_DRAFT_JSON, "fixture must differ");
+        let round = std::cell::Cell::new(0u32);
+        let mut call = move |_prompt: &str| -> Result<LlmReply> {
+            let n = round.get();
+            round.set(n + 1);
+            if n == 0 { Ok(reply(&broken)) } else { Ok(reply(VALID_DRAFT_JSON)) }
+        };
+        let out = generate_with_mode(
+            &Topic::FreeText("加法".into()),
+            None,
+            GenerateMode::Adapted,
+            &paths,
+            &GenHistory::default(),
+            None,
+            Some(&mut call),
+            Some(&mut prog),
+        )
+        .unwrap();
+        assert_eq!(out.tier, Tier::Adapted { base: "mini-add".into() });
+        let notes: Vec<String> = stages
+            .borrow()
+            .iter()
+            .filter_map(|s| s.note.clone())
+            .collect();
+        assert!(!notes.is_empty(), "the failing round must produce a note");
+        for n in &notes {
+            assert!(!n.contains('\n') && !n.contains('\r'), "note must be single-line: {n:?}");
+        }
+        assert!(
+            notes.iter().any(|n| n.contains("参考解")),
+            "the gate reason (first line) rides the note: {notes:?}"
+        );
     }
 
     /// M9a6: when the reference COMPILES but its tests FAIL (the most

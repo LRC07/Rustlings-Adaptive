@@ -360,9 +360,6 @@ pub fn notebook_from_index(
             let fl = f.to_ascii_lowercase();
             out.retain(|e| {
                 e.concepts.iter().any(|c| c.to_ascii_lowercase().contains(&fl))
-                    || e.concepts
-                        .iter()
-                        .any(|c| c.split('.').next().map(|d| d.contains(&fl)).unwrap_or(false))
                     || e.last_error
                         .as_deref()
                         .map(|c| c.to_ascii_lowercase().contains(&fl))

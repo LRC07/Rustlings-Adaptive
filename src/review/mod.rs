@@ -338,8 +338,10 @@ pub fn static_checks(code: &str, constraint_specs: &[String]) -> StaticReport {
         .lines()
         .enumerate()
         .filter(|(_, l)| {
-            let t = l.trim_start();
-            t.starts_with("todo!") || t.starts_with("unimplemented!")
+            // M9a7: mid-line occurrences too (`_ => todo!()` in a match
+            // arm) — starts_with missed them.
+            let t = l.trim();
+            t.contains("todo!") || t.contains("unimplemented!")
         })
         .map(|(i, _)| i + 1)
         .collect();
@@ -662,7 +664,14 @@ pub fn run_gate(
                 }
                 probe = Some(p);
             }
-            Err(e) => llm_error = Some(format!("probe 跳过：{e:#}")),
+            Err(e) => {
+                // M9a7: the probe's error must not OVERWRITE an earlier
+                // review failure — they are different failures and the
+                // first is the primary one.
+                if llm_error.is_none() {
+                    llm_error = Some(format!("probe 跳过：{e:#}"));
+                }
+            }
         }
     }
 
@@ -1125,7 +1134,7 @@ fn probe_user_prompt(input: &ReviewInput, suspicious_reason: &str) -> String {
         input.title,
         input.concepts.join("、"),
         input.body.trim(),
-        strip_marker(&input.user_code),
+        strip_comments(&input.user_code),
         suspicious_reason,
     )
 }

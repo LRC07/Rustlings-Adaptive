@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
 
-/// 240s: long LLM tasks (tier-2/3 exercise drafts output 3–8k tokens)
+/// 480s: long LLM tasks (tier-2/3 exercise drafts output 3–8k tokens)
 /// can exceed two minutes; short chat turns are unaffected in practice.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(480);
 
@@ -704,7 +704,7 @@ fn parse_usage_value(v: &serde_json::Value) -> Usage {
 }
 
 /// Fallback accounting when an endpoint streams without the usage tail:
-/// rough byte-based estimates (ASCII ≈4 chars/token, CJK ≈1.5) — good
+/// rough byte-based estimates (prompt bytes/4, output bytes/3) — good
 /// enough to keep the meter honest in magnitude, never exact.
 /// `extra_out_bytes` covers reasoning_content + tool-call fragments so
 /// thinking/tool rounds are no longer billed as zero output (M9h).
