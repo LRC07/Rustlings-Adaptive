@@ -199,6 +199,7 @@ pub(crate) fn run() {
                 agent::reset_interrupt();
                 let gen_path = generate::cmd_generate(
                     &cfg.snapshot_for_phase(crate::config::Phase::Generate),
+                    &cfg.snapshot_for_phase(crate::config::Phase::GenerateFree),
                     &tracker,
                     &practice_ctx,
                     Some((session.id.as_str(), session.exercises.as_slice())),

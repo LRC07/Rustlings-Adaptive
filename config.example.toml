@@ -52,7 +52,7 @@ generate = "Qwen3.8-Flash"  # 出题·模板路径（选题/填槽/改编，小�
 generate_free = "Kimi-K3"   # 出题·自由生成（长输出创作；省略 = 沿用上一档）
 review = "Kimi-K3"          # 评审门 + 复盘
 
-# ---- 主力：对话（响应快、成本低，日常使用推荐）----
+# ---- 主力：对话 + 出题·模板路径（响应快、成本低，日常使用推荐）----
 [[models]]
 name = "Qwen3.8-Flash"
 endpoint = "https://llmapi.paratera.com"
@@ -74,7 +74,7 @@ model = "MiniMax-M3"
 context_len = 192000
 prices = { input = 0.30, output = 1.20 }   # 请按平台价格页核对
 
-# ---- 评审 + 复盘 + 出题（能力强：评判细致、讲解透彻；响应稍慢）----
+# ---- 评审 + 复盘 + 出题·自由生成（能力强：评判细致、讲解透彻；响应稍慢）----
 [[models]]
 name = "Kimi-K3"
 endpoint = "https://llmapi.paratera.com"
@@ -85,7 +85,7 @@ prices = { input = 2.82, output = 14.08 }  # 请按平台价格页核对
 think_mode = "on"
 reasoning_effort = "low"
 
-# ---- 备选：另一个快速的出题/对话模型（不同模型各有所长）----
+# ---- 备选：另一个快速的对话模型（不同模型各有所长）----
 [[models]]
 name = "GLM-5.3-Flash"
 endpoint = "https://llmapi.paratera.com"

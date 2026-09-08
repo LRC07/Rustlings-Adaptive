@@ -1,8 +1,8 @@
 //! `/generate` — exercise generation entry (M3 pipeline; offline
-//! capable). Shared by the REPL command and used by the agent's
-//! `generate_exercise` tool (the tool calls `generator::generate`
-//! directly). Progress prints stage lines; Ctrl-C aborts between
-//! rounds (the interrupt flag is checked inside the generator).
+//! capable). The REPL command path: the agent's `generate_exercise`
+//! tool runs the same pipeline through `src/agent/tools.rs` (with its
+//! own dual-phase caller). Progress prints stage lines; Ctrl-C aborts
+//! between rounds (the interrupt flag is checked inside the generator).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -18,8 +18,12 @@ use super::{practice, read_line_or_leave, render};
 /// `g` / `/generate` — generate an exercise from a topic. `arg` may
 /// carry the topic directly (`/g E0382`); otherwise it is prompted.
 /// Returns the generated exercise path (for session bookkeeping).
+/// `cfg` is the GENERATE snapshot, `free_cfg` the GENERATE_FREE one
+/// (0909_2 职能分开 — the free-form tier-3 draft rides its own routed
+/// profile here exactly like in the agent tool).
 pub(crate) fn cmd_generate(
     cfg: &ModelConfig,
+    free_cfg: &ModelConfig,
     tracker: &Arc<Mutex<UsageTracker>>,
     ctx: &practice::PracticeCtx,
     session: Option<(&str, &[String])>,
@@ -57,12 +61,16 @@ pub(crate) fn cmd_generate(
     // max_tokens cap actually reaches the wire — the default impl
     // silently ignores the cap, which is how `/g` drafts once burned
     // 27k output tokens per round (M4.7 regression caught in smoke).
+    // 0909_2 职能分开: the free-form tier rides ITS OWN snapshot —
+    // client may be None per side (that side then fails → offline
+    // fallback, mirroring the tool's DualBridge).
     struct CliCaller<'a> {
-        client: &'a LlmClient,
+        client: Option<&'a LlmClient>,
         model: &'a str,
         price_in: f64,
         price_out: f64,
         budget: Option<f64>,
+        phase: &'static str,
         tracker: Arc<Mutex<UsageTracker>>,
     }
 
@@ -76,10 +84,13 @@ pub(crate) fn cmd_generate(
             prompt: &str,
             max_tokens: u32,
         ) -> anyhow::Result<crate::llm::LlmReply> {
+            let client = self
+                .client
+                .ok_or_else(|| anyhow::anyhow!("该档位未配置 API Key（离线回退）"))?;
             let totals =
                 self.tracker.lock().unwrap_or_else(|p| p.into_inner()).all_totals().cost_usd;
             crate::usage::check_budget(totals, self.budget)?;
-            let out = self.client.chat_turn_bounded(
+            let out = client.chat_turn_bounded(
                 &[crate::llm::ChatMessage::user(prompt.to_string())],
                 &[],
                 (max_tokens != u32::MAX).then_some(max_tokens),
@@ -101,7 +112,7 @@ pub(crate) fn cmd_generate(
                 reply.usage.completion_tokens,
                 reply.usage.reasoning_tokens,
                 cost,
-                "generate",
+                self.phase,
             );
             let reasoning = if reply.usage.reasoning_tokens > 0 {
                 format!("（推理 {}）", reply.usage.reasoning_tokens)
@@ -116,21 +127,48 @@ pub(crate) fn cmd_generate(
         }
     }
 
+    struct DualCliCaller<'a> {
+        template: CliCaller<'a>,
+        free: CliCaller<'a>,
+    }
+
+    impl generator::TieredLlmCaller for DualCliCaller<'_> {
+        fn template_path(&mut self) -> &mut dyn generator::LlmCaller {
+            &mut self.template
+        }
+        fn free_path(&mut self) -> &mut dyn generator::LlmCaller {
+            &mut self.free
+        }
+    }
+
     let client = crate::cli::make_client(cfg);
-    let llm: Option<&mut dyn generator::TieredLlmCaller> = match client.as_ref() {
-        Some(cl) => Some(&mut CliCaller {
-            client: cl,
-            model: &cfg.model,
-            price_in: cfg.prices.input,
-            price_out: cfg.prices.output,
-            budget: cfg.budget_usd(),
-            tracker: tracker.clone(),
-        }),
-        None => {
+    let free_client = crate::cli::make_client(free_cfg);
+    let llm: Option<&mut dyn generator::TieredLlmCaller> =
+        if client.is_some() || free_client.is_some() {
+            Some(&mut DualCliCaller {
+                template: CliCaller {
+                    client: client.as_ref(),
+                    model: &cfg.model,
+                    price_in: cfg.prices.input,
+                    price_out: cfg.prices.output,
+                    budget: cfg.budget_usd(),
+                    phase: "generate",
+                    tracker: tracker.clone(),
+                },
+                free: CliCaller {
+                    client: free_client.as_ref(),
+                    model: &free_cfg.model,
+                    price_in: free_cfg.prices.input,
+                    price_out: free_cfg.prices.output,
+                    budget: free_cfg.budget_usd(),
+                    phase: "generate_free",
+                    tracker: tracker.clone(),
+                },
+            })
+        } else {
             println!("  未配置 API Key —— 使用离线模式（默认填槽）。");
             None
-        }
-    };
+        };
 
     println!(
         "  正在生成分层出题：模板直配 → 模板改编 → 自由生成（每题过三重校验）…"
