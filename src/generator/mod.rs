@@ -491,11 +491,19 @@ pub fn gate_draft_with_policy(
         template::first_error_matches(&d.error_codes, &report)?;
     }
     if !report.all_pass() {
-        // Attach the unfinished template's real rustc diagnostics so
-        // the repair loop (§7.5) can feed them back to the model.
-        let diags = report
-            .template
-            .as_ref()
+        // Attach the failing side's real rustc diagnostics so the
+        // repair loop (§7.5) can feed them back to the model. M9a3:
+        // a reference-side failure used to attach the UNFINISHED
+        // body's diagnostics under a 参考解编译失败 reason — the model
+        // was told to fix the reference while looking at the wrong
+        // file's errors (0909_2 实测).
+        let reference_side = !report.compiles || !report.ref_solution_passes;
+        let (header, run) = if reference_side {
+            ("[参考解的 rustc 诊断]", report.reference.as_ref())
+        } else {
+            ("[未完成模板的 rustc 诊断]", report.template.as_ref())
+        };
+        let diags = run
             .map(|t| {
                 t.diagnostics
                     .iter()
@@ -505,7 +513,7 @@ pub fn gate_draft_with_policy(
             })
             .unwrap_or_default();
         let diags: String = diags.chars().take(1200).collect();
-        bail!("{}\n[未完成模板的 rustc 诊断]\n{diags}", failure_reason(&report));
+        bail!("{}\n{header}\n{diags}", failure_reason(&report));
     }
     Ok(report)
 }
@@ -653,6 +661,23 @@ pub(crate) fn generate_with_mode(
     if templates.is_empty() {
         bail!("模板库为空（{}）", paths.templates_dir.display());
     }
+
+    // M9a3 教练幻觉防御: the coach sometimes passes a dotted id it
+    // INVENTED ("traits.dyn-dispatch" — the textbook term, absent from
+    // the taxonomy whose real id is "traits.objects"). A hard tier-1
+    // error poisons the whole cascade (tier 2/3 then run with a
+    // 概念：…-prefixed prompt that also fails keyword matching). With
+    // an LLM on board the request degrades to free text — the keyword
+    // pool + picker can still route it. Offline keeps the precise
+    // available-concepts error (no picker to rescue it).
+    let degraded;
+    let topic: &Topic = match (topic, mode, llm.is_some()) {
+        (Topic::Concept(q), GenerateMode::Auto, true) if graph.resolve(q).is_none() => {
+            degraded = Topic::FreeText(q.clone());
+            &degraded
+        }
+        (t, _, _) => t,
+    };
 
     // Tier 1 always runs first (cheap; the other tiers need an LLM).
     if matches!(mode, GenerateMode::Auto | GenerateMode::Matched) {
@@ -1593,11 +1618,20 @@ fn collect_concept_templates(graph: &ConceptGraph, concept_id: &str, out: &mut B
     }
 }
 
+/// One keyword pass's match result over the concept graph:
+/// (candidate ids, specificity scores, hit reasons for the prompt).
+type KeywordMatches = (
+    BTreeSet<String>,
+    BTreeMap<String, u32>,
+    Vec<(String, String, Vec<String>)>,
+);
+
 /// Free-text keyword pool with evidence (0909 反馈 A+B): "HashMap 所有权"
 /// used to drag the whole ownership subtree into an UNORDERED pool whose
 /// file-order pick was closure-fn-kinds. Now every candidate carries a
 /// specificity score — the needle-hit count of the most specific concept
 /// node covering it — and the LLM picker gets the hit reasons.
+#[derive(Debug)]
 struct KeywordPool {
     /// Candidate ids (set semantics; the anchor only checks membership).
     ids: BTreeSet<String>,
@@ -1612,50 +1646,130 @@ struct KeywordPool {
 
 /// Deterministic free-text matching: taxonomy concept names/ids first
 /// (Chinese keywords live there), then template titles/ids/codes.
+///
+/// M9a3 CJK 适配 (real incident: "出一道Trait对象的题"): Chinese packs
+/// several ideas into one whitespace-free token, and the taxonomy
+/// writes "trait 对象" with an inner space the user never types. Two
+/// mitigations, deliberately scoped so space-separated queries
+/// ("HashMap 所有权") keep their exact old scores:
+/// 1. every hay/needle pair is ALSO compared whitespace-stripped, so
+///    "trait对象" hits "trait 对象与 impl Trait";
+/// 2. only when NO whole token matched anything do the tokens expand
+///    into CJK bigrams ("对象" anchors the pool) — the bigram pass
+///    never fires for queries that already matched.
 fn keyword_candidates(
     templates: &[template::Template],
     graph: &ConceptGraph,
     text: &str,
 ) -> KeywordPool {
-    let needles: Vec<String> = text
+    let tokens: Vec<String> = text
         .split(|c: char| c.is_whitespace() || "，。、？！,.:?？()（）".contains(c))
         .map(str::trim)
         .filter(|w| w.chars().count() >= 2)
         .map(|w| w.to_lowercase())
         .collect();
 
-    let mut ids = BTreeSet::new();
-    let mut scores: BTreeMap<String, u32> = BTreeMap::new();
-    let mut reasons: Vec<(String, String, Vec<String>)> = Vec::new();
-    for node in graph.ids().filter_map(|id| graph.get(id)) {
-        let hay = format!("{} {}", node.id, node.name).to_lowercase();
-        let matched: Vec<String> =
-            needles.iter().filter(|n| hay.contains(*n)).cloned().collect();
-        if matched.is_empty() {
-            continue;
+    let nodes: Vec<&crate::taxonomy::ConceptNode> =
+        graph.ids().filter_map(|id| graph.get(id)).collect();
+    let run_pass = |needles: &[String]| -> KeywordMatches {
+        let mut ids = BTreeSet::new();
+        let mut scores: BTreeMap<String, u32> = BTreeMap::new();
+        let mut reasons = Vec::new();
+        for node in &nodes {
+            let hay = format!("{} {}", node.id, node.name).to_lowercase();
+            let hay_ns = nospace(&hay);
+            let matched: Vec<String> = needles
+                .iter()
+                .filter(|n| {
+                    let n_ns = nospace(n);
+                    hay.contains(n.as_str()) || (!n_ns.is_empty() && hay_ns.contains(n_ns.as_str()))
+                })
+                .cloned()
+                .collect();
+            if matched.is_empty() {
+                continue;
+            }
+            let k = matched.len() as u32;
+            reasons.push((node.id.clone(), node.name.clone(), matched));
+            let mut covered = BTreeSet::new();
+            collect_concept_templates(graph, &node.id, &mut covered);
+            for t in covered {
+                // Score = the MOST specific hit node covering the template.
+                scores.entry(t.clone()).and_modify(|s| *s = (*s).max(k)).or_insert(k);
+                ids.insert(t);
+            }
         }
-        let k = matched.len() as u32;
-        reasons.push((node.id.clone(), node.name.clone(), matched));
-        let mut covered = BTreeSet::new();
-        collect_concept_templates(graph, &node.id, &mut covered);
-        for t in covered {
-            // Score = the MOST specific hit node covering the template.
-            scores.entry(t.clone()).and_modify(|s| *s = (*s).max(k)).or_insert(k);
-            ids.insert(t);
+        (ids, scores, reasons)
+    };
+
+    let (ids, scores, reasons) = run_pass(&tokens);
+    let (mut ids, mut scores, reasons) = if ids.is_empty() {
+        // No whole token hit anything: expand CJK runs into bigrams and
+        // retry once (the "出一道Trait对象的题" rescue).
+        let mut expanded = tokens.clone();
+        for t in &tokens {
+            expanded.extend(cjk_bigrams(t));
         }
-    }
+        run_pass(&expanded)
+    } else {
+        (ids, scores, reasons)
+    };
+
     if ids.is_empty() {
         // No concept matched: fall back to template title/id/error-code
-        // matching (score 1 — no specificity signal beyond the hit).
+        // matching (score 1 — no specificity signal beyond the hit),
+        // with the same whitespace-stripped comparison. The expansion
+        // rule mirrors the concept pass: bigrams only when nothing
+        // whole-token-matched at all.
+        let needles: Vec<String> = if reasons.is_empty() {
+            let mut expanded = tokens.clone();
+            for t in &tokens {
+                expanded.extend(cjk_bigrams(t));
+            }
+            expanded
+        } else {
+            tokens.clone()
+        };
         for t in templates {
             let hay = format!("{} {} {}", t.id, t.title, t.error_codes.join(" ")).to_lowercase();
-            if needles.iter().any(|n| hay.contains(n)) {
+            let hay_ns = nospace(&hay);
+            if needles.iter().any(|n| {
+                let n_ns = nospace(n);
+                hay.contains(n.as_str()) || (!n_ns.is_empty() && hay_ns.contains(n_ns.as_str()))
+            }) {
                 scores.insert(t.id.clone(), 1);
                 ids.insert(t.id.clone());
             }
         }
     }
     KeywordPool { ids, scores, reasons }
+}
+
+/// Drop whitespace (used for space-insensitive keyword matching: the
+/// taxonomy writes "trait 对象", users type "trait对象").
+fn nospace(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// All 2-grams of every CJK run (≥2 chars) inside `token`.
+/// "出一道trait对象的题" → ["出一", "一道", "对象", "象的", "的题"].
+fn cjk_bigrams(token: &str) -> Vec<String> {
+    let is_cjk = |c: char| ('\u{4E00}'..='\u{9FFF}').contains(&c);
+    let mut out: Vec<String> = Vec::new();
+    let mut run: Vec<char> = Vec::new();
+    for ch in token.chars().chain(std::iter::once(' ')) {
+        if is_cjk(ch) {
+            run.push(ch);
+        } else {
+            if run.len() >= 2 {
+                for w in run.windows(2) {
+                    out.push(w.iter().collect::<String>());
+                }
+            }
+            run.clear();
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -2497,6 +2611,39 @@ fn add(a: i32, b: i32) -> i32 {
         assert!(src.contains("I AM NOT DONE"));
     }
 
+    /// M9a3（真实事故）: a draft whose REFERENCE fails to compile must
+    /// come back with the reference's OWN diagnostics — the gate used
+    /// to attach the unfinished body's errors under a 参考解编译失败
+    /// reason, telling the model to fix the reference while showing it
+    /// the wrong file's mistakes.
+    #[test]
+    fn gate_reference_failure_attaches_reference_diagnostics() {
+        let wire: DraftWire = serde_json::from_str(VALID_DRAFT_JSON).unwrap();
+        let mut draft = template::ExerciseDraft {
+            title: wire.title,
+            concepts: wire.concepts,
+            error_codes: wire.error_codes,
+            difficulty: wire.difficulty,
+            constraints: wire.constraints,
+            body: wire.body,
+            tests: wire.tests,
+            // The reference itself carries a type error (exactly how
+            // the real free-round failed: Box<dyn Animal> elements
+            // forgotten in the reference).
+            reference: "fn rem(a: i32, b: i32) -> i32 {\n    let s: String = a;\n    a % b\n}\n"
+                .into(),
+        };
+        ensure_ban_constraints(&mut draft);
+        let workdir = fresh_workdir("gate_ref_fail").unwrap();
+        let err = gate_draft_with_policy(&mut draft, &workdir, true).unwrap_err();
+        let _ = fs::remove_dir_all(&workdir);
+        let msg = format!("{err:#}");
+        assert!(msg.contains("参考解编译失败"), "{msg}");
+        assert!(msg.contains("[参考解的 rustc 诊断]"), "{msg}");
+        assert!(msg.contains("let s: String = a"), "must carry the REFERENCE error: {msg}");
+        assert!(!msg.contains("let q: String = a"), "must NOT carry the body error: {msg}");
+    }
+
     #[test]
     fn adapted_generation_uses_nearby_template_as_skeleton() {
         let fx = Fixture::new();
@@ -2542,6 +2689,98 @@ fn add(a: i32, b: i32) -> i32 {
         )
         .unwrap();
         assert_eq!(out.tier, Tier::Free);
+    }
+
+    /// M9a3 教练幻觉防御: the coach passed "traits.dyn-dispatch" (an
+    /// id it invented — the real one is traits.objects). With an LLM
+    /// available the request degrades to free text and the cascade
+    /// still produces an exercise; offline it stays a clear error.
+    #[test]
+    fn hallucinated_concept_id_degrades_to_free_text_with_llm() {
+        let fx = Fixture::new();
+        let paths = fx.paths();
+        // Case 1: the invented id still keyword-hits the domain
+        // ("test") → tier 1 serves the matched template.
+        let prompts = std::cell::RefCell::new(Vec::<String>::new());
+        let mut call = |prompt: &str| -> Result<LlmReply> {
+            prompts.borrow_mut().push(prompt.to_string());
+            if prompt.contains("choosing a Rust practice") {
+                Ok(reply(r#"{"no_match": true}"#))
+            } else {
+                Ok(reply(VALID_DRAFT_JSON))
+            }
+        };
+        let out = generate_with_mode(
+            &Topic::Concept("test.dyn-dispatch".into()),
+            None,
+            GenerateMode::Auto,
+            &paths,
+            &GenHistory::default(),
+            None, // learner
+            Some(&mut call),
+            None,
+        )
+        .unwrap();
+        assert_eq!(out.tier, Tier::Matched { template_id: "mini-add".into() });
+        // The degraded free text reaches the prompts verbatim (no
+        // "概念：" prefix from the Concept path).
+        assert!(
+            prompts.borrow().iter().any(|p| p.contains("test.dyn-dispatch")),
+            "degraded topic must reach the LLM prompts: {:?}",
+            prompts.borrow()
+        );
+        assert!(
+            !prompts.borrow().iter().any(|p| p.contains("概念：test.dyn-dispatch")),
+            "degraded topic must NOT ride the Concept prompt_text: {:?}",
+            prompts.borrow()
+        );
+
+        // Case 2: the invented id hits nothing (the real incident's
+        // shape) → the cascade runs to the free tier instead of dying
+        // with 解析为概念.
+        let mut call2 = |prompt: &str| -> Result<LlmReply> {
+            if prompt.contains("choosing a Rust practice") {
+                Ok(reply(r#"{"no_match": true}"#))
+            } else {
+                Ok(reply(VALID_DRAFT_JSON))
+            }
+        };
+        let out = generate_with_mode(
+            &Topic::Concept("nosuch.dyn-dispatch".into()),
+            None,
+            GenerateMode::Auto,
+            &paths,
+            &GenHistory::default(),
+            None,
+            Some(&mut call2),
+            None,
+        )
+        .unwrap();
+        assert_eq!(out.tier, Tier::Free);
+    }
+
+    /// The degrade must NOT fire without an LLM (the precise
+    /// available-concepts error is the offline UX) nor in Matched mode.
+    #[test]
+    fn hallucinated_concept_id_stays_an_error_offline_and_in_matched_mode() {
+        let fx = Fixture::new();
+        let paths = fx.paths();
+        let err = generate(&Topic::Concept("test.dyn-dispatch".into()), &paths, None, None)
+            .unwrap_err();
+        assert!(err.to_string().contains("解析为概念"), "{err}");
+        let mut call = |_prompt: &str| -> Result<LlmReply> { Ok(reply(VALID_DRAFT_JSON)) };
+        let err = generate_with_mode(
+            &Topic::Concept("test.dyn-dispatch".into()),
+            None,
+            GenerateMode::Matched,
+            &paths,
+            &GenHistory::default(),
+            None,
+            Some(&mut call),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("解析为概念"), "{err}");
     }
 
     #[test]
@@ -2721,6 +2960,35 @@ fn add(a: i32, b: i32) -> i32 {
         let pick = pick_candidate(&templates, &pool.ids, Some(&pool.scores), &GenHistory::default())
             .unwrap();
         assert_eq!(pick.t.id, "hashmap-entry-count", "deterministic pick follows the score");
+    }
+
+    /// M9a3（真实事故："出一道Trait对象的题" 三层全败）: requests
+    /// without spaces must still anchor the pool. Two mechanisms:
+    /// whitespace-stripped hay/needle matching ("Trait对象" vs the
+    /// concept name "trait 对象与 impl Trait") and — only when NO whole
+    /// token matched — CJK bigram expansion ("对象" anchors).
+    #[test]
+    fn trait_object_requests_anchor_the_pool_without_spaces() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut graph =
+            crate::taxonomy::ConceptGraph::load(&root.join("taxonomy/concepts.toml")).unwrap();
+        let templates = template::load_dir(&root.join("templates")).unwrap();
+        let items: Vec<(&str, &[String])> =
+            templates.iter().map(|t| (t.id.as_str(), t.concepts.as_slice())).collect();
+        graph.link_templates(items).unwrap();
+
+        // Clean phrase: whitespace-stripped match on the concept name.
+        let pool = keyword_candidates(&templates, &graph, "Trait对象");
+        assert!(pool.ids.contains("dyn-trait-object"), "pool: {:?}", pool.ids);
+
+        // The full natural request: one unsplit token → bigram rescue.
+        let pool = keyword_candidates(&templates, &graph, "出一道Trait对象的题");
+        assert!(pool.ids.contains("dyn-trait-object"), "pool: {:?}", pool.ids);
+        assert_eq!(
+            pool.scores.get("dyn-trait-object"),
+            Some(&1),
+            "single bigram hit scores 1: {pool:?}"
+        );
     }
 
     /// 0909 反馈 B（真实库数据门）: anchored picker sees ONLY pool

@@ -562,12 +562,10 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
             // The rustc diagnostics block (up to ~1200 chars) is repair-
             // loop food, not user reading material — the visible note
             // carries the failure reason in FULL (9.6 实测: 原因被省略
-            // 号吃掉), only the model-facing copy is capped.
-            let reason_note = full
-                .split("\n[未完成模板的 rustc 诊断]")
-                .next()
-                .unwrap_or(&full)
-                .to_string();
+            // 号吃掉), only the model-facing copy is capped. M9a3: the
+            // gate now labels the FAILING side (参考解/未完成模板), so
+            // split on either header.
+            let reason_note = split_diag_block(&full).to_string();
             let reason = ellipsize(&full, 400);
             record_generate_usage(env, &bridge);
             return Ok(ToolOutcome {
@@ -732,6 +730,11 @@ fn check_exercise(args: &Value, env: &AgentEnv) -> Result<ToolOutcome> {
     let tests = run.test.as_ref().map(|t| {
         json!({"ok": t.ok, "passed": t.passed, "failed": t.failed})
     });
+    // M9a3: the raw marker line goes through review::strip_marker — a
+    // weak model reading the file text invented "删掉或改成 // I AM DONE
+    // 才算交卷" (0909_2 反馈); the marker is harness-managed (practice.rs)
+    // and carries zero check signal, same reasoning as the review side.
+    let code = crate::review::strip_marker(&code);
     Ok(ToolOutcome {
         value: json!({
             "ok": true,
@@ -741,7 +744,9 @@ fn check_exercise(args: &Value, env: &AgentEnv) -> Result<ToolOutcome> {
             "compiles": run.compiled,
             "diagnostics": diagnostics,
             "tests": tests,
-            "note": "code 是练习当前内容；diagnostics/tests 是本地 rustc 真实结果。基于它们解读，                     不要复述文件。picked 不是用户想查的题时，让用户从 others 里指定。",
+            "note": "code 是练习当前内容（进度标记行已省略）；diagnostics/tests 是本地 rustc 真实结果。\
+                     完成状态以 picked.status 为准（练习索引权威），与文件内容无关。基于诊断解读，不要复述文件。\
+                     picked 不是用户想查的题时，让用户从 others 里指定。全绿时引导用户去 /practice 交题。",
         }),
         note: Some(format!("已读取并本地检查《{}》", meta.title)),
         practice: None,
@@ -942,10 +947,34 @@ fn ellipsize(text: &str, max_chars: usize) -> String {
     format!("{head}…")
 }
 
+/// Cut a gate failure message at its rustc-diagnostics block header
+/// (M9a3: the gate labels the FAILING side — 参考解 or 未完成模板 — so
+/// both headers must split). Returns the reason text without the raw
+/// diagnostics.
+fn split_diag_block(full: &str) -> &str {
+    for header in ["\n[未完成模板的 rustc 诊断]", "\n[参考解的 rustc 诊断]"] {
+        if let Some((head, _)) = full.split_once(header) {
+            return head;
+        }
+    }
+    full
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    /// M9a3: the note must cut at EITHER diagnostics header (the gate
+    /// now labels the failing side).
+    #[test]
+    fn split_diag_block_handles_both_headers() {
+        let body = "参考解编译失败\n[参考解的 rustc 诊断]\nerror[E0308]: ...";
+        assert_eq!(split_diag_block(body), "参考解编译失败");
+        let body = "参考解未通过全部测试\n[未完成模板的 rustc 诊断]\nerror[E0308]: ...";
+        assert_eq!(split_diag_block(body), "参考解未通过全部测试");
+        assert_eq!(split_diag_block("无诊断块的普通失败"), "无诊断块的普通失败");
+    }
 
     /// Caller that always fails: forces the generator into offline mode.
     struct FailingCaller;
@@ -1217,6 +1246,12 @@ mod tests {
             out.value["code"].as_str().unwrap().contains("fn broken"),
             "tool returns the CURRENT file content"
         );
+        assert!(
+            !out.value["code"].as_str().unwrap().contains("I AM NOT DONE"),
+            "harness-managed marker must not reach the coach (M9a3): {out:?}"
+        );
+        let note = out.value["note"].as_str().unwrap();
+        assert!(note.contains("picked.status"), "status-authority note missing: {note}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

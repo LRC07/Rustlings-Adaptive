@@ -48,8 +48,16 @@ Codes cited from memory get transposed (E0373 written as the \
 nonexistent E0372); a wrong code destroys trust in the whole explanation.
 - Real execution over speculation: when the user pastes code or an \
 error, call `check_code` to compile it locally first and explain from \
-the real diagnostics.
+the real diagnostics. Note `check_code` only sees the code pasted in \
+the conversation — it cannot read exercise files; `check_exercise` is \
+the tool that reads files.
 - Teach, don't dump solutions: give hints and next steps first.
+- `// I AM NOT DONE` at the end of exercise files is a SYSTEM-managed \
+progress marker: completion is tracked automatically when the local \
+check passes, and the marker never blocks anything. NEVER advise the \
+user to delete it, rewrite it (e.g. into \"// I AM DONE\"), or treat it \
+as unfinished business — there is no hand-in-by-marker step in this \
+app, so such advice is always wrong.
 - Stay in role: this is a RUST coach. For requests in other \
 languages (algorithms, snippets), give a brief explanation of the \
 idea and, at most, a SHORT Rust version for comparison — do not \
@@ -78,7 +86,11 @@ do NOT discuss internal matching — instead say: 练你点名的那个手法需
 exercise as an alternative, and let them choose.
 
 Tools:
-- `list_concepts` {} — list the concept ids covered by the taxonomy.
+- `list_concepts` {} — list the concept ids covered by the taxonomy. \
+NEVER pass `generate_exercise` a dotted concept id from memory: a \
+plausible-looking but nonexistent id (e.g. \"traits.dyn-dispatch\") \
+fails immediately. If unsure of the exact id, call `list_concepts` \
+first, or just pass the user's own words as free text.
 - `generate_exercise` {\"topic\": string, \"focus\": string, \
 \"reason\": string, \"mode\": \"auto|free\"} — generate a small 5-50 \
 line fill-in exercise, triple-verified locally (compiles / reference \
@@ -99,6 +111,17 @@ pipeline aim at exactly that technique. It is written to the exercise \
 directory; the user can start at once.
 - `check_code` {\"code\": string} — compile a Rust snippet with local \
 rustc and return real diagnostics (codes, messages, lines).
+- `check_exercise` {\"name\": string} — read a GENERATED exercise file \
+and check it with the local rustc (compile + tests, real \
+diagnostics). Use it when the user asks to check an exercise \
+(\"检查一下\" / \"帮我看看对不对\"); name is an optional title/filename \
+substring (default = this session's latest exercise). The exercise's \
+completion status is the `picked.status` field of the result — it is \
+authoritative; judge by it, not by anything in the file text. When \
+the check reports all green, congratulate the user AND tell them to \
+run /practice to hand the exercise in — the first pass there triggers \
+the review + debrief flow (exercises that already passed are not \
+re-reviewed).
 - `learner_profile` {} — the learner's local stats: weakest concepts, \
 SM-2 due reviews, top error codes, most-failed exercises. Call it when \
 the user asks what they are weak at or what to review, or before \
@@ -650,6 +673,29 @@ mod tests {
     }
 
     fn noop(_: &str) {}
+
+    /// M9a3: the M9z/M9a2 prompt additions were lost before commit (the
+    /// commit messages claimed them, the diff never had them). These
+    /// assertions pin the re-landed rules so they cannot silently
+    /// vanish again.
+    #[test]
+    fn system_prompt_carries_check_exercise_marker_and_practice_rules() {
+        assert!(SYSTEM_PROMPT.contains("`check_exercise`"), "check_exercise tool bullet missing");
+        assert!(
+            SYSTEM_PROMPT.contains("only sees the code pasted in the conversation"),
+            "check_code scope statement missing"
+        );
+        assert!(SYSTEM_PROMPT.contains("/practice"), "post-check /practice guidance missing");
+        assert!(SYSTEM_PROMPT.contains("picked.status"), "status-authority rule missing");
+        assert!(
+            SYSTEM_PROMPT.contains("I AM NOT DONE") && SYSTEM_PROMPT.contains("SYSTEM-managed"),
+            "marker prohibition missing"
+        );
+        assert!(
+            SYSTEM_PROMPT.contains("traits.dyn-dispatch"),
+            "hallucinated-concept-id warning missing"
+        );
+    }
 
     #[test]
     fn plain_reply_updates_history_and_records_usage() {
