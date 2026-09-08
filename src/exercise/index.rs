@@ -195,6 +195,15 @@ pub struct ExerciseMeta {
     /// the template with the recorded (or default) slot values.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
+    /// Pristine 题面 body as generated (M9a5): the authoritative input
+    /// for the review gate and the debrief quiz. The old rebuild
+    /// re-rendered the BASE template with recorded slots — for adapted
+    /// (tier-2) and free exercises there IS no matching template body,
+    /// so the quiz/review saw the wrong scenario (实测: 校核题按模板
+    /// 生成). None = legacy entry; consumers fall back to the template
+    /// render / the file's instruction prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
     /// Constraint spec strings of the exercise (M5.1): the review
     /// gate's static layer and the debrief comparison table consume
     /// these; empty when unknown (seed fixtures, pre-M5.1 entries).
@@ -363,6 +372,7 @@ impl ExerciseIndex {
                     feedback: None,
                     slots: Default::default(),
                     reference,
+                    body: None,
                     constraints,
                     review_verdict: None,
                 },
@@ -554,6 +564,7 @@ pub fn register_generated(
     hints: &[String],
     slots: &std::collections::BTreeMap<String, String>,
     reference: &str,
+    body: &str,
     constraints: &[String],
 ) -> anyhow::Result<String> {
     let key = key_for(exercises_dir, gen_path)
@@ -577,6 +588,7 @@ pub fn register_generated(
         feedback: None,
         slots: slots.clone(),
         reference: (!reference.trim().is_empty()).then(|| reference.trim_end().to_string()),
+        body: (!body.trim().is_empty()).then(|| body.to_string()),
         constraints: constraints.to_vec(),
         review_verdict: None,
     });
@@ -643,6 +655,7 @@ mod tests {
             slots: Default::default(),
             reference: None,
             constraints: Vec::new(),
+            body: None,
             review_verdict: None,
         });
 
@@ -692,6 +705,7 @@ mod tests {
             slots: Default::default(),
             reference: None,
             constraints: Vec::new(),
+            body: None,
             review_verdict: None,
         });
         // Verification runs of unchanged code: attempts and ✗N never
@@ -746,6 +760,7 @@ mod tests {
             slots: Default::default(),
             reference: None,
             constraints: Vec::new(),
+            body: None,
             review_verdict: None,
         });
         assert!(idx.set_feedback("generated/a.rs", Feedback::TooHard));
@@ -778,6 +793,7 @@ mod tests {
                 slots: Default::default(),
             reference: None,
             constraints: Vec::new(),
+            body: None,
             review_verdict: None,
             });
         }
@@ -844,6 +860,7 @@ mod tests {
             slots: Default::default(),
             reference: None,
             constraints: Vec::new(),
+            body: None,
             review_verdict: None,
         };
         idx.entries.insert("generated/1.rs".into(), mk("generated/1.rs", "题一", &["ownership.move"], Status::Passed, false));
@@ -889,6 +906,7 @@ mod tests {
                 slots: Default::default(),
             reference: None,
             constraints: Vec::new(),
+            body: None,
             review_verdict: None,
             },
         );

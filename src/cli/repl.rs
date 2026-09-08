@@ -2327,6 +2327,7 @@ mod tests {
             slots: Default::default(),
             reference: None,
             constraints: Vec::new(),
+            body: None,
             review_verdict: None,
         });
         let nb = crate::profile::notebook_from_index(&idx, None);

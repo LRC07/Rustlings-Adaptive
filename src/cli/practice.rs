@@ -830,6 +830,7 @@ mod tests {
             slots: Default::default(),
             reference: None,
             constraints: Vec::new(),
+            body: None,
             review_verdict: None,
         }
     }

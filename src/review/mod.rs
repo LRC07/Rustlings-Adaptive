@@ -207,6 +207,113 @@ pub fn strip_marker(code: &str) -> String {
     code.lines().filter(|l| !l.contains("I AM NOT DONE")).collect::<Vec<_>>().join("\n")
 }
 
+/// Strip ALL comments from Rust code while PRESERVING the line
+/// structure (every newline survives; a comment collapses to nothing
+/// on its line). M9a5 治本: the 题面's scaffolding comments ride along
+/// in the learner's solution and used to derail the review/quiz — the
+/// prompt-side "过时注释免疫" notes treated the symptom, this removes
+/// the cause before any prompt is built. Strings and char literals are
+/// respected (`"http://x"` stays intact; `'a` lifetimes don't open a
+/// comment), so findings' line numbers still match the real file.
+pub fn strip_comments(code: &str) -> String {
+    let chars: Vec<char> = code.chars().collect();
+    let mut out = String::with_capacity(code.len());
+    let mut i = 0usize;
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut in_line = false;
+    let mut in_block = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_line {
+            if c == '\n' {
+                in_line = false;
+                out.push('\n');
+            }
+            i += 1;
+            continue;
+        }
+        if in_block {
+            if c == '*' && chars.get(i + 1) == Some(&'/') {
+                in_block = false;
+                i += 2;
+            } else {
+                if c == '\n' {
+                    out.push('\n');
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if in_string || in_char {
+            let quote = if in_string { '"' } else { '\'' };
+            out.push(c);
+            if c == '\\' {
+                if let Some(&n) = chars.get(i + 1) {
+                    out.push(n);
+                    i += 2;
+                    continue;
+                }
+            } else if c == quote {
+                in_string = false;
+                in_char = false;
+            }
+            i += 1;
+            continue;
+        }
+        // Normal state.
+        if c == '/' && chars.get(i + 1) == Some(&'/') {
+            in_line = true;
+            i += 2;
+            continue;
+        }
+        if c == '/' && chars.get(i + 1) == Some(&'*') {
+            in_block = true;
+            i += 2;
+            continue;
+        }
+        if c == '"' {
+            in_string = true;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c == '\'' {
+            // Char literal ('a', '\n', '\u{7fff}') vs lifetime ('static):
+            // a literal closes with a quote on the SAME line within a
+            // few chars; a lifetime never closes. Scan ahead, don't
+            // guess.
+            let mut j = i + 1;
+            let mut closed = None;
+            while j < chars.len() && chars[j] != '\n' && j - i <= 12 {
+                if chars[j] == '\'' {
+                    closed = Some(j);
+                    break;
+                }
+                if chars[j] == '\\' {
+                    j += 2;
+                    continue;
+                }
+                j += 1;
+            }
+            match closed {
+                Some(end) => {
+                    out.extend(&chars[i..=end]);
+                    i = end + 1;
+                }
+                None => {
+                    out.push(c);
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
 /// Run the deterministic layer over the user's full solution file.
 /// `constraint_specs` are the exercise's declared constraint strings
 /// (empty = only todo!/clippy/lines are checked). Measurement uses the
@@ -393,11 +500,11 @@ fn review_user_prompt(input: &ReviewInput) -> String {
     p.push_str("【题面】\n");
     p.push_str(input.body.trim());
     p.push_str("\n\n【学习者的解答（已通过全部测试）】\n```rust\n");
-    p.push_str(&strip_marker(&input.user_code));
+    p.push_str(&strip_comments(&input.user_code));
     p.push_str("\n```\n");
     if let Some(r) = &input.reference {
         p.push_str("\n【参考解】\n```rust\n");
-        p.push_str(r.trim());
+        p.push_str(&strip_comments(r.trim()));
         p.push_str("\n```\n");
     }
     if !input.anti_patterns.is_empty() {
@@ -635,7 +742,7 @@ fn quiz_user_prompt(input: &ReviewInput, last_fail: Option<&str>) -> String {
         None => p.push_str("失败快照：无（一次通过，问题应问「这题在考什么」）\n"),
     }
     p.push_str(&format!("\n【题面】\n{}\n", input.body.trim()));
-    p.push_str(&format!("\n【学习者的最终解答】\n```rust\n{}\n```\n", strip_marker(&input.user_code)));
+    p.push_str(&format!("\n【学习者的最终解答】\n```rust\n{}\n```\n", strip_comments(&input.user_code)));
     if let Some(c) = &input.confusion {
         p.push_str(&format!("\n【本题针对的语言迁移直觉（出干扰项素材）】{c}\n"));
     }
@@ -868,11 +975,11 @@ fn cmp_user_prompt(input: &ReviewInput, machine: &MachineComparison) -> String {
     }
     p.push_str(&format!("\n【题面】\n{}\n", input.body.trim()));
     p.push_str("\n【学习者的解】\n```rust\n");
-    p.push_str(&strip_marker(&input.user_code));
+    p.push_str(&strip_comments(&input.user_code));
     p.push_str("\n```\n");
     if let Some(r) = &input.reference {
         p.push_str("\n【参考解】\n```rust\n");
-        p.push_str(r.trim());
+        p.push_str(&strip_comments(r.trim()));
         p.push_str("\n```\n");
     }
     if !input.anti_patterns.is_empty() {
@@ -1298,6 +1405,26 @@ mod tests {
         assert!(!view.contains("I AM NOT DONE"), "marker stripped: {view}");
         assert!(!view.contains("mod tests"), "test module stripped: {view}");
         assert!(view.contains("fn add"), "implementation kept: {view}");
+    }
+
+    /// M9a5: comments vanish before the LLM sees them, but the line
+    /// structure (and therefore findings' line numbers) survives, and
+    /// strings/char literals never open a comment.
+    #[test]
+    fn strip_comments_removes_comments_keeps_lines_and_strings() {
+        let code = "// 题面注释\nfn f() { /* 块\n注释 */ let s = \"http://x\"; } // 尾注\nlet c = '\"';\nlet lt: &'static str = \"a//b\";\n";
+        let out = strip_comments(code);
+        assert!(!out.contains("题面注释"), "no comment text left: {out}");
+        assert!(!out.contains("尾注"), "no comment text left: {out}");
+        assert!(!out.contains("注释 */"), "no block comment left: {out}");
+        assert!(out.contains("\"http://x\""), "string with // intact: {out}");
+        assert!(out.contains("\"a//b\""), "string with // intact: {out}");
+        assert_eq!(out.matches('\n').count(), code.matches('\n').count(), "line structure kept");
+        assert!(out.contains("fn f()"), "code kept: {out}");
+        // A char literal containing a quote must not open a string.
+        assert!(out.contains("'\"'"), "char literal intact: {out}");
+        // Lifetimes don't break the scanner.
+        assert!(out.contains("&'static str"), "lifetime intact: {out}");
     }
 
     fn review_input_for_tests() -> ReviewInput {

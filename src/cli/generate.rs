@@ -242,6 +242,7 @@ pub(crate) fn cmd_generate(
                 &out.hints,
                 &out.slots,
                 &out.reference,
+                &out.body,
                 &out.constraints,
             ) {
                 Ok(_) => {}

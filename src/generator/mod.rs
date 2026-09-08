@@ -374,6 +374,11 @@ pub struct Outcome {
     /// Hidden reference solution (M5.1: persisted in the exercise index
     /// so the review gate / debrief can compare against it later).
     pub reference: String,
+    /// Pristine 题面 body as generated (M9a5): persisted in the index so
+    /// the review gate / quiz rebuild the input from the ACTUAL exercise.
+    /// The old rebuild re-rendered the BASE template — for adapted (tier-2)
+    /// and free exercises that served the wrong scenario entirely.
+    pub body: String,
     /// Constraint spec strings of the exercise (M5.1: persisted for the
     /// review gate's static layer and the debrief comparison table).
     pub constraints: Vec<String>,
@@ -889,6 +894,7 @@ fn generate_matched(
                 slots: values,
                 hints: t.hints.clone(),
                 reference: draft.reference.clone(),
+                body: draft.body.clone(),
                 constraints: draft.constraints.clone(),
                 attempts: attempt + 1,
                 used_llm,
@@ -1021,6 +1027,7 @@ fn finish_draft(
         slots: Default::default(),
         hints,
         reference: draft.reference.clone(),
+        body: draft.body.clone(),
         constraints: draft.constraints.clone(),
         attempts,
         used_llm: true,
@@ -2358,6 +2365,9 @@ fn add(a: i32, b: i32) -> i32 {
         assert!(!out.used_llm);
         assert!(out.slots.is_empty());
         assert!(out.path.exists(), "{}", out.path.display());
+        // M9a5: the pristine 题面 rides the Outcome → exercise index, so
+        // the review gate / quiz rebuild from the ACTUAL exercise.
+        assert!(out.body.contains("fn add") && out.body.contains("I AM NOT DONE"));
 
         let src = fs::read_to_string(&out.path).unwrap();
         assert!(src.starts_with("// 迷你加法"));
@@ -3101,6 +3111,7 @@ fn add(a: i32, b: i32) -> i32 {
             slots: Default::default(),
             reference: None,
             constraints: Vec::new(),
+            body: None,
             review_verdict: None,
         };
         idx.upsert(mk("generated/old.rs", &["ownership.move"], Source::Free, Some("2026-09-09T01:00:00Z")));
@@ -3158,6 +3169,7 @@ fn add(a: i32, b: i32) -> i32 {
             slots: Default::default(),
             reference: None,
             constraints: Vec::new(),
+            body: None,
             review_verdict: None,
         });
         let h = GenHistory::from_index(&idx);

@@ -511,6 +511,7 @@ mod tests {
             slots: Default::default(),
             reference: None,
             constraints: Vec::new(),
+            body: None,
             review_verdict: None,
         };
         idx.upsert(mk("a", "题A", &["ownership.move"], Some("E0382"), Status::Failed { times: 2 }, 3));

@@ -611,6 +611,7 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
         &outcome.hints,
         &outcome.slots,
         &outcome.reference,
+        &outcome.body,
         &outcome.constraints,
     ) {
         progress(&format!("index 登记失败：{e:#}"));

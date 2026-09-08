@@ -115,13 +115,23 @@ fn build_input(
         meta.constraints.clone()
     };
 
-    // 题面: the exact rendered template body when possible (recorded
-    // slot values first), else the file's instruction prefix.
-    let body = tpl
-        .and_then(|t| {
-            let values =
-                if meta.slots.is_empty() { template::fill_for_attempt(t, 0) } else { meta.slots.clone() };
-            template::render(t, &values).ok().map(|r| r.body)
+    // 题面: M9a5 — the PRISTINE body recorded at generation time is the
+    // authoritative input (review gate + quiz). The old rebuild
+    // re-rendered the BASE template with recorded slots: for adapted
+    // (tier-2) and free exercises there is no matching template body,
+    // so the quiz/review saw the wrong scenario entirely (实测: 改编题
+    // 的校核题按模板生成). Fallback chain: recorded body → template
+    // render (legacy tier-1 entries) → the file's instruction prefix.
+    let body = meta
+        .body
+        .clone()
+        .filter(|b| !b.trim().is_empty())
+        .or_else(|| {
+            tpl.and_then(|t| {
+                let values =
+                    if meta.slots.is_empty() { template::fill_for_attempt(t, 0) } else { meta.slots.clone() };
+                template::render(t, &values).ok().map(|r| r.body)
+            })
         })
         .unwrap_or_else(|| body_from_file(user_code));
 
@@ -239,35 +249,42 @@ pub(crate) fn after_pass(
 
     let caller = make_caller(deps);
     let quiz_caller = make_caller(deps);
+    let cmp_caller = make_caller(deps);
     let input2 = input.clone();
     // 9.5 实测：the gate's LLM call can run for minutes on slow
     // endpoints — set the expectation up front.
-    println!("  （评审门与理解校核并行调用模型，端点慢时可能需要 1–2 分钟）");
-    // M9a4 校核∥评审并行: quiz generation and the review gate are
-    // INDEPENDENT (both eat only ReviewInput), so the quiz runs on its
-    // own thread beside the gate behind ONE spinner. Wall time drops
-    // from review+quiz to max(review, quiz). The quiz thread stays
-    // silent (the spinner line belongs to the gate); a quiz failure or
-    // panic degrades to exactly the old "跳过本步" path. Interrupt
-    // semantics unchanged: the spinner abandons both, in-flight calls
-    // finish in the background and still bill.
+    println!("  （评审门与理解校核、四维对比并行调用模型，端点慢时可能需要 1–2 分钟）");
+    // M9a4 校核∥评审并行 + M9a5 对比预取: quiz generation, the review
+    // gate AND the four-dimension comparison are INDEPENDENT (all eat
+    // only ReviewInput against the ORIGINAL code), so all three run
+    // beside each other behind ONE spinner. Wall time drops from three
+    // serial stages to max(them). The side threads stay silent (the
+    // spinner line belongs to the gate); a quiz failure or panic
+    // degrades to exactly the old "跳过本步" path. Interrupt semantics
+    // unchanged: the spinner abandons all, in-flight calls finish in
+    // the background and still bill. The comparison prefetch is valid
+    // only while the code stays the ORIGINAL one — step2's challenge
+    // path re-runs it when the learner actually edited (see below).
     let input_quiz = input.clone();
+    let input_cmp = input.clone();
     let lf = last_fail.map(str::to_string);
-    let (outcome, quiz_pre) = match run_with_spinner(
-        "评审+校核（并行）：评审解答 / 生成校核题…",
+    let (outcome, quiz_pre, cmp_pre) = match run_with_spinner(
+        "评审+校核+对比（并行）：评审解答 / 生成校核题 / 四维评审…",
         move |progress| {
             let quiz_thread = quiz_caller.map(|mut c| {
                 std::thread::spawn(move || review::llm_quiz(&mut *c, &input_quiz, lf.as_deref()))
             });
+            let cmp_thread = std::thread::spawn(move || run_comparison_raw(cmp_caller, &input_cmp));
             let outcome = review::run_gate(caller, input2, progress);
             if quiz_thread.is_some() {
-                progress("评审完成，等待校核题收尾…");
+                progress("评审完成，等待校核题/对比收尾…");
             }
             let quiz_pre = quiz_thread.and_then(|h| h.join().ok());
-            (outcome, quiz_pre)
+            let cmp_pre = cmp_thread.join().ok().flatten();
+            (outcome, quiz_pre, cmp_pre)
         },
     ) {
-        Some((o, q)) => (o, q),
+        Some((o, q, c)) => (o, q, c),
         None => return DebriefExit::Stay,
     };
     render_gate(&outcome);
@@ -282,16 +299,25 @@ pub(crate) fn after_pass(
 
     // Step 2: better-solution challenge (triggered when not clean).
     let mut outcome = outcome;
+    let original_code = input.user_code.clone();
+    let mut cmp = cmp_pre;
     if outcome.verdict != review::Verdict::Clean
         && let Some((updated, code)) = step2_challenge(deps, index, key, ex, &mut input, &outcome)
     {
         outcome = updated;
-        input.user_code = code;
+        input.user_code = code.clone();
+        // The prefetch ran against the ORIGINAL code; an actual edit
+        // invalidates it — re-run the comparison on the new code (the
+        // "r" path already re-reviewed it above).
+        if review::review_view(&code) != original_code {
+            cmp = step3_compare(deps, &input);
+        }
     }
 
     // Step 3: two-dimensional comparison (machine + LLM). M9b: data
     // only — the rendering happens inside the debrief-theatre panel.
-    let cmp = step3_compare(deps, &input);
+    // M9a5: usually already prefetched beside the gate; only the
+    // challenge-with-edit path pays a fresh (spinner) run here.
 
     // Step 4: follow-up decision (deterministic) + optional handback.
     let follow_up = review::decide_follow_up(&review::FollowUpInput {
@@ -484,6 +510,20 @@ fn ask(prompt: &str) -> Option<String> {
 /// after_pass) and arrives here as `pre` — None = offline, Some(Err) =
 /// generation failed (both degrade to the old skip messages); only the
 /// interactive part and the optional free-text judging remain here.
+/// Stable pseudo-random rotation offset for the quiz options (M9a5):
+/// hash of (title, attempts) — deterministic per (exercise, attempt)
+/// and spread across exercises. `DefaultHasher::new()` uses fixed keys,
+/// so the same input hashes the same in every run.
+fn quiz_rotation_offset(title: &str, attempts: u32, len: usize) -> usize {
+    use std::hash::{Hash, Hasher};
+    if len <= 1 {
+        return 0;
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (title, attempts).hash(&mut h);
+    (h.finish() as usize) % len
+}
+
 fn step1_explanation_check(
     deps: &DebriefDeps,
     input: &review::ReviewInput,
@@ -506,7 +546,12 @@ fn step1_explanation_check(
     };
 
     // Deterministic rotation so the correct option is not always #1.
-    let off = (input.attempts as usize) % quiz.options.len();
+    // M9a5: models put the correct option FIRST almost always, and the
+    // old rotation (attempts % len) degenerated to no-rotation on
+    // first-try passes (attempts=0) — 实测正确项常年 1 号. Rotate by a
+    // stable hash of (title, attempts): the same exercise+attempt keeps
+    // one order, different exercises/attempts spread evenly.
+    let off = quiz_rotation_offset(&input.title, input.attempts, quiz.options.len());
     let options: Vec<review::QuizOption> = {
         let mut v = quiz.options.clone();
         v.rotate_left(off);
@@ -668,6 +713,20 @@ fn step2_challenge(
 /// Step 3 data pass: measure both sides with the real toolchain and ask
 /// the model for the four judged dimensions. M9b: rendering moved into
 /// the step-4 theatre panel (`step4_follow_up`).
+/// M9a5: the comparison WITHOUT its spinners — the prefetch runs on a
+/// side thread beside the review gate, where the spinner line belongs
+/// to the gate. Same data as `step3_compare`, silent.
+fn run_comparison_raw(
+    caller: Option<Box<dyn review::ReviewCaller + Send>>,
+    input: &review::ReviewInput,
+) -> Option<(review::MachineComparison, Option<review::LlmComparison>, bool)> {
+    let machine =
+        review::machine_metrics(&input.user_code, input.reference.as_deref(), &input.constraint_specs);
+    let llm_cmp =
+        caller.and_then(|mut c| review::llm_comparison(&mut *c, input, &machine).ok());
+    Some((machine, llm_cmp, input.reference.is_some()))
+}
+
 fn step3_compare(
     deps: &DebriefDeps,
     input: &review::ReviewInput,
@@ -998,6 +1057,7 @@ fn f(x: u32) -> u32 {
             feedback: None,
             slots: Default::default(),
             reference: Some("fn exact() {}".into()),
+            body: None,
             constraints: vec!["max-lines=20".into()],
             review_verdict: None,
         };
@@ -1016,6 +1076,34 @@ fn f(x: u32) -> u32 {
         assert_eq!(input2.reference, None);
         assert!(input2.anti_patterns.is_empty());
         assert!(input2.body.contains("指令"), "{:?}", input2.body);
+
+        // M9a5: a persisted PRISTINE body wins over the template render —
+        // the adapted (tier-2) case where the base template's body is the
+        // WRONG scenario (实测: 改编题的校核题按模板生成).
+        let mut meta3 = meta.clone();
+        meta3.source = Source::Adapted { base: "t".into() };
+        meta3.body = Some("// 真实改编题面\nfn adapted() {}".into());
+        let input3 = build_input(&dir, &meta3, "fn f() {}", 0);
+        assert!(input3.body.contains("真实改编题面"), "{:?}", input3.body);
+        assert!(!input3.body.contains("场景"), "template body must NOT win: {:?}", input3.body);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// M9a5: the correct option used to sit at #1 almost always — the
+    /// old rotation was `attempts % len`, i.e. ZERO on every first-try
+    /// pass. The hash-based offset must stay stable per (title,
+    /// attempts) yet spread across exercises.
+    #[test]
+    fn quiz_rotation_spreads_by_title_and_attempts() {
+        // Same input → same offset (stable across renders/runs).
+        assert_eq!(quiz_rotation_offset("题A", 0, 4), quiz_rotation_offset("题A", 0, 4));
+        // Single-option quizzes never rotate.
+        assert_eq!(quiz_rotation_offset("题A", 0, 1), 0);
+        // Different exercises spread where the old logic was stuck at 0.
+        let offs: std::collections::BTreeSet<usize> = ["题A", "题B", "题C", "题D", "题E", "题F", "题G", "题H"]
+            .iter()
+            .map(|t| quiz_rotation_offset(t, 0, 4))
+            .collect();
+        assert!(offs.len() >= 3, "offsets must spread, got {offs:?}");
     }
 }
