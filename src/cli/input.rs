@@ -90,10 +90,12 @@ fn read_line_fallback() -> Line {
 // ---------------------------------------------------------------------------
 
 /// After an Enter, input arriving within this window marks a paste
-/// burst (inter-line gap of a paste stream is <1ms; no human types
-/// that fast).
+/// burst (fallback for terminals WITHOUT bracketed paste). SSH latency
+/// easily spreads a pasted stream wider than a tight 10ms window —
+/// which is how a whole snippet got submitted line by line
+/// (0909_2 同学反馈 3). 50ms still never catches a human typing Enter.
 #[cfg(unix)]
-const PASTE_GAP_MS: i32 = 10;
+const PASTE_GAP_MS: i32 = 50;
 
 /// A paste burst ends after this much silence (terminals may deliver
 /// a long paste in several chunks).
@@ -612,6 +614,13 @@ impl RawGuard {
             if libc::tcsetattr(0, libc::TCSANOW, &raw) != 0 {
                 return Err(());
             }
+            // ENABLE bracketed paste (0909_2 同学反馈 3, the root fix):
+            // terminals only wrap pastes in ESC[200~…ESC[201~ when the
+            // application asks for mode 2004 — we never did, so every
+            // user relied on the burst heuristic and laggy links
+            // submitted pastes line by line. Restored in Drop.
+            print!("\x1b[?2004h");
+            let _ = std::io::stdout().flush();
             Ok(Self { saved })
         }
     }
@@ -623,6 +632,9 @@ impl Drop for RawGuard {
         unsafe {
             libc::tcsetattr(0, libc::TCSANOW, &self.saved);
         }
+        // Leave bracketed paste the way we found it.
+        print!("\x1b[?2004l");
+        let _ = std::io::stdout().flush();
     }
 }
 

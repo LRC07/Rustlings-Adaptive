@@ -21,6 +21,7 @@ use crate::review::{self, ReviewCaller};
 use crate::template;
 use crate::usage::UsageTracker;
 
+use super::md::paint_line;
 use super::render;
 use super::spinner::Spinner;
 use super::{read_line, Line};
@@ -358,12 +359,12 @@ fn render_gate(o: &review::GateOutcome) {
         // One-line summary even when there are no findings — otherwise
         // a clean verdict looks like the LLM layer never ran.
         if !r.summary.is_empty() && r.findings.is_empty() {
-            println!("    · {0}", r.summary);
+            println!("    · {0}", paint_line(&r.summary));
         }
         for f in &r.findings {
-            println!("    · [{}] {}", severity_kind_cn(f), f.message);
+            println!("    · [{}] {}", severity_kind_cn(f), paint_line(&f.message));
             if let Some(w) = &f.better_way {
-                println!("      更优：{w}");
+                println!("      更优：{}", paint_line(w));
             }
         }
     } else if o.llm_error.is_none() {
@@ -490,9 +491,9 @@ fn step1_explanation_check(
     };
 
     println!();
-    println!("  {}", render::bold(&quiz.question));
+    println!("  {}", render::bold(&paint_line(&quiz.question)));
     for (i, o) in options.iter().enumerate() {
-        println!("    {}. {}", i + 1, o.text);
+        println!("    {}. {}", i + 1, paint_line(&o.text));
     }
     println!("  输入数字选择；或直接输入你的理解；回车跳过。");
 
@@ -508,12 +509,12 @@ fn step1_explanation_check(
         {
             let picked = &options[n - 1];
             if picked.correct {
-                println!("  {} 解释命中：{}", render::green("✓"), picked.explain);
+                println!("  {} 解释命中：{}", render::green("✓"), paint_line(&picked.explain));
                 return Some(true);
             }
             let correct = options.iter().find(|o| o.correct)?;
-            println!("  {} 未命中。正确理解是：{}", render::red("✗"), correct.text);
-            println!("    {}", correct.explain);
+            println!("  {} 未命中。正确理解是：{}", render::red("✗"), paint_line(&correct.text));
+            println!("    {}", paint_line(&correct.explain));
             return Some(false);
         }
         // Free text → LLM judging (§4.3).
@@ -530,11 +531,11 @@ fn step1_explanation_check(
         match judged {
             Some(Ok(j)) => {
                 if j.hit {
-                    println!("  {} 解释命中：{}", render::green("✓"), j.why);
+                    println!("  {} 解释命中：{}", render::green("✓"), paint_line(&j.why));
                 } else {
-                    println!("  {} 未命中：{}", render::red("✗"), j.why);
+                    println!("  {} 未命中：{}", render::red("✗"), paint_line(&j.why));
                     if let Some(expl) = quiz.correct_explanation() {
-                        println!("    正确理解：{expl}");
+                        println!("    正确理解：{}", paint_line(expl));
                     }
                 }
                 return Some(j.hit);
@@ -729,14 +730,14 @@ fn llm_rows(llm: Option<&review::LlmComparison>, has_ref: bool) -> Vec<String> {
         let score = |s: Option<u8>| s.map(|n| format!("{n}/5")).unwrap_or_else(|| "?".into());
         rows.push(format!("{}（用户 {} ｜ 参考 {}）", render::bold(dim_cn(&r.dim)), score(r.user_score), score(r.ref_score)));
         if !r.user_note.is_empty() {
-            rows.push(format!("  用户：{}", r.user_note));
+            rows.push(format!("  用户：{}", paint_line(&r.user_note)));
         }
         if has_ref && !r.ref_note.is_empty() {
-            rows.push(format!("  参考：{}", r.ref_note));
+            rows.push(format!("  参考：{}", paint_line(&r.ref_note)));
         }
     }
     if !c.takeaway.is_empty() {
-        rows.push(format!("点评：{}", c.takeaway));
+        rows.push(format!("点评：{}", paint_line(&c.takeaway)));
     }
     rows
 }

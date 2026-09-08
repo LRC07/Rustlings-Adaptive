@@ -448,6 +448,18 @@ fn split_row(line: &str) -> Vec<String> {
     t.split('|').map(|c| c.trim().to_string()).collect()
 }
 
+/// One line of LLM prose with inline markers styled — the SAME inline
+/// path as chat replies. Review/debrief printouts used to skip this and
+/// rendered bare `` `code` `` backticks (0909_2 同学反馈 1). No-op
+/// without ANSI (pipe output stays raw).
+pub(crate) fn paint_line(line: &str) -> String {
+    if !crate::cli::render::ansi_enabled() {
+        return line.to_string();
+    }
+    let p = Painter { ansi: true };
+    paint_inline(&p, line, Style::Plain)
+}
+
 fn paint_inline(p: &Painter, line: &str, base: Style) -> String {
     inline_parse(line, base)
         .into_iter()

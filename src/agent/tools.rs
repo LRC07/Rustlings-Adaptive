@@ -42,6 +42,7 @@ pub const TOOL_GENERATE_EXERCISE: &str = "generate_exercise";
 pub const TOOL_CHECK_CODE: &str = "check_code";
 pub const TOOL_LEARNER_PROFILE: &str = "learner_profile";
 pub const TOOL_BORROWLAB: &str = "borrowlab";
+pub const TOOL_CHECK_EXERCISE: &str = "check_exercise";
 
 /// Schemas offered to the model (OpenAI function format).
 pub fn tool_schemas() -> Vec<Tool> {
@@ -107,6 +108,17 @@ pub fn tool_schemas() -> Vec<Tool> {
                           根据历史选题时调用它"
                 .into(),
             parameters: json!({"type": "object", "properties": {}}),
+        },
+        Tool {
+            name: TOOL_CHECK_EXERCISE.into(),
+            description: "读取并本地检查一道练习：rustc 编译 + 测试运行的真实诊断。用户说\"检查一下/帮我看看写得对不对\"时调用；\
+                          name 缺省 = 本会话最新的练习，可写题目名/文件名子串模糊匹配".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "题目名/文件名子串（可选）；不填 = 本会话最新练习"}
+                }
+            }),
         },
         Tool {
             name: TOOL_BORROWLAB.into(),
@@ -176,7 +188,8 @@ pub fn execute(name: &str, arguments: &str, env: &AgentEnv, progress: &dyn Fn(&s
         TOOL_CHECK_CODE => check_code(&args, progress),
         TOOL_LEARNER_PROFILE => learner_profile(env),
         TOOL_BORROWLAB => borrowlab(&args, progress),
-        other => Err(anyhow!("未知工具「{other}」；可用工具：{TOOL_LIST_CONCEPTS} / {TOOL_GENERATE_EXERCISE} / {TOOL_CHECK_CODE} / {TOOL_LEARNER_PROFILE} / {TOOL_BORROWLAB}")),
+        TOOL_CHECK_EXERCISE => check_exercise(&args, env),
+        other => Err(anyhow!("未知工具「{other}」；可用工具：{TOOL_LIST_CONCEPTS} / {TOOL_GENERATE_EXERCISE} / {TOOL_CHECK_CODE} / {TOOL_LEARNER_PROFILE} / {TOOL_BORROWLAB} / {TOOL_CHECK_EXERCISE}")),
     }
 }
 
@@ -650,6 +663,93 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
 }
 
 // ---------------------------------------------------------------------------
+// check_exercise (0909_2 同学反馈 2): "检查一下"闭环 — the agent has no
+// file-reading tool, so a user who edited the exercise outside the chat
+// and asked for a check hit a dead end. This reads the exercise and runs
+// the LOCAL rustc compile + test check, feeding real diagnostics back.
+// ---------------------------------------------------------------------------
+
+fn check_exercise(args: &Value, env: &AgentEnv) -> Result<ToolOutcome> {
+    let index = crate::exercise::index::ExerciseIndex::load(&env.root.join("exercises"));
+    let wanted = args.get("name").and_then(|n| n.as_str()).map(str::trim).filter(|s| !s.is_empty());
+    let mut candidates: Vec<&crate::exercise::index::ExerciseMeta> =
+        index.iter().filter(|m| m.path.starts_with("generated/")).collect();
+    if let Some(n) = wanted {
+        let nl = n.to_lowercase();
+        candidates.retain(|m| format!("{} {}", m.title, m.path).to_lowercase().contains(&nl));
+    }
+    // 本会话的题排最前，然后按创建时间新 → 旧。
+    candidates.sort_by(|a, b| {
+        let sa = a.session_id.as_deref() == env.session_id.as_deref();
+        let sb = b.session_id.as_deref() == env.session_id.as_deref();
+        sb.cmp(&sa).then_with(|| b.created_at.cmp(&a.created_at))
+    });
+    if candidates.is_empty() {
+        return Ok(ToolOutcome {
+            value: json!({
+                "ok": false,
+                "error": format!("没有找到匹配的练习（name={wanted:?}）。请向用户确认是哪道题（可报出下列候选），或建议 /practice 查看。"),
+                "candidates": index.iter().filter(|m| m.path.starts_with("generated/")).take(10)
+                    .map(|m| json!({"path": m.path, "title": m.title})).collect::<Vec<_>>(),
+            }),
+            note: Some("没有匹配的练习".into()),
+            practice: None,
+            usage: UsageAcc::default(),
+        });
+    }
+    let meta = candidates[0];
+    let others: Vec<Value> = candidates
+        .iter()
+        .skip(1)
+        .take(5)
+        .map(|m| json!({"path": m.path, "title": m.title}))
+        .collect();
+    let file = env.root.join("exercises").join(&meta.path);
+    let code = std::fs::read_to_string(&file)
+        .map_err(|e| anyhow!("读取练习文件失败（{}）：{e}", file.display()))?;
+    // 本地检查：真实 rustc 编译 + 测试（不直接打印——证据进 JSON 由教练解读）。
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let workdir = std::env::temp_dir().join(format!("rustlings_check_ex_{nanos}"));
+    std::fs::create_dir_all(&workdir)?;
+    let run = crate::verifier::run_test_flow(&code, &workdir, "check_exercise");
+    let _ = std::fs::remove_dir_all(&workdir);
+    let run = run.map_err(|e| anyhow!("本地检查执行失败：{e:#}"))?;
+    let diagnostics: Vec<Value> = run
+        .diagnostics
+        .iter()
+        .filter(|d| d.is_error())
+        .take(5)
+        .map(|d| {
+            json!({
+                "code": d.code,
+                "message": d.message.chars().take(300).collect::<String>(),
+            })
+        })
+        .collect();
+    let tests = run.test.as_ref().map(|t| {
+        json!({"ok": t.ok, "passed": t.passed, "failed": t.failed})
+    });
+    Ok(ToolOutcome {
+        value: json!({
+            "ok": true,
+            "picked": {"path": meta.path, "title": meta.title, "status": meta.status_line_cn()},
+            "others": others,
+            "code": code,
+            "compiles": run.compiled,
+            "diagnostics": diagnostics,
+            "tests": tests,
+            "note": "code 是练习当前内容；diagnostics/tests 是本地 rustc 真实结果。基于它们解读，                     不要复述文件。picked 不是用户想查的题时，让用户从 others 里指定。",
+        }),
+        note: Some(format!("已读取并本地检查《{}》", meta.title)),
+        practice: None,
+        usage: UsageAcc::default(),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // borrowlab (M7)
 // ---------------------------------------------------------------------------
 
@@ -886,6 +986,7 @@ mod tests {
                 TOOL_GENERATE_EXERCISE,
                 TOOL_CHECK_CODE,
                 TOOL_LEARNER_PROFILE,
+                TOOL_CHECK_EXERCISE,
                 TOOL_BORROWLAB
             ]
         );
@@ -1086,6 +1187,37 @@ mod tests {
             "budget block must surface as the reason: {out:?}"
         );
         assert!(env.free_fail_note.lock().unwrap().is_some());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 0909_2 同学反馈 2: "检查一下"闭环 — the tool reads the exercise
+    /// file and reports REAL local diagnostics (compiles / test results).
+    #[test]
+    fn check_exercise_reads_and_compiles() {
+        let root = fixture_root("check_ex");
+        let env = test_env(&root);
+        // 先经正常路径生成一道题（离线 tier-1 填槽），再让工具检查它。
+        let out = execute(TOOL_GENERATE_EXERCISE, r#"{"topic": "t.c"}"#, &env, &|_| {}).unwrap();
+        assert_eq!(out.value["ok"], true, "{out:?}");
+        let path = out.value["path"].as_str().unwrap().to_string();
+        // 模拟"用户改了文件"：追加一个必然编译失败的函数。
+        let file = root.join(&path);
+        let mut code = std::fs::read_to_string(&file).unwrap();
+        code.push_str("\nfn broken() { let s: String = 5; let _ = s; }\n");
+        std::fs::write(&file, code).unwrap();
+
+        let out = execute(TOOL_CHECK_EXERCISE, r#"{}"#, &env, &|_| {}).unwrap();
+        assert_eq!(out.value["ok"], true, "{out:?}");
+        assert_eq!(out.value["compiles"], false, "broken exercise must not compile");
+        let diags = out.value["diagnostics"].as_array().unwrap();
+        assert!(
+            diags.iter().any(|d| d["code"].as_str().is_some()),
+            "real diagnostics present: {out:?}"
+        );
+        assert!(
+            out.value["code"].as_str().unwrap().contains("fn broken"),
+            "tool returns the CURRENT file content"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
