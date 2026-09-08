@@ -17,7 +17,7 @@ mod repl;
 pub(crate) mod render;
 mod spinner;
 
-pub(crate) use input::{read_line, Line};
+pub(crate) use input::{read_line, read_line_masked, Line};
 
 pub fn run() {
     repl::run();
@@ -55,6 +55,14 @@ pub(crate) fn flush_stdin() {
 /// where Ctrl-C/EOF both mean "leave this page").
 pub(crate) fn read_line_or_leave(prompt: &str) -> Option<String> {
     match read_line(prompt) {
+        Line::Text(s) => Some(s),
+        Line::Interrupted | Line::Eof => None,
+    }
+}
+
+/// "line or give up" for secret inputs (api_key).
+pub(crate) fn read_line_masked_or_leave(prompt: &str) -> Option<String> {
+    match read_line_masked(prompt) {
         Line::Text(s) => Some(s),
         Line::Interrupted | Line::Eof => None,
     }

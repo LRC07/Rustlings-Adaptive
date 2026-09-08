@@ -26,7 +26,10 @@ use crate::llm::{ChatMessage, LlmClient};
 use crate::usage::UsageTracker;
 
 use super::render::{self, chat_header, chat_tail, clear_all, clear_viewport};
-use super::{generate, make_client, practice, read_line, read_line_or_leave, spinner::Spinner, Line};
+use super::{
+    generate, make_client, practice, read_line, read_line_masked_or_leave, read_line_or_leave,
+    spinner::Spinner, Line,
+};
 
 pub(crate) fn run() {
     let root = PathBuf::from(".");
@@ -215,7 +218,7 @@ pub(crate) fn run() {
             Cmd::Model(arg) => {
                 // Result page (M4.2 convention): prints inline and must
                 // NOT be wiped by a viewport repaint right after.
-                handle_model(arg, &mut cfg, &mut client);
+                handle_model(arg, &mut cfg, &mut client, &tracker);
             }
             Cmd::Config => {
                 cmd_config(&mut cfg, &mut client);
@@ -317,7 +320,62 @@ fn handback_label(msg: &str) -> &'static str {
 /// `/model` — list, switch, create (`new`) or remove (`rm <名>`) named
 /// model profiles (M4.6 + M9d). Switching moves the pointer, writes it
 /// back and rebuilds the client so the next turn uses the new endpoint.
-fn handle_model(arg: Option<&str>, cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
+/// `[t]` in the /model panel (0909_2 反馈): the fastest way to answer
+/// "is this API key even alive?" without leaving the app — one minimal
+/// request against the ACTIVE profile, measured and honestly billed
+/// under the "chat" phase.
+fn model_test(cfg: &ModelConfig, tracker: &Arc<Mutex<UsageTracker>>) {
+    let Some(client) = make_client(cfg) else {
+        println!("  该档案没有 API Key——先 /config 填入，或在 .env 写 RUSTLINGS_API_KEY。");
+        return;
+    };
+    println!("  测试 {} @ {}（一条最小请求，会照常计入用量）…", render::cyan(&cfg.model), host_of(&cfg.endpoint));
+    let started = std::time::Instant::now();
+    match client.chat_turn_bounded(
+        &[crate::llm::ChatMessage::user("Reply with exactly: OK")],
+        &[],
+        Some(8),
+    ) {
+        Ok(out) => {
+            let ms = started.elapsed().as_millis();
+            let cost = crate::usage::cost_usd(
+                out.usage.prompt_tokens,
+                out.usage.completion_tokens,
+                cfg.prices.input,
+                cfg.prices.output,
+            );
+            tracker
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .record(
+                    &cfg.model,
+                    out.usage.prompt_tokens,
+                    out.usage.completion_tokens,
+                    out.usage.reasoning_tokens,
+                    cost,
+                    "chat",
+                );
+            println!(
+                "  {} 连接成功：{} ms｜{} tok｜${:.6}",
+                render::green("✓"),
+                ms,
+                out.usage.prompt_tokens + out.usage.completion_tokens,
+                cost
+            );
+        }
+        Err(e) => {
+            println!("  {} 连接失败：{e:#}", render::red("✗"));
+            println!("  常见原因：Key 无效或未生效、endpoint / model id 拼错、网络或代理不通。");
+        }
+    }
+}
+
+fn handle_model(
+    arg: Option<&str>,
+    cfg: &mut ModelConfig,
+    client: &mut Option<LlmClient>,
+    tracker: &Arc<Mutex<UsageTracker>>,
+) {
     let arg = arg.map(str::trim).filter(|s| !s.is_empty());
     match arg {
         Some("new") => return model_new(cfg, client),
@@ -333,7 +391,7 @@ fn handle_model(arg: Option<&str>, cfg: &mut ModelConfig, client: &mut Option<Ll
         return;
     }
     let Some(name) = arg else {
-        model_panel(cfg, client);
+        model_panel(cfg, client, tracker);
         return;
     };
     match cfg.apply_profile(name) {
@@ -363,7 +421,11 @@ fn handle_model(arg: Option<&str>, cfg: &mut ModelConfig, client: &mut Option<Ll
 /// never lure the learner into typing bare keywords ("new") into the
 /// chat. Switching exits back to the conversation; create/remove stay
 /// in the panel for follow-up actions.
-fn model_panel(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
+fn model_panel(
+    cfg: &mut ModelConfig,
+    client: &mut Option<LlmClient>,
+    tracker: &Arc<Mutex<UsageTracker>>,
+) {
     loop {
         if render::ansi_enabled() {
             clear_viewport();
@@ -407,7 +469,9 @@ fn model_panel(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
             );
         }
         println!();
-        println!("  [数字] 切换 ｜ [n] 新建 ｜ [d <名>] 删除 ｜ [r] 分场景路由 ｜ [q/回车] 返回对话");
+        println!(
+            "  [数字] 切换 ｜ [n] 新建 ｜ [d <名>] 删除 ｜ [r] 分场景路由 ｜ [t] 测试连接 ｜ [q/回车] 返回对话"
+        );
         let Some(line) = read_line_or_leave("模型> ") else { return };
         let t = line.trim();
         if t.starts_with('/') {
@@ -417,6 +481,7 @@ fn model_panel(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
         match t {
             "" | "q" | "b" | "back" => return,
             "n" => model_new(cfg, client),
+            "t" => model_test(cfg, tracker),
             "r" => model_routing(cfg, client),
             t if t == "d" || t.starts_with('d') => {
                 let name = t.strip_prefix('d').map(str::trim).unwrap_or("");
@@ -442,7 +507,7 @@ fn model_panel(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
                     }
                 }
                 Ok(_) => println!("  序号超出范围：共 {} 个档案。", cfg.models.len()),
-                _ => println!("  未知输入：数字切换 / n 新建 / d <名> 删除 / q 返回"),
+                _ => println!("  未知输入：数字切换 / n 新建 / d <名> 删除 / t 测试 / q 返回"),
             },
         }
     }
@@ -542,7 +607,7 @@ fn model_new(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
         return;
     };
     let Some(model) = read_line_or_leave("  3/4 模型 id（回车 = gpt-4o-mini）: ") else { return };
-    let Some(api_key) = read_line_or_leave("  4/4 api_key（本地端点如 Ollama 可填占位，如 ollama）: ")
+    let Some(api_key) = read_line_masked_or_leave("  4/4 api_key（回显为 *；本地端点可填占位，如 ollama）: ")
     else {
         return;
     };
@@ -764,6 +829,7 @@ fn print_help() {
     println!("        后可继续补充问题，回车发送）。教练会锚定错误码与概念，需要");
     println!("        时本地编译你的代码取证（check_code），或生成一道可开练的");
     println!("        小练习（generate_exercise）。任务执行中可随时 Ctrl-C 打断。");
+    println!("        输入行支持 ← → Home End 移动光标、Ctrl-D 前向删除。");
     println!("  命令：");
     println!("    /new        开启新会话（旧会话落盘可回看）");
     println!("    /clear      清屏（/clear all 连同回滚缓冲区一起清）");
@@ -1558,7 +1624,7 @@ fn cmd_config(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
                 }
             }
             "3" => {
-                if let Some(v) = read_line_or_leave("新 api_key（输入明文，回车确认）> ") {
+                if let Some(v) = read_line_masked_or_leave("新 api_key（回显为 *，回车确认）> ") {
                     cfg.api_key = v;
                     cfg.key_source = crate::config::KeySource::ConfigFile;
                     save_and_rebuild(cfg, client);

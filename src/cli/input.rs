@@ -52,7 +52,21 @@ pub(crate) fn read_line(prompt: &str) -> Line {
     let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     #[cfg(unix)]
     if tty {
-        return read_line_raw(prompt);
+        return read_line_raw(prompt, false);
+    }
+    read_line_fallback()
+}
+
+/// Secret input (api_key): every non-newline char renders as '*' on a
+/// tty (0909_2 反馈). Off-tty (pipes/tests) the fallback cannot hide
+/// anything — callers are interactive-only anyway.
+pub(crate) fn read_line_masked(prompt: &str) -> Line {
+    print!("{prompt}");
+    let _ = std::io::stdout().flush();
+    let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    #[cfg(unix)]
+    if tty {
+        return read_line_raw(prompt, true);
     }
     read_line_fallback()
 }
@@ -87,7 +101,7 @@ const PASTE_GAP_MS: i32 = 10;
 const BURST_SILENCE_MS: i32 = 40;
 
 #[cfg(unix)]
-fn read_line_raw(prompt: &str) -> Line {
+fn read_line_raw(prompt: &str, mask: bool) -> Line {
     let term = match RawGuard::new() {
         Ok(t) => t,
         Err(_) => return read_line_fallback(),
@@ -101,6 +115,8 @@ fn read_line_raw(prompt: &str) -> Line {
         // after joining lines must land PAST the prompt, or the wipe
         // eats it ("你> " disappearing while backspacing, 9.5 实测).
         prompt_cols: unicode_width::UnicodeWidthStr::width(prompt),
+        prompt: prompt.to_string(),
+        mask,
         ..Default::default()
     };
     let mut buf = [0u8; 256];
@@ -150,6 +166,10 @@ fn read_line_raw(prompt: &str) -> Line {
                 }
             }
         }
+        // One full redraw per read chunk (0909_2 反馈: arrows moved the
+        // cursor through a buffer the screen knew nothing about; the
+        // incremental per-char echo cannot express a mid-line caret).
+        ed.render();
         // Heuristic burst: no bracketed terminator will arrive; end
         // the paste after a short silence. (If the terminal does send
         // brackets, ESC[201~ already turned paste mode off and this
@@ -182,15 +202,28 @@ fn errno_is_eintr() -> bool {
 
 /// Byte-level state machine: bytes in, one action out. Pure enough to
 /// unit-test (escape/paste markers included — no I/O happens here).
+/// Mutations touch ONLY the buffer + cursor; the screen is repainted by
+/// [`Editor::render`] once per read chunk (0909_2 反馈: a mid-line
+/// caret needs a whole-line redraw — the old per-char echo cannot
+/// express it).
 #[cfg(unix)]
 #[derive(Default)]
 struct Editor {
     line: String,
+    /// Caret position as a CHAR index into `line` (0..=char count).
+    cursor: usize,
     asm: CharAssembler,
     warned_encoding: bool,
     /// Display width of the active prompt ("你> " = 4). Needed because
     /// joining a wrapped line repositions absolutely from column 0.
     prompt_cols: usize,
+    /// The prompt text itself (the whole-line repaint reprints it).
+    prompt: String,
+    /// Secret input (api_key): every non-newline char renders as '*'.
+    mask: bool,
+    /// Visual row (relative to the input's first row) the caret sat on
+    /// after the last render — lets the next repaint climb back up.
+    vis_row: usize,
     /// Paste mode: newlines are content, not submit (bracketed paste
     /// or burst heuristic).
     paste: bool,
@@ -275,10 +308,13 @@ impl Editor {
             }
             0x03 => Feed::Interrupted, // Ctrl-C
             0x04 => {
+                // Ctrl-D: forward delete at the caret (standard); on an
+                // EMPTY line it is EOF.
                 if self.line.is_empty() {
-                    Feed::Eof // Ctrl-D on empty line
+                    Feed::Eof
                 } else {
-                    Feed::Keep // ignore mid-line (forward-delete semantics vary)
+                    self.delete_at_cursor();
+                    Feed::Keep
                 }
             }
             0x1b => {
@@ -286,7 +322,7 @@ impl Editor {
                 Feed::Keep
             }
             0x7f | 0x08 => {
-                self.erase_last();
+                self.erase_before_cursor();
                 Feed::Keep
             }
             0x00..=0x1f => Feed::Keep, // other control bytes: ignore
@@ -316,7 +352,7 @@ impl Editor {
                 self.paste_cr = false;
             }
             b'\t' => self.push_char('\t'),
-            0x7f | 0x08 => self.erase_last(),
+            0x7f | 0x08 => self.erase_before_cursor(),
             0x00..=0x1f => {} // other control bytes inside a paste: drop
             _ => {
                 self.push_byte(b);
@@ -346,41 +382,127 @@ impl Editor {
     }
 
     fn push_char(&mut self, c: char) {
-        self.line.push(c);
-        print!("{c}");
-        let _ = std::io::stdout().flush();
+        // Insert at the caret (0909_2 反馈: arrow keys move it).
+        let idx = self.byte_index_of_cursor();
+        self.line.insert(idx, c);
+        self.cursor += 1;
     }
 
-    /// Remove the last char (the whole UTF-8 sequence) and wipe its
-    /// full display width on screen — the fix for "need two backspaces
-    /// per Chinese char". Erasing a newline joins the lines on screen
-    /// too (cursor up + reposition), so backspacing through pasted
-    /// multi-line input stays coherent.
-    fn erase_last(&mut self) {
-        let Some(c) = self.line.chars().next_back() else { return };
-        self.line.pop();
-        if c == '\n' {
-            self.erase_newline();
+    /// Byte offset of the caret (char index → String boundary).
+    fn byte_index_of_cursor(&self) -> usize {
+        self.line
+            .char_indices()
+            .nth(self.cursor)
+            .map(|(i, _)| i)
+            .unwrap_or(self.line.len())
+    }
+
+    /// Remove the char BEFORE the caret (the whole UTF-8 sequence).
+    /// Screen repaint happens in `render`.
+    fn erase_before_cursor(&mut self) {
+        if self.cursor == 0 {
             return;
         }
-        let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(1).max(1);
-        let bs = "\u{8}".repeat(w);
-        print!("{bs}{}{bs}", " ".repeat(w));
+        let idx = self.byte_index_of_cursor();
+        let start = self.line[..idx]
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        self.line.replace_range(start..idx, "");
+        self.cursor -= 1;
+    }
+
+    /// Remove the char AT the caret (forward delete / Del key).
+    fn delete_at_cursor(&mut self) {
+        let idx = self.byte_index_of_cursor();
+        let end = self.line[idx..]
+            .chars()
+            .next()
+            .map(|c| idx + c.len_utf8())
+            .unwrap_or(idx);
+        self.line.replace_range(idx..end, "");
+    }
+
+    fn cursor_left(&mut self) {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+        }
+    }
+
+
+    fn cursor_right(&mut self) {
+        if self.cursor < self.line.chars().count() {
+            self.cursor += 1;
+        }
+    }
+
+    /// Whole-line repaint (once per read chunk): climb back to the
+    /// input's first row, wipe everything below, reprint prompt +
+    /// display, land the caret (0909_2 反馈: this is what makes a
+    /// mid-line caret possible at all — and api_key masking free).
+    /// Cell model = standard deferred wrap: after n printed cells the
+    /// cursor rests ON cell n-1 of the row when n%tw==0, else at col
+    /// n%tw.
+    fn render(&mut self) {
+        let (crow, ccol) = self.visual_pos(self.cursor);
+        let (trow, _) = self.visual_pos(self.line.chars().count());
+        let mut out = String::from("\r");
+        if self.vis_row > 0 {
+            out.push_str(&format!("\x1b[{}A", self.vis_row));
+        }
+        out.push_str("\x1b[J"); // wipe the input area (incl. stale rows)
+        out.push_str(&self.prompt);
+        out.push_str(&self.display());
+        if trow > crow {
+            out.push_str(&format!("\x1b[{}A", trow - crow));
+        }
+        out.push('\r');
+        if ccol > 0 {
+            out.push_str(&format!("\x1b[{}C", ccol));
+        }
+        self.vis_row = crow;
+        print!("{out}");
         let _ = std::io::stdout().flush();
     }
 
-    /// The cursor always sits at the end of the buffer, so the removed
-    /// '\n' was followed by an empty last line: move up one row and to
-    /// the end of the (now last) line. The prompt width is part of the
-    /// first row's content, so the absolute column includes it; wrapped
-    /// long lines are handled by column math (col = width % term_width).
-    fn erase_newline(&mut self) {
-        let last = self.line.lines().last().unwrap_or("");
-        let w = unicode_width::UnicodeWidthStr::width(last) + self.prompt_cols;
+    /// (row, col) of the caret after printing the display text up to
+    /// char `up_to` (prompt occupies the head of row 0).
+    fn visual_pos(&self, up_to: usize) -> (usize, usize) {
         let tw = crate::cli::render::term_width().max(1);
-        let col = w % tw;
-        print!("\x1b[1A\r\x1b[{col}C\x1b[0K");
-        let _ = std::io::stdout().flush();
+        let shown = self.display();
+        let mut row = 0usize;
+        let mut cells = self.prompt_cols;
+        for (i, c) in shown.chars().enumerate() {
+            if i == up_to {
+                break;
+            }
+            if c == '\n' {
+                row += 1;
+                cells = 0;
+            } else {
+                cells += unicode_width::UnicodeWidthChar::width(c).unwrap_or(1).max(1);
+            }
+        }
+        if cells == 0 {
+            return (row, 0);
+        }
+        let r = cells / tw;
+        let c = cells % tw;
+        if c == 0 {
+            (row + r - 1, tw - 1)
+        } else {
+            (row + r, c)
+        }
+    }
+
+    /// The on-screen text: with `mask` on every non-newline char is a
+    /// '*' (api_key input, 0909_2 反馈).
+    fn display(&self) -> String {
+        if !self.mask {
+            return self.line.clone();
+        }
+        self.line.chars().map(|c| if c == '\n' { '\n' } else { '*' }).collect()
     }
 
     /// Is the accumulated escape sequence (bytes after ESC) complete?
@@ -409,6 +531,14 @@ impl Editor {
         match seq {
             b"[200~" => self.paste = true,
             b"[201~" => self.paste = false,
+            // Arrow keys (0909_2 反馈: the caret was append-only before):
+            // Left/Right move it; Home/End jump; Del = forward delete.
+            // Up/Down stay swallowed (no line history in this editor).
+            b"[C" | b"OC" => self.cursor_right(),
+            b"[D" | b"OD" => self.cursor_left(),
+            b"[H" | b"OH" | b"[1~" => self.cursor = 0,
+            b"[F" | b"OF" | b"[4~" => self.cursor = self.line.chars().count(),
+            b"[3~" => self.delete_at_cursor(),
             // Meta-Enter (ESC then CR): soft newline. This encoding is
             // sent natively by every terminal (macOS Terminal.app needs
             // "Use Option as Meta Key"), so it is THE documented way to
@@ -430,15 +560,12 @@ impl Editor {
     fn warn_encoding(&mut self) {
         if !self.warned_encoding {
             self.warned_encoding = true;
-            println!();
-            println!("  提示：检测到无法解码的输入字节——你的终端编码可能不是 UTF-8。");
-            println!("  该字符已按占位符保留；建议将终端编码切到 UTF-8（export LANG=C.UTF-8）。");
-            let prefix = "  当前输入回显> ";
-            print!("{prefix}{}", self.line);
-            // The buffer is now visually re-prefixed: keep absolute
-            // repositioning (line joins) consistent with the new row.
-            self.prompt_cols = unicode_width::UnicodeWidthStr::width(prefix);
-            let _ = std::io::stdout().flush();
+            // Hint only — the whole-line repaint (render, next chunk)
+            // repaints the input; the hint itself lives below it and
+            // disappears with the next keystroke (acceptable: rare
+            // path, repeated on the next bad byte is one-time anyway).
+            println!("\n  提示：检测到无法解码的输入字节——终端编码可能不是 UTF-8；");
+            println!("  该字符已按占位符保留（建议 export LANG=C.UTF-8）。");
         }
     }
 }
@@ -562,7 +689,7 @@ mod tests {
         ed.feed(0xbd);
         ed.feed(0xa0); // 你
         assert_eq!(ed.line, "你");
-        ed.erase_last();
+        ed.feed(0x7f);
         assert_eq!(ed.line, "");
     }
 
@@ -573,9 +700,9 @@ mod tests {
             ed.feed(b);
         }
         assert_eq!(ed.line, "a你b");
-        ed.erase_last(); // b
+        ed.feed(0x7f); // b
         assert_eq!(ed.line, "a你");
-        ed.erase_last(); // 你
+        ed.feed(0x7f); // 你
         assert_eq!(ed.line, "a");
     }
 
@@ -690,6 +817,90 @@ mod tests {
         }
     }
 
+    /// 0909_2 反馈: arrow keys move the caret; insertion lands at it.
+    #[test]
+    fn arrows_move_caret_and_insert_mid_line() {
+        let mut ed = Editor::default();
+        for b in "abc".bytes() {
+            ed.feed(b);
+        }
+        ed.feed(0x1b);
+        for &b in b"[D" {
+            ed.feed(b);
+        }
+        ed.feed(0x1b);
+        for &b in b"[D" {
+            ed.feed(b);
+        }
+        assert_eq!(ed.cursor, 1);
+        ed.feed(b'X');
+        assert_eq!(ed.line, "aXbc");
+        assert_eq!(ed.cursor, 2);
+    }
+
+    #[test]
+    fn backspace_mid_line_deletes_before_caret() {
+        let mut ed = Editor::default();
+        for b in "abc".bytes() {
+            ed.feed(b);
+        }
+        ed.feed(0x1b);
+        for &b in b"[D" {
+            ed.feed(b);
+        }
+        ed.feed(0x7f); // deletes 'b' before the caret
+        assert_eq!(ed.line, "ac");
+        assert_eq!(ed.cursor, 1);
+    }
+
+    #[test]
+    fn ctrl_d_forward_deletes_at_caret() {
+        let mut ed = Editor::default();
+        for b in "abc".bytes() {
+            ed.feed(b);
+        }
+        ed.feed(0x1b);
+        for &b in b"[D" {
+            ed.feed(b);
+        }
+        ed.feed(0x1b);
+        for &b in b"[D" {
+            ed.feed(b);
+        }
+        ed.feed(0x04); // forward delete 'b' (caret at 1 after two Lefts)
+        assert_eq!(ed.line, "ac");
+    }
+
+    #[test]
+    fn home_end_jump() {
+        let mut ed = Editor::default();
+        for b in "abc".bytes() {
+            ed.feed(b);
+        }
+        ed.feed(0x1b);
+        for &b in b"[H" {
+            ed.feed(b);
+        }
+        assert_eq!(ed.cursor, 0);
+        ed.feed(0x1b);
+        for &b in b"[F" {
+            ed.feed(b);
+        }
+        assert_eq!(ed.cursor, 3);
+    }
+
+    /// 0909_2 反馈: api_key input masks every non-newline char.
+    #[test]
+    fn masked_display_hides_content() {
+        let mut ed = Editor { mask: true, ..Default::default() };
+        for b in "sk-秘密123".bytes() {
+            ed.feed(b);
+        }
+        assert_eq!(ed.display(), "********");
+        assert_eq!(ed.line, "sk-秘密123");
+        let _ = ed; // mask covers CJK too (one '*' per char)
+    }
+
     #[test]
     fn soft_newline_then_backspace_joins_lines() {
         let mut ed = Editor::default();
@@ -697,8 +908,8 @@ mod tests {
         ed.feed(b'\n'); // Ctrl-J soft newline
         ed.feed(b'b');
         assert_eq!(ed.line, "a\nb");
-        ed.erase_last(); // b
-        ed.erase_last(); // the newline itself
+        ed.feed(0x7f); // b
+        ed.feed(0x7f); // the newline itself
         assert_eq!(ed.line, "a");
     }
 
@@ -712,10 +923,10 @@ mod tests {
         for b in "ab\ncd".bytes() {
             ed.feed(b);
         }
-        ed.erase_last(); // d
-        ed.erase_last(); // c
+        ed.feed(0x7f); // d
+        ed.feed(0x7f); // c
         assert_eq!(ed.line, "ab\n");
-        ed.erase_last(); // the newline itself
+        ed.feed(0x7f); // the newline itself
         assert_eq!(ed.line, "ab");
     }
 
