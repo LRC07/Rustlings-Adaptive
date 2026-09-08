@@ -402,16 +402,15 @@ fn print_row(board: &Board, i: usize, n: usize) {
         }
         None => "未跟踪".to_string(),
     };
-    println!("    {:>2}. [{}] {:<26} {}", n, mark, truncate(&it.ex.title, 26), meta_txt);
-}
-
-fn truncate(s: &str, w: usize) -> String {
-    if s.chars().count() <= w {
-        s.to_string()
-    } else {
-        let head: String = s.chars().take(w - 1).collect();
-        format!("{head}…")
-    }
+    // M9a4: 题名列按显示宽度截断+补齐（原 truncate/{: <26} 按字符数，
+    // 中文题名既超宽又让 meta 列参差）。
+    println!(
+        "    {:>2}. [{}] {} {}",
+        n,
+        mark,
+        render::pad_display(&render::truncate_display(&it.ex.title, 26), 26),
+        meta_txt
+    );
 }
 
 fn difficulty_cn(s: &str) -> &'static str {

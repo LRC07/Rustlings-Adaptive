@@ -1191,7 +1191,11 @@ fn print_usage(cfg: &ModelConfig, tracker: &Arc<Mutex<UsageTracker>>) {
         ),
         ("预算".to_string(), budget_cell),
     ];
-    let mut phases: Vec<String> = t
+    // M9a4: build (label, rest) pairs first so the label column can be
+    // padded by DISPLAY width — `{label:<8}` padded by char count and
+    // every CJK label (对话/出题·模板/存疑探针…) started its numbers at
+    // a different column.
+    let mut phase_rows: Vec<(String, String)> = t
         .session_by_phase()
         .into_iter()
         .map(|(phase, pt)| {
@@ -1206,19 +1210,27 @@ fn print_usage(cfg: &ModelConfig, tracker: &Arc<Mutex<UsageTracker>>) {
                 "probe" => "存疑探针",
                 other => other,
             };
-            format!(
-                "{label:<8} {} 次 ｜ 输入 {} tok ｜ 输出 {} tok{} ｜ ${:.6}",
-                pt.calls,
-                pt.input_tokens,
-                pt.output_tokens,
-                reasoning_note(pt.reasoning_tokens),
-                pt.cost_usd
+            (
+                label.to_string(),
+                format!(
+                    "{} 次 ｜ 输入 {} tok ｜ 输出 {} tok{} ｜ ${:.6}",
+                    pt.calls,
+                    pt.input_tokens,
+                    pt.output_tokens,
+                    reasoning_note(pt.reasoning_tokens),
+                    pt.cost_usd
+                ),
             )
         })
         .collect();
-    if phases.is_empty() {
-        phases.push("（本次会话还没有模型调用）".to_string());
+    if phase_rows.is_empty() {
+        phase_rows.push(("（本次会话还没有模型调用）".to_string(), String::new()));
     }
+    let label_w = phase_rows.iter().map(|(l, _)| l.width()).max().unwrap_or(0);
+    let phases: Vec<String> = phase_rows
+        .into_iter()
+        .map(|(l, r)| format!("{}{}", render::pad_display(&l, label_w), r))
+        .collect();
     let sections = vec![render::PanelSection {
         title: "按用途（本次会话）".to_string(),
         lines: phases,
