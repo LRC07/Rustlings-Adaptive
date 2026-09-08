@@ -513,13 +513,39 @@ fn run_tool(
             if outcome.practice.is_some() {
                 *practice = outcome.practice;
             }
-            ellipsize(&outcome.value.to_string(), TOOL_RESULT_CHARS)
+            // M9a6: the result JSON must survive the trim. With the
+            // default BTreeMap the keys serialized ALPHABETICALLY, so a
+            // bulk field (`code` in check_exercise) crowded out every
+            // summary field (picked/compiles/tests/…) — the model saw a
+            // code dump and nothing else. `preserve_order` now keeps
+            // construction order (summaries first, bulk last — see the
+            // tool builders), and bulk-heavy tools get a per-tool budget.
+            ellipsize(&outcome.value.to_string(), tool_result_budget(name))
         }
         Err(e) => {
             let msg = format!("工具执行失败：{e:#}");
             tool_notes.push(msg.clone());
             serde_json::json!({ "ok": false, "error": ellipsize(&msg, TOOL_RESULT_CHARS) }).to_string()
         }
+    }
+}
+
+/// Per-tool trim budget for tool results entering the model context
+/// (M9a6): the 1500 default bounds ordinary traffic, but three tools
+/// legitimately carry more — their data is only useful whole. The
+/// window() re-trim of AGED results still uses the plain 1500, so a
+/// bulky result decays between turns instead of never arriving at all.
+fn tool_result_budget(name: &str) -> usize {
+    match name {
+        // The authoritative concept catalog: a truncated list invites
+        // exactly the id hallucination the prompt forbids.
+        tools::TOOL_LIST_CONCEPTS => 10_000,
+        // 8 diagnostics × 300 chars internally capped — the internal
+        // cap was already larger than the old outer trim.
+        tools::TOOL_CHECK_CODE => 3_000,
+        // code (capped to 1800 inside the tool) + summary fields.
+        tools::TOOL_CHECK_EXERCISE => 3_200,
+        _ => TOOL_RESULT_CHARS,
     }
 }
 
@@ -695,6 +721,33 @@ mod tests {
             SYSTEM_PROMPT.contains("traits.dyn-dispatch"),
             "hallucinated-concept-id warning missing"
         );
+    }
+
+    /// M9a6: bulk tools carry bigger budgets; the default bounds
+    /// ordinary traffic.
+    #[test]
+    fn tool_result_budgets_cover_bulk_tools() {
+        assert_eq!(tool_result_budget(tools::TOOL_LIST_CONCEPTS), 10_000);
+        assert_eq!(tool_result_budget(tools::TOOL_CHECK_CODE), 3_000);
+        assert_eq!(tool_result_budget(tools::TOOL_CHECK_EXERCISE), 3_200);
+        assert_eq!(tool_result_budget(tools::TOOL_BORROWLAB), TOOL_RESULT_CHARS);
+    }
+
+    /// M9a6: with `preserve_order` the construction order is the wire
+    /// order — summary fields first, bulk last, so a trim can only ever
+    /// eat the tail. The old alphabetical serialization put `code`
+    /// first and the model never saw `picked` at all.
+    #[test]
+    fn json_field_order_follows_construction() {
+        let v = serde_json::json!({
+            "ok": true,
+            "picked": {"path": "generated/x.rs"},
+            "compiles": false,
+            "code": "fn x() {}",
+        });
+        let s = v.to_string();
+        let (a, b) = (s.find("\"picked\"").unwrap(), s.find("\"code\"").unwrap());
+        assert!(a < b, "summary fields must precede bulk: {s}");
     }
 
     #[test]

@@ -28,7 +28,7 @@ pub(crate) fn cmd_generate(
     ctx: &practice::PracticeCtx,
     session: Option<(&str, &[String])>,
     arg: Option<&str>,
-) -> Option<PathBuf> {
+) -> Option<(PathBuf, Option<String>)> {
     // M9l routing: `cfg` arrives as the GENERATE snapshot (the REPL
     // materializes it), so prices/thinking/timeout here are the routed
     // profile's own. The client is built from it below.
@@ -254,13 +254,13 @@ pub(crate) fn cmd_generate(
             match read_line_or_leave("  现在开始做这道题？[Y/n] ") {
                 None => {
                     println!("  （题目已进练习库：/practice 随时可继续）");
-                    return Some(out.path);
+                    return Some((out.path, None));
                 }
                 Some(go) => {
                     let go = go.to_ascii_lowercase();
                     if go == "n" || go == "no" {
                         println!("  （题目已进练习库：/practice 随时可继续）");
-                        return Some(out.path);
+                        return Some((out.path, None));
                     }
                 }
             }
@@ -275,7 +275,10 @@ pub(crate) fn cmd_generate(
                 tracker: tracker.clone(),
                 editor: cfg.editor.as_deref(),
             };
-            practice::enter_at(
+            // M9a6: the handback ([a] 问教练 / 复盘尾 [g] 推荐下一题)
+            // used to be silently DROPPED on this path — repl.rs wires it
+            // to agent_turn exactly like Cmd::Practice does.
+            let handback = practice::enter_at(
                 ctx,
                 &out.path,
                 practice::EnterOpts {
@@ -284,7 +287,7 @@ pub(crate) fn cmd_generate(
                 },
                 Some(&deps),
             );
-            Some(out.path)
+            Some((out.path, handback))
         }
         Err(e) => {
             println!();

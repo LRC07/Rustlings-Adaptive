@@ -197,6 +197,21 @@ impl Topic {
         }
     }
 
+    /// The RAW query for keyword matching (M9a6): `prompt_text` prefixes
+    /// ("概念："/"错误码：") poisoned tier-2's skeleton lookup — the
+    /// full-width colon is not a token separator, so the whole
+    /// "错误码：E0382" became one token, matched nothing, then the CJK
+    /// bigram fallback ("错误/误码") dragged the skeleton into the
+    /// ERRORS domain for an OWNERSHIP code. Keyword consumers take the
+    /// raw form; the prefixed form stays for LLM prompts (it reads
+    /// better to a model).
+    fn search_text(&self) -> &str {
+        match self {
+            Topic::Concept(c) | Topic::ErrorCode(c) => c,
+            Topic::FreeText(t) => t,
+        }
+    }
+
     /// Heuristic topic parsing shared by the CLI and the agent tool:
     /// `E0382`-style inputs become an error-code request, dotted ids
     /// like `traits.associated-types` become a concept request,
@@ -1048,7 +1063,10 @@ fn nearest_template<'a>(
     graph: &ConceptGraph,
     topic: &Topic,
 ) -> Result<&'a template::Template> {
-    let pool = keyword_candidates(templates, graph, &topic.prompt_text());
+    // M9a6: search_text (raw) — see its doc. prompt_text's full-width
+    // colon prefix made "错误码：E0382" unsplittable and the bigram
+    // fallback hijacked the skeleton into the errors domain.
+    let pool = keyword_candidates(templates, graph, topic.search_text());
     let mut best: Option<(&template::Template, u32)> = None;
     for t in templates.iter().filter(|t| pool.ids.contains(&t.id)) {
         let s = pool.scores.get(&t.id).copied().unwrap_or(0);
@@ -1673,7 +1691,7 @@ fn keyword_candidates(
     text: &str,
 ) -> KeywordPool {
     let tokens: Vec<String> = text
-        .split(|c: char| c.is_whitespace() || "，。、？！,.:?？()（）".contains(c))
+        .split(|c: char| c.is_whitespace() || "，。、：；？！,.:;?!()（）".contains(c))
         .map(str::trim)
         .filter(|w| w.chars().count() >= 2)
         .map(|w| w.to_lowercase())
@@ -2980,6 +2998,40 @@ fn add(a: i32, b: i32) -> i32 {
     /// whitespace-stripped hay/needle matching ("Trait对象" vs the
     /// concept name "trait 对象与 impl Trait") and — only when NO whole
     /// token matched — CJK bigram expansion ("对象" anchors).
+    /// M9a6（骨架误路由）: an error-code topic whose tier-1 pool is
+    /// exhausted must adapt from a template in the CODE's domain —
+    /// the prompt_text prefix ("错误码：") used to become one
+    /// unsplittable token whose bigram fallback ("错误/误码") dragged
+    /// the skeleton into the errors domain (E0382 → error-custom-type).
+    #[test]
+    fn tier2_skeleton_for_error_code_topics_stays_in_domain() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut graph =
+            crate::taxonomy::ConceptGraph::load(&root.join("taxonomy/concepts.toml")).unwrap();
+        let templates = template::load_dir(&root.join("templates")).unwrap();
+        let items: Vec<(&str, &[String])> =
+            templates.iter().map(|t| (t.id.as_str(), t.concepts.as_slice())).collect();
+        graph.link_templates(items).unwrap();
+
+        let t = nearest_template(&templates, &graph, &Topic::ErrorCode("E0382".into())).unwrap();
+        assert!(
+            t.concepts.iter().all(|c| c.starts_with("ownership")),
+            "E0382 skeleton must stay in the ownership domain, got {} ({:?})",
+            t.id,
+            t.concepts
+        );
+        assert!(t.error_codes.iter().any(|c| c == "E0382"), "skeleton must declare the code");
+
+        // The RAW code alone (what nearest_template feeds after M9a6)
+        // routes through the template error-code fallback.
+        let pool = keyword_candidates(&templates, &graph, "E0382");
+        assert!(
+            pool.ids.iter().any(|id| id == "own-move-basics"),
+            "E0382 pool must contain ownership templates: {:?}",
+            pool.ids
+        );
+    }
+
     #[test]
     fn trait_object_requests_anchor_the_pool_without_spaces() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));

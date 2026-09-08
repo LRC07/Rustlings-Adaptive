@@ -9,7 +9,7 @@ chrono = { version = "0.4.45", features = ["serde", "clock"] }
 dotenvy = "0.15.7"
 reqwest = { version = "0.13.4", features = ["blocking", "json"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
 ctrlc = "3.4.7"
 thiserror = "2.0.20"
 toml = "1.1.5"

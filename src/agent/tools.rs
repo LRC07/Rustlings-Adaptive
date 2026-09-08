@@ -321,6 +321,10 @@ struct CallerBridge {
     output_price: f64,
     tracker: std::sync::Arc<std::sync::Mutex<usage::UsageTracker>>,
     budget: Option<f64>,
+    /// Routed model name + ledger phase of this path (M9a6): per-CALL
+    /// tracker recording needs them here — see call_bounded.
+    model: String,
+    phase: &'static str,
     acc: UsageAcc,
 }
 
@@ -341,6 +345,23 @@ impl generator::LlmCaller for CallerBridge {
             self.input_price,
             self.output_price,
         );
+        // M9a6: record into the tracker IMMEDIATELY per call. The old
+        // accumulate-then-flush-at-tool-end made every round's budget
+        // gate read the same stale total — one generate_exercise call
+        // could chain up to ~8 LLM calls past the cap — and the
+        // spinner's "累计 $x" lagged the actual spend too. `acc` stays
+        // for the per-turn footer only.
+        {
+            let mut t = self.tracker.lock().unwrap_or_else(|p| p.into_inner());
+            t.record(
+                &self.model,
+                out.usage.prompt_tokens,
+                out.usage.completion_tokens,
+                out.usage.reasoning_tokens,
+                cost,
+                self.phase,
+            );
+        }
         self.acc.add(out.usage.prompt_tokens, out.usage.completion_tokens, out.usage.reasoning_tokens, cost);
         Ok(LlmReply {
             content: out.content.unwrap_or_default(),
@@ -385,24 +406,6 @@ impl DualBridge {
             cost_usd: t.cost_usd + f.cost_usd,
         }
     }
-}
-
-/// Write the tool's internal generation usage into the tracker — split
-/// by path (0909_2 职能分开): template-path calls bill under
-/// "generate", free-form calls under "generate_free", each with its own
-/// routed model and prices. Previously a single phase hid the split.
-fn record_generate_usage(env: &AgentEnv, d: &DualBridge) {
-    let record = |acc: &UsageAcc, model: &str, phase: &str| {
-        if acc.calls == 0 {
-            return;
-        }
-        env.tracker
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .record(model, acc.input_tokens, acc.output_tokens, acc.reasoning_tokens, acc.cost_usd, phase);
-    };
-    record(&d.template.acc, &env.gen_cfg.model, "generate");
-    record(&d.free.acc, &env.gen_free_cfg.model, "generate_free");
 }
 
 fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> Result<ToolOutcome> {
@@ -469,6 +472,8 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
             output_price: env.gen_cfg.prices.output,
             tracker: env.tracker.clone(),
             budget: env.gen_cfg.budget_usd(),
+            model: env.gen_cfg.model.clone(),
+            phase: "generate",
             acc: UsageAcc::default(),
         },
         free: CallerBridge {
@@ -477,6 +482,8 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
             output_price: env.gen_free_cfg.prices.output,
             tracker: env.tracker.clone(),
             budget: env.gen_free_cfg.budget_usd(),
+            model: env.gen_free_cfg.model.clone(),
+            phase: "generate_free",
             acc: UsageAcc::default(),
         },
         used_free: false,
@@ -527,7 +534,6 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
                 let full = format!("{e:#}");
                 let reason = full.chars().take(800).collect::<String>();
                 *env.free_fail_note.lock().unwrap_or_else(|p| p.into_inner()) = Some(reason.clone());
-                record_generate_usage(env, &bridge);
                 let head = if free_preset.is_empty() {
                     "自由生成被质量门拒绝，已暂停等待用户选择（再试一轮/退回模板/放弃）"
                 } else {
@@ -567,7 +573,6 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
             // split on either header.
             let reason_note = split_diag_block(&full).to_string();
             let reason = ellipsize(&full, 400);
-            record_generate_usage(env, &bridge);
             return Ok(ToolOutcome {
                 value: json!({
                     "ok": false,
@@ -638,7 +643,6 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
              请在回复里向用户说明这一点。"
         );
     }
-    record_generate_usage(env, &bridge);
     let head = if free_preset.is_empty() { "生成成功" } else { "自由生成重试成功" };
     Ok(ToolOutcome {
         note: Some(format!(
@@ -736,18 +740,22 @@ fn check_exercise(args: &Value, env: &AgentEnv) -> Result<ToolOutcome> {
     // 才算交卷" (0909_2 反馈); the marker is harness-managed (practice.rs)
     // and carries zero check signal, same reasoning as the review side.
     let code = crate::review::strip_marker(&code);
+    // M9a6: the code rides LAST in the JSON and capped — it is the
+    // bulk field, and with alphabetical serialization it used to crowd
+    // out picked/compiles/tests entirely.
+    let code = ellipsize(&code, 1800);
     Ok(ToolOutcome {
         value: json!({
             "ok": true,
             "picked": {"path": meta.path, "title": meta.title, "status": meta.status_line_cn()},
-            "others": others,
-            "code": code,
             "compiles": run.compiled,
-            "diagnostics": diagnostics,
             "tests": tests,
-            "note": "code 是练习当前内容（进度标记行已省略）；diagnostics/tests 是本地 rustc 真实结果。\
+            "diagnostics": diagnostics,
+            "others": others,
+            "note": "code 是练习当前内容（进度标记行已省略，超长时截断）；diagnostics/tests 是本地 rustc 真实结果。\
                      完成状态以 picked.status 为准（练习索引权威），与文件内容无关。基于诊断解读，不要复述文件。\
                      picked 不是用户想查的题时，让用户从 others 里指定。全绿时引导用户去 /practice 交题。",
+            "code": code,
         }),
         note: Some(format!("已读取并本地检查《{}》", meta.title)),
         practice: None,
@@ -879,11 +887,14 @@ fn check_code(args: &Value, progress: &dyn Fn(&str)) -> Result<ToolOutcome> {
         .filter_map(|d| d.get("code").and_then(|c| c.as_str()).map(str::to_string))
         .collect();
 
+    // M9a6: summary fields FIRST, bulk last — with preserve_order the
+    // construction order is the wire order, so an outer trim can only
+    // ever eat the tail (diagnostics), never the verdict fields.
     let value = json!({
         "compiles": out.status.success(),
         "diagnostic_count": all.len(),
-        "diagnostics": diagnostics,
         "error_codes": codes,
+        "diagnostics": diagnostics,
         "note": "以上是本地 rustc 的真实诊断；基于它们解释，不要臆测。若片段缺 fn main 也无 #[test]，E0601 是预期现象，可提示用户补 main 或加 #[test]。",
     });
     Ok(ToolOutcome {
@@ -983,6 +994,52 @@ mod tests {
         fn chat_turn(&self, _m: &[ChatMessage], _t: &[Tool]) -> Result<TurnOutput> {
             Err(anyhow!("no network in tests"))
         }
+    }
+
+    /// Caller that answers with garbage but SUCCEEDS on the wire — the
+    /// draft loop runs (and bills) then fails parsing.
+    struct GarbageOkCaller;
+    impl super::super::ChatTurnCaller for GarbageOkCaller {
+        fn chat_turn(&self, _m: &[ChatMessage], _t: &[Tool]) -> Result<TurnOutput> {
+            Ok(TurnOutput {
+                content: Some("not json".into()),
+                tool_calls: vec![],
+                usage: crate::llm::Usage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    reasoning_tokens: 0,
+                },
+                finish_reason: Some("stop".into()),
+                interrupted: false,
+                usage_estimated: false,
+            })
+        }
+    }
+
+    /// M9a6: the CallerBridge records each call into the tracker
+    /// IMMEDIATELY (call_bounded), not at tool end — the old
+    /// flush-at-the-end made the budget gate blind to in-flight spend.
+    /// Here the tool FAILS (draft rejected) yet the tracker must show
+    /// the call: only the per-call path can have written it.
+    #[test]
+    fn bridge_records_usage_per_call_even_when_tool_fails() {
+        let root = fixture_root("per_call_usage");
+        let tracker = usage::UsageTracker::from_path(
+            std::env::temp_dir().join(format!("rs_pc_usage_{}.json", std::process::id())),
+        );
+        let mut env = test_env(&root);
+        env.gen_free_caller = Arc::new(GarbageOkCaller);
+        *env.tracker.lock().unwrap() = tracker;
+        let _ = execute(
+            TOOL_GENERATE_EXERCISE,
+            r#"{"topic": "t.c", "mode": "free"}"#,
+            &env,
+            &|_| {},
+        )
+        .unwrap();
+        let calls = env.tracker.lock().unwrap().all_totals().calls;
+        assert!(calls >= 1, "per-call recording must land even on failure: {calls}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn test_env(root: &std::path::Path) -> AgentEnv {

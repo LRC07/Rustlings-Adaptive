@@ -196,18 +196,26 @@ pub(crate) fn run() {
             }
             Cmd::Generate(arg) => {
                 agent::reset_interrupt();
-                let gen_path = generate::cmd_generate(
+                let (gen_path, handback) = generate::cmd_generate(
                     &cfg.snapshot_for_phase(crate::config::Phase::Generate),
                     &cfg.snapshot_for_phase(crate::config::Phase::GenerateFree),
                     &tracker,
                     &practice_ctx,
                     Some((session.id.as_str(), session.exercises.as_slice())),
                     arg,
-                );
+                )
+                .map(|(p, h)| (Some(p), h))
+                .unwrap_or((None, None));
                 if let Some(p) = gen_path {
                     register_session_exercise(&mut session, &practice_ctx, &p);
                 }
                 repaint_chat(&session, &cfg, &tracker);
+                // M9a6: route the practice/debrief handback exactly like
+                // Cmd::Practice — it used to be dropped on this path.
+                if let Some(msg) = handback {
+                    println!("{} {}", super::render::bold("你>"), handback_label(&msg));
+                    agent_turn(&mut session, &msg, &cfg, &tracker, &client, &practice_ctx);
+                }
             }
             Cmd::Usage => print_usage(&cfg, &tracker),
             Cmd::Stats(arg) => print_stats(&practice_ctx, arg),
