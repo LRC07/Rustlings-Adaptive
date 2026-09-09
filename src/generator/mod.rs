@@ -1620,15 +1620,23 @@ fn choose_template<'a>(
                 if let Some(p) = llm_pick_template(templates, text, focus, history, call, pool_ref.as_ref().map(|p| &p.ids), pool_ref)? {
                     return Ok(p);
                 }
+                // M9a8: the LLM did not pick (no_match or format miss).
+                // The old deterministic fallback served the pool's
+                // top-scored template anyway — but the pool itself can
+                // be a LITERAL-WORD mismatch (「String」/「fn」 in a free
+                // question drag the pool into strings/closures while the
+                // real topic is ownership, 0909 实测): when the model
+                // rejects the pool, believe it and let the tiers below
+                // work from the REQUEST semantics (adaptation drafts
+                // against the request text, free generation writes it).
+                // The deterministic pick stays for the offline path only.
                 if focus.is_some() {
-                    // A focused free-text request the picker rejected:
-                    // serving the keyword fallback would ignore the
-                    // learner's specific technique.
                     bail!(
                         "没有训练「{}」的模板；转为改编/自由生成",
                         focus.unwrap_or_default()
                     );
                 }
+                bail!("关键词池未命中精确模板（池可能字面错配）；转为改编/自由生成");
             }
             pick_candidate(templates, &pool.ids, Some(&pool.scores), history).ok_or_else(|| {
                 if pool.ids.is_empty() {
@@ -2856,12 +2864,13 @@ fn add(a: i32, b: i32) -> i32 {
         let fx = Fixture::new();
         let paths = fx.paths();
         // Case 1: the invented id still keyword-hits the domain
-        // ("test") → tier 1 serves the matched template.
+        // ("test") → tier 1 serves the matched template (the picker,
+        // given a CORRECT pool, picks from it).
         let prompts = std::cell::RefCell::new(Vec::<String>::new());
         let mut call = |prompt: &str| -> Result<LlmReply> {
             prompts.borrow_mut().push(prompt.to_string());
             if prompt.contains("choosing a Rust practice") {
-                Ok(reply(r#"{"no_match": true}"#))
+                Ok(reply(r#"{"template_id": "mini-add"}"#))
             } else {
                 Ok(reply(VALID_DRAFT_JSON))
             }
@@ -2913,6 +2922,39 @@ fn add(a: i32, b: i32) -> i32 {
         )
         .unwrap();
         assert_eq!(out.tier, Tier::Free);
+    }
+
+    /// M9a8（字面错配实测）: a free question whose literal words drag the
+    /// keyword pool into the WRONG domain — when the picker says
+    /// no_match, the pipeline must NOT fall back to the pool's
+    /// top-scored template (that fixated the mismatch); it goes to the
+    /// adaptation tier and drafts against the REQUEST semantics.
+    #[test]
+    fn llm_no_match_in_wrong_pool_falls_through_to_adaptation() {
+        let fx = Fixture::new();
+        let paths = fx.paths();
+        // "加法" hits the mini template (correct pool, for setup); the
+        // picker says no_match → the deterministic fallback is skipped
+        // → tier 2 adapts the skeleton per the request text.
+        let mut call = |prompt: &str| -> Result<LlmReply> {
+            if prompt.contains("choosing a Rust practice") {
+                Ok(reply(r#"{"no_match": true}"#))
+            } else {
+                Ok(reply(VALID_DRAFT_JSON))
+            }
+        };
+        let out = generate_with_mode(
+            &Topic::FreeText("加法".into()),
+            None,
+            GenerateMode::Auto,
+            &paths,
+            &GenHistory::default(),
+            None,
+            Some(&mut call),
+            None,
+        )
+        .unwrap();
+        assert_eq!(out.tier, Tier::Adapted { base: "mini-add".into() }, "no_match → adaptation, not the pool's deterministic pick");
     }
 
     /// The degrade must NOT fire without an LLM (the precise

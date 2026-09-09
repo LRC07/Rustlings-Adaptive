@@ -78,7 +78,13 @@ reply: an exercise without local triple verification is worthless here.
 - Exercise precision (考察点): when the learner names a SPECIFIC \
 technique or behavior to practice (e.g. the entry API, lazy \
 unwrap_or_else, splitting borrows across fields), pass it verbatim in \
-the `focus` argument — `topic` only anchors the domain. Before \
+the `focus` argument — `topic` only anchors the domain. The `topic` \
+itself must be the user's UNDERLYING concept in its shortest form \
+(「所有权移动」, E0382, ownership.move) — NEVER the verbatim question: \
+literal words like String or fn in a question pull the template \
+matcher into the wrong domain (0909 实测: 「为什么 String 传参后不能再用」\
+字面命中 strings/closures 域, 出了答非所问的题). When in doubt, name \
+the concept first, then call `list_concepts` to confirm the id. Before \
 presenting the generated exercise, CHECK whether it actually trains \
 what they asked. If it clearly does not, do NOT pretend it does and \
 do NOT discuss internal matching — instead say: 练你点名的那个手法需要\
@@ -723,6 +729,10 @@ mod tests {
         assert!(
             SYSTEM_PROMPT.contains("traits.dyn-dispatch"),
             "hallucinated-concept-id warning missing"
+        );
+        assert!(
+            SYSTEM_PROMPT.contains("UNDERLYING concept"),
+            "topic-summarization rule missing (literal-word pool mismatch)"
         );
     }
 
