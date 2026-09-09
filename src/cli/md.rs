@@ -493,12 +493,17 @@ fn is_separator_row(line: &str) -> bool {
 }
 
 /// Split one row into cells: surrounding pipes stripped, cells
-/// trimmed. Escaped `\|` is not supported (models don't emit it here).
+/// trimmed. `\|` is the GFM cell escape — models emit it for Rust
+/// closures (`|s|`) inside table cells (0909 录屏实测: rows with
+/// `\|` split into extra columns and the whole table misaligned);
+/// protect it before splitting, restore after.
 fn split_row(line: &str) -> Vec<String> {
+    const CELL_ESC: &str = "\u{0}";
     let t = line.trim();
     let t = t.strip_prefix('|').unwrap_or(t);
     let t = t.strip_suffix('|').unwrap_or(t);
-    t.split('|').map(|c| c.trim().to_string()).collect()
+    let protected = t.replace("\\|", CELL_ESC);
+    protected.split('|').map(|c| c.trim().replace(CELL_ESC, "|")).collect()
 }
 
 /// One line of LLM prose with inline markers styled — the SAME inline
@@ -1036,6 +1041,26 @@ mod tests {
         assert!(plain.contains("参考解"), "{plain}");
         // Every physical line has the same display width (aligned).
         let ws: Vec<usize> = out.lines().map(visible_width).collect();
+        assert!(ws.iter().all(|w| *w == ws[0]), "unaligned: {out:?}");
+    }
+
+    /// 0909 录屏实测: models emit `\|` for Rust closures (`|s|`) in
+    /// table cells — the escaped pipe must stay INSIDE the cell, not
+    /// split the row into extra columns (misaligning the table).
+    #[test]
+    fn table_escaped_pipes_stay_inside_cells() {
+        let src = "| 方案 | key 存在时 | key 缺失时 |\n|---|---|---|\n\
+                   | (1) `map(as_str)` | 2 | 1 |\n\
+                   | (2) `unwrap_or_else(\\|s\\| …)` | 1 | 1 |";
+        let out = render(src, 80, true);
+        let plain = strip_codes(&out);
+        assert!(
+            plain.contains("unwrap_or_else(|s| …)"),
+            "escaped pipe renders as a literal pipe inside the cell: {plain}"
+        );
+        assert!(!plain.contains('\\'), "no stray backslashes: {plain}");
+        // Column count stays 3 for every row → aligned widths.
+        let ws: Vec<usize> = out.lines().filter(|l| l.contains('│')).map(visible_width).collect();
         assert!(ws.iter().all(|w| *w == ws[0]), "unaligned: {out:?}");
     }
 
