@@ -50,7 +50,7 @@ active = "Qwen3.8-Flash"
 chat = "Qwen3.8-Flash"      # 对话 / 工具环 / 假设实验室
 generate = "Qwen3.8-Flash"  # 出题·模板路径（选题/填槽/改编，小而快）
 generate_free = "GLM-5.3-Flash-High"  # 出题·自由生成（实测选型胜出；省略 = 沿用上一档）
-review = "Kimi-K3"          # 评审门 + 复盘
+review = "Kimi-K3"          # 解答评审 + 复盘
 
 # ---- 主力：对话 + 出题·模板路径（响应快、成本低，日常使用推荐）----
 [[models]]

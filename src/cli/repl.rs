@@ -540,7 +540,7 @@ fn model_routing(cfg: &mut ModelConfig, client: &mut Option<LlmClient>) {
         println!("  1. 对话 / 工具环 / 假设实验室：{}", label(&cfg.routing.chat));
         println!("  2. 出题·模板路径（选题/填槽/改编）：{}", label(&cfg.routing.generate));
         println!("  3. 出题·自由生成（缺省沿用第 2 项）：{}", fallback(&cfg.routing.generate_free));
-        println!("  4. 评审门 + 复盘            ：{}", label(&cfg.routing.review));
+        println!("  4. 解答评审 + 复盘          ：{}", label(&cfg.routing.review));
         println!();
         println!("  [1-4] 选择环节后指定档案（0 = 清除） ｜ [q/回车] 返回");
         let Some(line) = read_line_or_leave("路由> ") else { return };

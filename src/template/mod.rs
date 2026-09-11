@@ -929,7 +929,7 @@ misconceptions = ["以为 String 赋值会深拷贝"]
                         .unwrap();
                 assert!(
                     report.all_pass(),
-                    "模板 {} 第 {attempt} 次填槽未通过三重校验: {report:?}",
+                    "模板 {} 第 {attempt} 次填槽未通过本地校验: {report:?}",
                     t.id
                 );
                 first_error_matches(&t.error_codes, &report).unwrap_or_else(|e| {
@@ -941,7 +941,7 @@ misconceptions = ["以为 String 赋值会深拷贝"]
     }
 
     /// Reference solutions must be lint-clean (9.5 试用反馈：参考解自带
-    /// clippy lint 会被评审门如实报出，且教坏学习者)。机器可查 → 回归
+    /// clippy lint 会在解答评审里如实报出，且教坏学习者)。机器可查 → 回归
     /// 测试兜底；3 处既有违例已随本测试落地修复。
     #[test]
     fn repo_reference_solutions_are_clippy_clean() {

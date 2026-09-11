@@ -171,7 +171,7 @@ pub(crate) fn cmd_generate(
         };
 
     println!(
-        "  正在生成分层出题：模板直配 → 模板改编 → 自由生成（每题过三重校验）…"
+        "  正在生成分层出题：模板直配 → 模板改编 → 自由生成（每题先在本地校验）…"
     );
     let paths = generator::Paths::from_root(Path::new("."));
     // M4.10: past generations steer the pick (unused first, variants).

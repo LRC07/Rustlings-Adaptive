@@ -41,7 +41,7 @@ pub const TOOL_LIST_CONCEPTS: &str = "list_concepts";
 pub const TOOL_GENERATE_EXERCISE: &str = "generate_exercise";
 pub const TOOL_CHECK_CODE: &str = "check_code";
 pub const TOOL_LEARNER_PROFILE: &str = "learner_profile";
-pub const TOOL_BORROWLAB: &str = "borrowlab";
+pub const TOOL_HYPOTHESIS_LAB: &str = "hypothesis_lab";
 pub const TOOL_CHECK_EXERCISE: &str = "check_exercise";
 
 /// Schemas offered to the model (OpenAI function format).
@@ -54,7 +54,7 @@ pub fn tool_schemas() -> Vec<Tool> {
         },
         Tool {
             name: TOOL_GENERATE_EXERCISE.into(),
-            description: "生成一道 5-50 行（题面非空行计）的 Rust 填空练习（本地三重校验：能编译/参考解全绿/未完成模板必失败）\
+            description: "生成一道 5-50 行（题面非空行计）的 Rust 填空练习（本地校验：能编译 / 参考答案能通过全部测试 / 留空的题面编译不过）\
                           并写回练习目录，随后用户可立即开始做题"
                 .into(),
             parameters: json!({
@@ -80,7 +80,7 @@ pub fn tool_schemas() -> Vec<Tool> {
                         "type": "string",
                         "enum": ["auto", "free"],
                         "description": "auto（默认）=分层出题：模板直配→改编→自由生成逐级回退；\
-                                        free=跳过模板直接自由生成（每轮独立调用，被质量门拒绝即暂停并\
+                                        free=跳过模板直接自由生成（每轮独立调用，未通过本地校验即暂停并\
                                         询问用户是否继续——按用户指示重试或退回 auto）。\
                                         仅当用户明确要求『不用模板/自由生成』时才用 free"
                     }
@@ -121,7 +121,7 @@ pub fn tool_schemas() -> Vec<Tool> {
             }),
         },
         Tool {
-            name: TOOL_BORROWLAB.into(),
+            name: TOOL_HYPOTHESIS_LAB.into(),
             description: "假设实验室：把学习者代码的假设改写同时交给本地 rustc 编译，返回两个版本错误码的\
                           增减 diff（新出现的错误 / 消除的错误）。用于回答「如果我改成 X 会怎样」「为什么\
                           这里必须借用」这类假设性问题——让借用检查器亲自给出证据，不要凭记忆臆断。\
@@ -187,9 +187,9 @@ pub fn execute(name: &str, arguments: &str, env: &AgentEnv, progress: &dyn Fn(&s
         TOOL_GENERATE_EXERCISE => generate_exercise(&args, env, progress),
         TOOL_CHECK_CODE => check_code(&args, progress),
         TOOL_LEARNER_PROFILE => learner_profile(env),
-        TOOL_BORROWLAB => borrowlab(&args, progress),
+        TOOL_HYPOTHESIS_LAB => hypothesis_lab(&args, progress),
         TOOL_CHECK_EXERCISE => check_exercise(&args, env),
-        other => Err(anyhow!("未知工具「{other}」；可用工具：{TOOL_LIST_CONCEPTS} / {TOOL_GENERATE_EXERCISE} / {TOOL_CHECK_CODE} / {TOOL_LEARNER_PROFILE} / {TOOL_BORROWLAB} / {TOOL_CHECK_EXERCISE}")),
+        other => Err(anyhow!("未知工具「{other}」；可用工具：{TOOL_LIST_CONCEPTS} / {TOOL_GENERATE_EXERCISE} / {TOOL_CHECK_CODE} / {TOOL_LEARNER_PROFILE} / {TOOL_HYPOTHESIS_LAB} / {TOOL_CHECK_EXERCISE}")),
     }
 }
 
@@ -550,7 +550,7 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
                 let reason = full.chars().take(800).collect::<String>();
                 *env.free_fail_note.lock().unwrap_or_else(|p| p.into_inner()) = Some(reason.clone());
                 let head = if free_preset.is_empty() {
-                    "自由生成被质量门拒绝，已暂停等待用户选择（再试一轮/退回模板/放弃）"
+                    "自由生成未通过本地校验，已暂停等待用户选择（再试一轮/退回模板/放弃）"
                 } else {
                     "自由生成重试仍被拒，已再次暂停等待用户选择（再试一轮/退回模板/放弃）"
                 };
@@ -559,7 +559,7 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
                         "ok": false,
                         "checkpoint": "free_rejected",
                         "reason": reason,
-                        "fallback": "自由生成被质量门拒绝。**立即停止调用工具**：先把拒绝原因转述给用户，\
+                        "fallback": "自由生成未通过本地校验。**立即停止调用工具**：先把拒绝原因转述给用户，\
                                      然后让用户三选一——\
                                      A) 再试一轮自由生成（用户同意后再次调用本工具，topic/focus 不变、mode=free，\
                                      上一轮失败原因已记住并会作为修复反馈注入）；\
@@ -567,7 +567,7 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
                                      C) 放弃本次出题。\
                                      **在用户明确选择之前，绝不要自行再次调用本工具**——\
                                      那会烧掉用户的钱并让输出混乱；\
-                                     **也不要自行在回复里编写练习题**——未经本地三重校验的题目不可靠。",
+                                     **也不要自行在回复里编写练习题**——未经本地校验的题目不可靠。",
                     }),
                     note: Some(format!("{head}｜原因：{reason}")),
                     practice: None,
@@ -594,7 +594,7 @@ fn generate_exercise(args: &Value, env: &AgentEnv, progress: &dyn Fn(&str)) -> R
                     "error": reason,
                     "fallback": "出题管线暂时失败。请向用户转述失败原因摘要，并建议：稍后重试、\
                                  换一个主题，或 /model 切换更快的模型。**不要自行在回复里编写练习题**\
-                                 ——未经本地三重校验的题目不可靠，这不是合格的替代品。",
+                                 ——未经本地校验的题目不可靠，这不是合格的替代品。",
                 }),
                 note: Some(format!("出题失败：{reason_note}")),
                 practice: None,
@@ -769,7 +769,7 @@ fn check_exercise(args: &Value, env: &AgentEnv) -> Result<ToolOutcome> {
             "others": others,
             "note": "code 是练习当前内容（进度标记行已省略，超长时截断）；diagnostics/tests 是本地 rustc 真实结果。\
                      完成状态以 picked.status 为准（练习索引权威），与文件内容无关。基于诊断解读，不要复述文件。\
-                     picked 不是用户想查的题时，让用户从 others 里指定。全绿时引导用户去 /practice 交题。",
+                     picked 不是用户想查的题时，让用户从 others 里指定。编译与测试都通过时，引导用户去 /practice 交题。",
             "code": code,
         }),
         note: Some(format!("已读取并本地检查《{}》", meta.title)),
@@ -779,12 +779,12 @@ fn check_exercise(args: &Value, env: &AgentEnv) -> Result<ToolOutcome> {
 }
 
 // ---------------------------------------------------------------------------
-// borrowlab (M7)
+// hypothesis_lab (M7)
 // ---------------------------------------------------------------------------
 
 /// Run the hypothesis lab: compile the learner's code and the assumed
 /// rewrite side by side with the real rustc, diff the error codes.
-fn borrowlab(args: &Value, progress: &dyn Fn(&str)) -> Result<ToolOutcome> {
+fn hypothesis_lab(args: &Value, progress: &dyn Fn(&str)) -> Result<ToolOutcome> {
     let code = args
         .get("code")
         .and_then(|c| c.as_str())
@@ -798,9 +798,9 @@ fn borrowlab(args: &Value, progress: &dyn Fn(&str)) -> Result<ToolOutcome> {
     }
 
     progress("假设实验室：双向 rustc 取证…");
-    let report = crate::borrowlab::apply_and_check(code, hypothesis)?;
+    let report = crate::hypothesis_lab::apply_and_check(code, hypothesis)?;
 
-    let side_json = |s: &crate::borrowlab::LabSide| {
+    let side_json = |s: &crate::hypothesis_lab::LabSide| {
         json!({
             "compiles": s.compiles,
             "error_codes": s.codes,
@@ -1091,7 +1091,7 @@ mod tests {
                 TOOL_CHECK_CODE,
                 TOOL_LEARNER_PROFILE,
                 TOOL_CHECK_EXERCISE,
-                TOOL_BORROWLAB
+                TOOL_HYPOTHESIS_LAB
             ]
         );
         for s in &schemas {

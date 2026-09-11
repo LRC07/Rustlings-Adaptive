@@ -238,14 +238,14 @@ pub(crate) fn after_pass(
     used_hints: bool,
 ) -> DebriefExit {
     let Ok(content) = std::fs::read_to_string(&ex.path) else {
-        println!("  （无法读取练习文件，跳过评审门）");
+        println!("  （无法读取练习文件，跳过解答评审）");
         return DebriefExit::Stay;
     };
     let attempts_before = meta.attempts.saturating_sub(1);
     let mut input = build_input(repo_root, meta, &content, attempts_before);
 
     println!();
-    println!("{}", render::header("解答评审门"));
+    println!("{}", render::header("解答评审"));
 
     let caller = make_caller(deps);
     let quiz_caller = make_caller(deps);
@@ -253,7 +253,7 @@ pub(crate) fn after_pass(
     let input2 = input.clone();
     // 9.5 实测：the gate's LLM call can run for minutes on slow
     // endpoints — set the expectation up front.
-    println!("  （评审门与理解校核、四维对比并行调用模型，端点慢时可能需要 1–2 分钟）");
+    println!("  （解答评审与理解校核、对比并行调用模型，端点慢时可能需要 1–2 分钟）");
     // M9a4 校核∥评审并行 + M9a5 对比预取: quiz generation, the review
     // gate AND the four-dimension comparison are INDEPENDENT (all eat
     // only ReviewInput against the ORIGINAL code), so all three run

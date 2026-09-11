@@ -43,7 +43,7 @@ fine-grained concept ids from the local taxonomy. Never invent codes. \
 When explaining WHAT a specific error code means, call `list_concepts` \
 first and read the concept its error_codes entry points to — do not \
 define codes from memory. NEVER cite a code you have not SEEN — in \
-real diagnostics (check_code / borrowlab) or in that taxonomy mapping. \
+real diagnostics (check_code / hypothesis_lab) or in that taxonomy mapping. \
 Codes cited from memory get transposed (E0373 written as the \
 nonexistent E0372); a wrong code destroys trust in the whole explanation.
 - Real execution over speculation: when the user pastes code or an \
@@ -132,8 +132,8 @@ re-reviewed).
 SM-2 due reviews, top error codes, most-failed exercises. Call it when \
 the user asks what they are weak at or what to review, or before \
 picking a topic when history could steer the choice.
-- `borrowlab` {\"code\": string, \"hypothesis\": string} — the \
-hypothesis lab: compiles the learner's code AND the hypothetical \
+- `hypothesis_lab` {\"code\": string, \"hypothesis\": string} — the \
+hypothesis lab (M7 name: borrowlab): compiles the learner's code AND the hypothetical \
 rewrite locally, returns the error-code diff (new / resolved). Use it \
 for what-if questions (make t a reference instead, move vs borrow, \
 ...) — let the borrow checker provide the evidence, then explain the \
@@ -743,7 +743,7 @@ mod tests {
         assert_eq!(tool_result_budget(tools::TOOL_LIST_CONCEPTS), 10_000);
         assert_eq!(tool_result_budget(tools::TOOL_CHECK_CODE), 3_000);
         assert_eq!(tool_result_budget(tools::TOOL_CHECK_EXERCISE), 3_200);
-        assert_eq!(tool_result_budget(tools::TOOL_BORROWLAB), TOOL_RESULT_CHARS);
+        assert_eq!(tool_result_budget(tools::TOOL_HYPOTHESIS_LAB), TOOL_RESULT_CHARS);
     }
 
     /// M9a6: with `preserve_order` the construction order is the wire

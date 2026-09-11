@@ -241,7 +241,7 @@ pub struct ModelProfile {
 /// Which call site a model is picked for (M9l per-scenario routing).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
-    /// Coach conversation, tool loop, borrowlab interpretation.
+    /// Coach conversation, tool loop, hypothesis-lab interpretation.
     Chat,
     /// Exercise generation, template path (tier-1 pick + slot fill,
     /// tier-2 adaptation) — small structured calls.

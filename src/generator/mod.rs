@@ -823,7 +823,7 @@ fn log_generate_miss(paths: &Paths, topic: &Topic, focus: Option<&str>, err: &an
     }
     let kind = if text.contains("都已出过") {
         "template_exhausted"
-    } else if text.contains("均未通过校验") || text.contains("质量门") {
+    } else if text.contains("均未通过校验") || text.contains("未通过本地校验") {
         "template_gate_failed"
     } else {
         "template_no_match"
@@ -2354,7 +2354,7 @@ body = '''
 // TODO: 把占位换成 a + b。
 // 提示 1：完成后两个测试都应通过。
 // 提示 2：本题也用于生成器的离线冒烟测试。
-// 说明 1：无槽位，默认值即可通过三重校验。
+// 说明 1：无槽位，默认值即可通过本地校验。
 // 说明 2：练习文件会写入 generated 分类并自动接线。
 fn add(a: i32, b: i32) -> i32 {
     todo!()

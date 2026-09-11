@@ -3,7 +3,7 @@
 //! `usage`, `verifier`, `template`, `taxonomy`, and `generator` modules.
 
 mod agent;
-mod borrowlab;
+mod hypothesis_lab;
 mod cli;
 mod config;
 mod constraints;
