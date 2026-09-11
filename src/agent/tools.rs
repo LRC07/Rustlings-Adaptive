@@ -90,7 +90,7 @@ pub fn tool_schemas() -> Vec<Tool> {
         },
         Tool {
             name: TOOL_CHECK_CODE.into(),
-            description: "用本地 rustc 编译一段 Rust 代码并返回真实诊断（错误码/消息/行号）。\
+            description: "用本地 rustc 编译一段 Rust 代码并返回诊断（错误码/消息/行号）。\
                           解释用户贴的报错或代码前，先用它获得编译器证据"
                 .into(),
             parameters: json!({
@@ -111,7 +111,7 @@ pub fn tool_schemas() -> Vec<Tool> {
         },
         Tool {
             name: TOOL_CHECK_EXERCISE.into(),
-            description: "读取并本地检查一道练习：rustc 编译 + 测试运行的真实诊断。用户说\"检查一下/帮我看看写得对不对\"时调用；\
+            description: "读取并本地检查一道练习：rustc 编译 + 测试运行的诊断。用户说\"检查一下/帮我看看写得对不对\"时调用；\
                           name 缺省 = 本会话最新的练习，可写题目名/文件名子串模糊匹配".into(),
             parameters: json!({
                 "type": "object",
@@ -216,7 +216,7 @@ fn list_concepts(env: &AgentEnv) -> Result<ToolOutcome> {
     value["note"] = json!(
         "generate_exercise 的 topic 接受这些 id、其中文名、错误码（如 E0382）或自由文本。\
          error_codes 是错误码→概念的权威映射：向用户解释某个 E0xxx 的含义时，先在此表中\
-         找到对应概念，按概念名（结合 check_code 的真实诊断）讲解，不要凭记忆定义错误码"
+         找到对应概念，按概念名（结合 check_code 的诊断）讲解，不要凭记忆定义错误码"
     );
     Ok(ToolOutcome {
         note: Some(format!("概念图谱共 {count} 个节点")),
@@ -767,7 +767,7 @@ fn check_exercise(args: &Value, env: &AgentEnv) -> Result<ToolOutcome> {
             "tests": tests,
             "diagnostics": diagnostics,
             "others": others,
-            "note": "code 是练习当前内容（进度标记行已省略，超长时截断）；diagnostics/tests 是本地 rustc 真实结果。\
+            "note": "code 是练习当前内容（进度标记行已省略，超长时截断）；diagnostics/tests 是本地 rustc 的结果。\
                      完成状态以 picked.status 为准（练习索引权威），与文件内容无关。基于诊断解读，不要复述文件。\
                      picked 不是用户想查的题时，让用户从 others 里指定。编译与测试都通过时，引导用户去 /practice 交题。",
             "code": code,
@@ -837,7 +837,7 @@ fn hypothesis_lab(args: &Value, progress: &dyn Fn(&str)) -> Result<ToolOutcome> 
         "hypothesis": side_json(&report.hypothesis),
         "new_errors": fmt(&report.new_errors),
         "resolved_errors": fmt(&report.resolved_errors),
-        "note": "以上是两次真实 rustc 编译的 diff。基于它解释「为什么」——错误码变化意味着\
+        "note": "以上是两次 rustc 编译的 diff。基于它解释「为什么」——错误码变化意味着\
                  哪条所有权/借用规则被满足了或被触犯了；如果引入了新错误，说明假设的改法\
                  触发了另一条规则，正好可以讲清楚两者的关系。",
     });
@@ -913,7 +913,7 @@ fn check_code(args: &Value, progress: &dyn Fn(&str)) -> Result<ToolOutcome> {
         "diagnostic_count": all.len(),
         "error_codes": codes,
         "diagnostics": diagnostics,
-        "note": "以上是本地 rustc 的真实诊断；基于它们解释，不要臆测。若片段缺 fn main 也无 #[test]，E0601 是预期现象，可提示用户补 main 或加 #[test]。",
+        "note": "以上是本地 rustc 的诊断；基于它们解释，不要臆测。若片段缺 fn main 也无 #[test]，E0601 是预期现象，可提示用户补 main 或加 #[test]。",
     });
     Ok(ToolOutcome {
         note: Some(if out.status.success() {

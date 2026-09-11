@@ -294,7 +294,7 @@ pub fn first_error_matches(error_codes: &[String], report: &crate::verifier::Ver
         Ok(())
     } else {
         bail!(
-            "未完成模板的首错误码 {code} 不在声明的 error_codes {:?} 中（题目声称的坑与真实报错不一致）",
+            "未完成模板的首错误码 {code} 不在声明的 error_codes {:?} 中（题目声称的坑与实际报错不一致）",
             error_codes
         )
     }
